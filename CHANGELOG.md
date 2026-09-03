@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep the Node.js 20 compatibility CI lane green by skipping the Dovecot database integration fixture when the Node 22.5+ built-in SQLite test driver is unavailable, and update GitHub's official Actions to their Node 24-based v5 releases.
 - Generate a unique random local Dovecot password for unattended and quick installations instead of using the shared `123456` default; legacy installations keep their existing warning and upgrade behavior.
 - Improve HTML mail fidelity with embedded CID images, safe inline typography/table/spacing styles, a light message canvas, and privacy-gated remote images that load only on explicit user action.
 - Add provider-aware quick links on the account form for QQ/NetEase authorization codes, Google app passwords and two-step verification, and Google/Microsoft OAuth application setup.
