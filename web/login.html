@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>登录</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="center-box">
+  <div class="panel">
+    <h1 id="form-title" style="margin-bottom:4px;"><span id="login-title-text">登录</span></h1>
+    <div id="app-subtitle-text" style="color:var(--text-dim); font-size:13px; margin-bottom:18px;"></div>
+    <div class="form-group">
+      <label>用户名</label>
+      <input type="text" id="username" autocomplete="username">
+    </div>
+    <div class="form-group">
+      <label>密码</label>
+      <input type="password" id="password" autocomplete="current-password">
+    </div>
+    <div class="form-group" id="password-hint" style="display:none;">
+      <div class="hint">首次使用,请创建管理员账号(密码至少8位)</div>
+    </div>
+    <button class="btn" id="submit-btn" style="width:100%;">登录</button>
+    <div id="error-msg" style="color:var(--err);font-size:13px;margin-top:10px;"></div>
+  </div>
+</div>
+<script src="/js/api.js"></script>
+<script src="/js/branding.js"></script>
+<script src="/js/i18n.js"></script>
+<script>
+let isSetupMode = false;
+
+async function init() {
+  // 先套用branding(浏览器标题/登录标题/副标题),再判断是否是首次建管理员这个
+  // 业务逻辑——如果是首次建管理员,标题要覆盖成"创建管理员账号",这个优先级
+  // 高于branding里配置的login_title,所以要保证在applyBranding()之后执行。
+  await applyBranding();
+
+  const status = await Api.get('/api/auth/setup-status');
+  if (status.needsSetup) {
+    isSetupMode = true;
+    document.getElementById('login-title-text').textContent = '创建管理员账号';
+    document.getElementById('submit-btn').textContent = '创建账号';
+    document.getElementById('password-hint').style.display = 'block';
+  }
+}
+
+document.getElementById('submit-btn').addEventListener('click', async () => {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const errEl = document.getElementById('error-msg');
+  errEl.textContent = '';
+  if (!username || !password) {
+    errEl.textContent = '请输入用户名和密码';
+    return;
+  }
+  try {
+    if (isSetupMode) {
+      await Api.post('/api/auth/setup', { username, password });
+    } else {
+      await Api.post('/api/auth/login', { username, password });
+    }
+    window.location.href = '/index.html';
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+});
+
+document.getElementById('password').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('submit-btn').click();
+});
+
+init();
+</script>
+</body>
+</html>

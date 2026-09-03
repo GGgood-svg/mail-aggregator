@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>编辑账号 - Mail Aggregator</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="layout">
+  <div class="sidebar">
+    <div class="brand">📬 <span id="sidebar-brand-text">Mail Aggregator</span></div>
+    <nav id="sidebar-nav"></nav>
+    <div class="footer-bar" id="footer-text"></div>
+  </div>
+  <div class="main">
+    <div class="topbar">
+      <h1 id="page-title">添加账号</h1>
+      <a class="btn secondary" href="/accounts.html">返回列表</a>
+    </div>
+
+    <div class="panel" style="max-width:560px;">
+      <div class="form-group">
+        <label>名称</label>
+        <input type="text" id="name" placeholder="例如: 我的QQ邮箱">
+      </div>
+
+      <div class="form-group">
+        <label>提供商</label>
+        <select id="provider"></select>
+      </div>
+
+      <div id="oauth2-warning" style="display:none; background:rgba(74,144,226,0.1); border:1px solid var(--accent); border-radius:8px; padding:12px; margin-bottom:14px; font-size:13px;">
+        该 Provider 使用 OAuth2。保存后会跳转到服务商授权页面；请先在<a href="/settings.html#oauth-settings">设置页</a>配置对应的 Client ID、Client Secret 和回调地址。
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>IMAP 服务器</label>
+          <input type="text" id="host">
+        </div>
+        <div class="form-group" style="max-width:120px;">
+          <label>端口</label>
+          <input type="number" id="port">
+        </div>
+      </div>
+
+      <div class="form-group checkbox-row">
+        <input type="checkbox" id="ssl" checked>
+        <label for="ssl" style="margin:0;">使用 SSL/TLS</label>
+      </div>
+
+      <div class="form-group" id="secret-group">
+        <label>邮箱地址 / 用户名</label>
+        <input type="text" id="username" placeholder="you@qq.com">
+      </div>
+
+      <div id="oauth-account-status" style="display:none; margin-bottom:14px;">
+        <div class="hint" id="oauth-account-status-text"></div>
+        <button class="btn secondary small" id="oauth-authorize-btn" type="button" style="margin-top:8px;">重新进行 OAuth2 授权</button>
+      </div>
+
+      <div class="form-group">
+        <label id="secret-label">授权码 / 密码</label>
+        <input type="password" id="secret" autocomplete="new-password">
+        <div class="hint" id="provider-note"></div>
+        <div class="provider-help-links" id="provider-help-links" style="display:none;">
+          <span>快捷入口：</span>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>同步间隔</label>
+        <select id="sync_interval">
+          <option value="300">每 5 分钟</option>
+          <option value="600" selected>每 10 分钟</option>
+          <option value="900">每 15 分钟</option>
+          <option value="1800">每 30 分钟</option>
+          <option value="3600">每小时</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>目标文件夹策略</label>
+        <select id="destination_mode">
+          <option value="subfolder" selected>按账号文件夹隔离（推荐）</option>
+          <option value="flat">原样汇聚到同一邮箱</option>
+        </select>
+        <div class="hint">隔离模式会把该账号的完整文件夹层级放到一个独立顶层文件夹中；原样汇聚可能与其他账号的同名文件夹混合。</div>
+      </div>
+
+      <div class="form-group" id="destination-folder-group">
+        <label>隔离文件夹名称</label>
+        <input type="text" id="destination_folder" maxlength="64" placeholder="例如：我的QQ邮箱">
+        <div class="hint">修改已同步账号的策略会清除可重建的同步缓存，下次重新同步到新位置；旧位置中的邮件不会自动删除。</div>
+      </div>
+
+      <details style="margin:18px 0;">
+        <summary style="cursor:pointer; font-weight:600;">高级同步规则</summary>
+        <div style="margin-top:14px;">
+          <div class="form-group">
+            <label>只同步这些文件夹（可选）</label>
+            <textarea id="folder_includes" rows="4" placeholder="每行一个完整名称，例如：&#10;INBOX&#10;Sent"></textarea>
+            <div class="hint">留空表示同步全部文件夹。名称按源邮箱中显示的完整路径精确匹配。</div>
+          </div>
+
+          <div class="form-group">
+            <label>排除这些文件夹（可选）</label>
+            <textarea id="folder_excludes" rows="4" placeholder="每行一个完整名称，例如：&#10;Trash&#10;Junk"></textarea>
+            <div class="hint">排除规则优先；这里不会删除源邮箱中的任何内容。</div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>只同步最近多少天</label>
+              <input type="number" id="max_age_days" min="1" max="36500" placeholder="留空 = 不限制">
+            </div>
+            <div class="form-group">
+              <label>单封邮件上限（MB）</label>
+              <input type="number" id="max_size_mb" min="1" max="10240" placeholder="留空 = 不限制">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>目标端删除策略</label>
+            <select id="deletion_mode">
+              <option value="archive" selected>只增量归档，不自动删除（推荐）</option>
+              <option value="mirror_messages">镜像源邮箱的邮件删除状态</option>
+            </select>
+            <div class="hint">镜像模式会永久删除本地目标端中源端已不存在的邮件，但绝不会删除源邮箱邮件。仅账号隔离模式可用。</div>
+          </div>
+          <div id="deletion-warning" style="display:none; background:rgba(220,80,80,0.1); border:1px solid var(--err); border-radius:8px; padding:12px; font-size:13px; color:var(--err);">
+            ⚠ 镜像删除已开启。首次正式同步前建议先完成备份并查看同步日志；此模式不能同时设置邮件时间或大小限制。
+          </div>
+        </div>
+      </details>
+
+      <div class="form-group checkbox-row">
+        <input type="checkbox" id="enabled" checked>
+        <label for="enabled" style="margin:0;">启用该账号</label>
+      </div>
+
+      <div style="display:flex; gap:10px; margin-top:20px;">
+        <button class="btn" id="save-btn">保存</button>
+        <button class="btn secondary" id="test-btn">先测试连接</button>
+      </div>
+      <div id="msg" style="margin-top:12px; font-size:13px;"></div>
+    </div>
+  </div>
+</div>
+<script src="/js/api.js"></script>
+<script src="/js/branding.js"></script>
+<script src="/js/i18n.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const accountId = params.get('id');
+let providers = {};
+let destinationFolderEdited = false;
+let currentAccount = null;
+
+async function init() {
+  applyBranding();
+  await requireLogin();
+  renderNav('accounts');
+  providers = await Api.get('/api/accounts/providers');
+
+  const providerSelect = document.getElementById('provider');
+  providerSelect.innerHTML = Object.entries(providers)
+    .map(([key, p]) => {
+      const authSuffix = p.auth_type === 'oauth2' && !/oauth2/i.test(p.label) ? ' (OAuth2)' : '';
+      return `<option value="${key}">${escapeHtml(p.label)}${authSuffix}</option>`;
+    })
+    .join('');
+  providerSelect.addEventListener('change', applyProviderDefaults);
+  document.getElementById('destination_mode').addEventListener('change', updateDestinationMode);
+  document.getElementById('deletion_mode').addEventListener('change', updateDeletionWarning);
+  document.getElementById('destination_folder').addEventListener('input', () => {
+    destinationFolderEdited = true;
+  });
+  document.getElementById('name').addEventListener('input', suggestDestinationFolder);
+  applyProviderDefaults();
+
+  if (accountId) {
+    document.getElementById('page-title').textContent = '编辑账号';
+    document.getElementById('secret-label').textContent = '授权码 / 密码(留空则不修改)';
+    const account = await Api.get(`/api/accounts/${accountId}`);
+    currentAccount = account;
+    document.getElementById('name').value = account.name;
+    document.getElementById('provider').value = account.provider;
+    document.getElementById('host').value = account.host;
+    document.getElementById('port').value = account.port;
+    document.getElementById('ssl').checked = account.ssl;
+    document.getElementById('username').value = account.username;
+    document.getElementById('sync_interval').value = account.sync_interval;
+    document.getElementById('enabled').checked = account.enabled;
+    document.getElementById('destination_mode').value = account.destination_mode || 'flat';
+    document.getElementById('destination_folder').value = account.destination_folder || '';
+    document.getElementById('folder_includes').value = account.folder_includes || '';
+    document.getElementById('folder_excludes').value = account.folder_excludes || '';
+    document.getElementById('max_age_days').value = account.max_age_days || '';
+    document.getElementById('max_size_mb').value = account.max_size_mb || '';
+    document.getElementById('deletion_mode').value = account.deletion_mode || 'archive';
+    destinationFolderEdited = true;
+    updateDestinationMode();
+    updateProviderNote();
+    const oauthResult = params.get('oauth');
+    const msg = document.getElementById('msg');
+    if (oauthResult === 'success') {
+      msg.style.color = 'var(--ok)';
+      msg.textContent = 'OAuth2授权成功，可以测试连接或开始同步';
+    } else if (oauthResult === 'error') {
+      msg.style.color = 'var(--err)';
+      msg.textContent = `OAuth2授权失败：${params.get('message') || '未知错误'}`;
+    }
+  } else {
+    // 新建账号:用系统设置里的"默认同步间隔"预填,而不是写死的10分钟
+    try {
+      const settings = await Api.get('/api/settings');
+      if (settings.default_sync_interval) {
+        document.getElementById('sync_interval').value = settings.default_sync_interval;
+      }
+    } catch (e) {
+      // 拉取失败就保留HTML里写的默认选中项,不影响使用
+    }
+    updateDestinationMode();
+  }
+}
+
+function portableFolderName(value) {
+  return value.normalize('NFKC')
+    .replace(/[^\p{L}\p{N} _-]/gu, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/^[ _-]+|[ _-]+$/g, '')
+    .slice(0, 64);
+}
+
+function suggestDestinationFolder() {
+  if (destinationFolderEdited) return;
+  document.getElementById('destination_folder').value = portableFolderName(
+    document.getElementById('name').value
+  );
+}
+
+function updateDestinationMode() {
+  const isolated = document.getElementById('destination_mode').value === 'subfolder';
+  document.getElementById('destination-folder-group').style.display = isolated ? 'block' : 'none';
+  document.getElementById('destination_folder').disabled = !isolated;
+  const mirrorOption = document.querySelector('#deletion_mode option[value="mirror_messages"]');
+  mirrorOption.disabled = !isolated;
+  if (!isolated && document.getElementById('deletion_mode').value === 'mirror_messages') {
+    document.getElementById('deletion_mode').value = 'archive';
+  }
+  updateDeletionWarning();
+}
+
+function updateDeletionWarning() {
+  const mirror = document.getElementById('deletion_mode').value === 'mirror_messages';
+  document.getElementById('deletion-warning').style.display = mirror ? 'block' : 'none';
+}
+
+function applyProviderDefaults() {
+  const key = document.getElementById('provider').value;
+  const p = providers[key];
+  if (!p) return;
+  if (!accountId) {
+    document.getElementById('host').value = p.host;
+    document.getElementById('port').value = p.port;
+    document.getElementById('ssl').checked = p.ssl;
+  }
+  updateProviderNote();
+}
+
+function updateProviderNote() {
+  const key = document.getElementById('provider').value;
+  const p = providers[key];
+  document.getElementById('provider-note').textContent = p ? p.note : '';
+  renderProviderHelpLinks(p);
+
+  const isOauth2 = p && p.auth_type === 'oauth2';
+  document.getElementById('oauth2-warning').style.display = isOauth2 ? 'block' : 'none';
+  document.getElementById('secret-group').style.display = isOauth2 ? 'none' : 'block';
+  const authorized = !!(currentAccount
+    && currentAccount.provider === key
+    && currentAccount.oauthAuthorized);
+  document.getElementById('oauth-account-status').style.display = isOauth2 && accountId ? 'block' : 'none';
+  document.getElementById('oauth-account-status-text').textContent = authorized
+    ? 'OAuth2 已授权，访问令牌会在后台自动刷新。'
+    : 'OAuth2 尚未授权或账号身份已改变，请完成授权后再同步。';
+  document.getElementById('oauth-authorize-btn').textContent = authorized ? '重新进行 OAuth2 授权' : '开始 OAuth2 授权';
+  document.getElementById('save-btn').disabled = false;
+  document.getElementById('save-btn').textContent = isOauth2 && !accountId ? '保存并授权' : '保存';
+  document.getElementById('test-btn').disabled = isOauth2 && !authorized;
+}
+
+function renderProviderHelpLinks(provider) {
+  const container = document.getElementById('provider-help-links');
+  container.replaceChildren();
+  const links = provider && Array.isArray(provider.help_links) ? provider.help_links : [];
+  const safeLinks = links.flatMap((item) => {
+    try {
+      const url = new URL(String(item.url || ''));
+      return url.protocol === 'https:' && item.label ? [{ label: String(item.label), url: url.href }] : [];
+    } catch (_) { return []; }
+  });
+  container.style.display = safeLinks.length ? 'flex' : 'none';
+  if (!safeLinks.length) return;
+  const prefix = document.createElement('span');
+  prefix.textContent = '快捷入口：';
+  container.appendChild(prefix);
+  for (const item of safeLinks) {
+    const link = document.createElement('a');
+    link.href = item.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = item.label;
+    container.appendChild(link);
+  }
+}
+
+function collectPayload() {
+  return {
+    name: document.getElementById('name').value.trim(),
+    provider: document.getElementById('provider').value,
+    host: document.getElementById('host').value.trim(),
+    port: parseInt(document.getElementById('port').value, 10),
+    ssl: document.getElementById('ssl').checked,
+    username: document.getElementById('username').value.trim(),
+    secret: document.getElementById('secret').value,
+    sync_interval: parseInt(document.getElementById('sync_interval').value, 10),
+    enabled: document.getElementById('enabled').checked,
+    destination_mode: document.getElementById('destination_mode').value,
+    destination_folder: document.getElementById('destination_folder').value.trim(),
+    folder_includes: document.getElementById('folder_includes').value,
+    folder_excludes: document.getElementById('folder_excludes').value,
+    max_age_days: document.getElementById('max_age_days').value,
+    max_size_mb: document.getElementById('max_size_mb').value,
+    deletion_mode: document.getElementById('deletion_mode').value,
+  };
+}
+
+document.getElementById('save-btn').addEventListener('click', async () => {
+  const msg = document.getElementById('msg');
+  msg.textContent = '';
+  try {
+    const payload = collectPayload();
+    if (payload.deletion_mode === 'mirror_messages' && !confirm(
+      '确认启用镜像删除？本地目标端中源邮箱已不存在的邮件会被永久删除。建议先完成备份。'
+    )) return;
+    const saved = accountId
+      ? await Api.put(`/api/accounts/${accountId}`, payload)
+      : await Api.post('/api/accounts', payload);
+    if (saved.auth_type === 'oauth2' && !saved.oauthAuthorized) {
+      try {
+        const flow = await Api.post(`/api/oauth/accounts/${saved.id}/start`);
+        location.href = flow.authorizationUrl;
+        return;
+      } catch (oauthError) {
+        location.href = `/account-edit.html?id=${saved.id}&oauth=error&message=${encodeURIComponent(oauthError.message)}`;
+        return;
+      }
+    }
+    toast('已保存');
+    location.href = '/accounts.html';
+  } catch (e) {
+    msg.style.color = 'var(--err)';
+    msg.textContent = e.message;
+  }
+});
+
+document.getElementById('oauth-authorize-btn').addEventListener('click', async () => {
+  if (!accountId) return;
+  const msg = document.getElementById('msg');
+  try {
+    const flow = await Api.post(`/api/oauth/accounts/${accountId}/start`);
+    location.href = flow.authorizationUrl;
+  } catch (error) {
+    msg.style.color = 'var(--err)';
+    msg.textContent = error.message;
+  }
+});
+
+document.getElementById('test-btn').addEventListener('click', async () => {
+  const msg = document.getElementById('msg');
+  msg.textContent = '';
+  if (!accountId) {
+    msg.style.color = 'var(--warn)';
+    msg.textContent = '请先保存账号,再测试连接(需要凭证已写入服务器)';
+    return;
+  }
+  msg.style.color = 'var(--text-dim)';
+  msg.textContent = '测试中...(60秒超时，随后最多等待10秒结束进程)';
+  try {
+    const result = await Api.post(`/api/accounts/${accountId}/test`);
+    if (result.ok) {
+      msg.style.color = 'var(--ok)';
+      msg.textContent = `✅ 连接成功,找到 ${result.folders ?? '?'} 个文件夹`;
+    } else {
+      msg.style.color = 'var(--err)';
+      msg.textContent = `❌ ${result.message}`;
+    }
+  } catch (e) {
+    msg.style.color = 'var(--err)';
+    msg.textContent = e.message;
+  }
+});
+
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+{
+  "name": "mail-aggregator",
+  "version": "0.1.6",
+  "private": true,
+  "description": "Self-hosted IMAP aggregation and read-only Web mail panel powered by imapsync and Dovecot",
+  "main": "server/app.js",
+  "scripts": {
+    "start": "node server/app.js",
+    "init-db": "node server/db.js --init",
+    "test": "node --test tests/*.test.js"
+  },
+  "license": "MIT",
+  "keywords": [
+    "email",
+    "imap",
+    "imapsync",
+    "dovecot",
+    "self-hosted"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GGgood-svg/mail-aggregator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/GGgood-svg/mail-aggregator/issues"
+  },
+  "homepage": "https://github.com/GGgood-svg/mail-aggregator#readme",
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.3.0",
+    "cookie-parser": "^1.4.6",
+    "express": "^4.21.0",
+    "express-session": "^1.18.0",
+    "imapflow": "^1.7.8",
+    "mailparser": "^3.9.20",
+    "sanitize-html": "^2.17.7"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
+  }
+}

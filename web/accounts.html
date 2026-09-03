@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>邮箱账号 - Mail Aggregator</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="layout">
+  <div class="sidebar">
+    <div class="brand">📬 <span id="sidebar-brand-text">Mail Aggregator</span></div>
+    <nav id="sidebar-nav"></nav>
+    <div class="footer-bar" id="footer-text"></div>
+  </div>
+  <div class="main">
+    <div class="topbar">
+      <h1>邮箱账号</h1>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn secondary" id="sync-all-btn">同步所有已启用账号</button>
+        <button class="btn secondary" id="cancel-all-btn">取消全部排队任务</button>
+        <a class="btn" href="/account-edit.html">+ 添加账号</a>
+      </div>
+    </div>
+
+    <div class="panel">
+      <table>
+        <thead>
+          <tr>
+            <th>名称</th><th>邮箱</th><th>落盘方式</th><th>状态</th><th>邮件总数</th>
+            <th>最后同步</th><th>启用</th><th style="min-width:320px;">操作</th>
+          </tr>
+        </thead>
+        <tbody id="accounts-body"></tbody>
+      </table>
+      <div class="empty" id="empty" style="display:none;">还没有添加任何邮箱账号</div>
+    </div>
+  </div>
+</div>
+<script src="/js/api.js"></script>
+<script src="/js/branding.js"></script>
+<script src="/js/i18n.js"></script>
+<script>
+function statusBadge(a) {
+  if (a.auth_type === 'oauth2' && !a.oauthAuthorized) return `<span class="badge failed">待OAuth授权</span>`;
+  if (a.syncing) return `<span class="badge running">同步中</span>`;
+  if (a.queued) return `<span class="badge queued">排队中</span>`;
+  return `<span class="badge ${a.last_sync_status || 'idle'}">${statusLabel(a.last_sync_status)}</span>`;
+}
+
+async function load() {
+  applyBranding();
+  await requireLogin();
+  renderNav('accounts');
+  try {
+    const accounts = await Api.get('/api/accounts');
+    render(accounts);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function render(accounts) {
+  const body = document.getElementById('accounts-body');
+  const empty = document.getElementById('empty');
+  if (!accounts.length) {
+    body.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  body.innerHTML = accounts
+    .map((a) => {
+      const busy = a.syncing || a.queued;
+      return `<tr data-id="${a.id}">
+        <td data-i18n-skip>${escapeHtml(a.name)}</td>
+        <td data-i18n-skip>${escapeHtml(a.username)}</td>
+        <td>${a.destination_mode === 'subfolder' ? `隔离：<span data-i18n-skip>${escapeHtml(a.destination_folder)}</span>` : '原样汇聚'}</td>
+        <td>${statusBadge(a)}</td>
+        <td>${a.display.totalMessages}</td>
+        <td>${fmtTime(a.last_sync_at)}</td>
+        <td>${a.enabled ? '是' : '否'}</td>
+        <td>
+          <button class="btn small secondary" data-action="sync" ${busy || !a.hasSecret ? 'disabled' : ''}>立即同步</button>
+          <button class="btn small secondary" data-action="test" ${a.syncing || !a.hasSecret ? 'disabled' : ''}>测试连接</button>
+          <a class="btn small secondary" href="/account-edit.html?id=${a.id}">编辑</a>
+          <a class="btn small secondary" href="/logs.html?account=${a.id}">日志</a>
+          <button class="btn small danger" data-action="delete" ${busy ? 'disabled' : ''}>删除</button>
+        </td>
+      </tr>`;
+    })
+    .join('');
+
+  body.querySelectorAll('button[data-action]').forEach((btn) => {
+    btn.addEventListener('click', () => handleAction(btn));
+  });
+}
+
+async function handleAction(btn) {
+  const row = btn.closest('tr');
+  const id = row.dataset.id;
+  const action = btn.dataset.action;
+
+  if (action === 'sync') {
+    try {
+      await Api.post(`/api/accounts/${id}/sync`);
+      toast('已加入同步队列');
+      load();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  } else if (action === 'test') {
+    btn.disabled = true;
+    btn.textContent = '测试中...(60秒超时)';
+    try {
+      const result = await Api.post(`/api/accounts/${id}/test`);
+      if (result.ok) {
+        toast(`✅ 连接成功,找到 ${result.folders ?? '?'} 个文件夹`);
+      } else {
+        toast(`❌ ${result.message}`, 'error');
+      }
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '测试连接';
+    }
+  } else if (action === 'delete') {
+    const proceed = confirm('删除该账号配置?(仅删除账号配置和cache,不会删除本地已同步的邮件)');
+    if (!proceed) return;
+    try {
+      await Api.del(`/api/accounts/${id}?deleteCache=true`);
+      toast('已删除');
+      load();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+}
+
+document.getElementById('sync-all-btn').addEventListener('click', async () => {
+  if (!confirm('把所有已启用账号加入同步队列？已有任务的账号会自动跳过。')) return;
+  try {
+    const result = await Api.post('/api/sync/all');
+    toast(`已加入 ${result.queued.length} 个任务，跳过 ${result.skipped.length} 个账号`);
+    load();
+  } catch (e) { toast(e.message, 'error'); }
+});
+
+document.getElementById('cancel-all-btn').addEventListener('click', async () => {
+  if (!confirm('取消所有尚未开始的排队任务？正在同步的任务不会被终止。')) return;
+  try {
+    const result = await Api.post('/api/jobs/cancel-queued');
+    toast(`已取消 ${result.cancelled} 个排队任务`);
+    load();
+  } catch (e) { toast(e.message, 'error'); }
+});
+
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>

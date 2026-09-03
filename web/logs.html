@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>同步日志 - Mail Aggregator</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="layout">
+  <div class="sidebar">
+    <div class="brand">📬 <span id="sidebar-brand-text">Mail Aggregator</span></div>
+    <nav id="sidebar-nav"></nav>
+    <div class="footer-bar" id="footer-text"></div>
+  </div>
+  <div class="main">
+    <div class="topbar">
+      <h1>同步日志</h1>
+      <button class="btn secondary" id="cleanup-btn">清理旧日志(每账号保留最近30条)</button>
+    </div>
+
+    <div class="panel">
+      <div class="form-row" style="align-items:flex-end;margin-bottom:14px;">
+        <div class="form-group" style="margin-bottom:0;">
+          <label>账号</label>
+          <select id="account-filter"><option value="">全部账号</option></select>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label>状态</label>
+          <select id="status-filter">
+            <option value="">全部状态</option>
+            <option value="queued">排队中</option><option value="running">同步中</option>
+            <option value="success">成功</option><option value="failed">失败</option>
+            <option value="timed_out">已超时</option><option value="interrupted">已中断</option>
+            <option value="cancelled">已取消</option>
+          </select>
+        </div>
+        <div class="form-group" style="max-width:110px;margin-bottom:0;">
+          <label>每页</label>
+          <select id="page-size"><option value="25">25 条</option><option value="50">50 条</option><option value="100">100 条</option></select>
+        </div>
+        <button class="btn" id="filter-btn" type="button">筛选</button>
+        <button class="btn secondary" id="clear-filter-btn" type="button">清除</button>
+      </div>
+      <table>
+        <thead>
+          <tr><th>账号</th><th>开始时间</th><th>状态</th><th>耗时</th><th>复制</th><th>跳过</th><th>本地邮件数</th><th>错误</th><th></th></tr>
+        </thead>
+        <tbody id="jobs-body"></tbody>
+      </table>
+      <div class="empty" id="empty" style="display:none;">暂无同步记录</div>
+      <div id="pagination" style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:14px;"></div>
+    </div>
+
+    <div class="panel" id="log-panel" style="display:none;">
+      <div class="topbar">
+        <h2 style="margin:0;">日志详情</h2>
+        <button class="btn small secondary" id="close-log">关闭</button>
+      </div>
+      <pre class="log" id="log-content"></pre>
+    </div>
+  </div>
+</div>
+<script src="/js/api.js"></script>
+<script src="/js/branding.js"></script>
+<script src="/js/i18n.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+let currentPage = Math.max(1, Number(params.get('page')) || 1);
+let selectedJobId = null;
+let logPollTimer = null;
+
+async function load() {
+  applyBranding();
+  await requireLogin();
+  renderNav('logs');
+  try {
+    const accounts = await Api.get('/api/accounts');
+    const accountSelect = document.getElementById('account-filter');
+    accountSelect.innerHTML = '<option value="">全部账号</option>' + accounts
+      .map((a) => `<option value="${a.id}" data-i18n-skip>${escapeHtml(a.name)}</option>`).join('');
+    accountSelect.value = params.get('account') || '';
+    document.getElementById('status-filter').value = params.get('status') || '';
+    const initialPageSize = params.get('pageSize');
+    document.getElementById('page-size').value = ['25', '50', '100'].includes(initialPageSize) ? initialPageSize : '25';
+    await loadJobs();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function loadJobs() {
+  const query = new URLSearchParams({
+    page: String(currentPage),
+    pageSize: document.getElementById('page-size').value,
+  });
+  const account = document.getElementById('account-filter').value;
+  const status = document.getElementById('status-filter').value;
+  if (account) query.set('account', account);
+  if (status) query.set('status', status);
+  const result = await Api.get(`/api/jobs?${query}`);
+  currentPage = result.pagination.page;
+  render(result.items);
+  renderPagination(result.pagination);
+  query.set('page', String(currentPage));
+  history.replaceState(null, '', `${location.pathname}?${query}`);
+}
+
+function renderPagination(pagination) {
+  const el = document.getElementById('pagination');
+  el.innerHTML = `<span class="hint">共 ${pagination.total} 条，第 ${pagination.page}/${pagination.totalPages} 页</span>
+    <button class="btn small secondary" id="prev-page" ${pagination.page <= 1 ? 'disabled' : ''}>上一页</button>
+    <button class="btn small secondary" id="next-page" ${pagination.page >= pagination.totalPages ? 'disabled' : ''}>下一页</button>`;
+  document.getElementById('prev-page').addEventListener('click', () => changePage(currentPage - 1));
+  document.getElementById('next-page').addEventListener('click', () => changePage(currentPage + 1));
+}
+
+function changePage(page) {
+  currentPage = page;
+  loadJobs().catch((e) => toast(e.message, 'error'));
+}
+
+function fmtVal(v) {
+  return v === null || v === undefined ? 'N/A' : v;
+}
+
+function render(jobs) {
+  const body = document.getElementById('jobs-body');
+  const empty = document.getElementById('empty');
+  if (!jobs.length) {
+    body.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  body.innerHTML = jobs
+    .map((j) => {
+      const cancelBtn = ['queued', 'running'].includes(j.status)
+        ? `<button class="btn small secondary" data-cancel="${j.id}" data-account="${j.account_id}" data-status="${j.status}">${j.status === 'running' ? '停止' : '取消'}</button>`
+        : '';
+      const retryBtn = ['failed', 'timed_out', 'interrupted', 'cancelled'].includes(j.status)
+        ? `<button class="btn small secondary" data-retry="${j.id}">重试</button>`
+        : '';
+      return `<tr>
+        <td data-i18n-skip>${escapeHtml(j.account_name)}</td>
+        <td>${fmtTime(j.started_at)}</td>
+        <td><span class="badge ${j.status}">${statusLabel(j.status)}</span></td>
+        <td>${j.duration_ms != null ? (j.duration_ms / 1000).toFixed(1) + 's' : '-'}</td>
+        <td>${fmtVal(j.messages_transferred)}</td>
+        <td>${fmtVal(j.messages_skipped)}</td>
+        <td>${fmtVal(j.host2_messages)}</td>
+        <td>${fmtVal(j.errors)}</td>
+        <td>
+          <button class="btn small secondary" data-job="${j.id}">查看日志</button>
+          ${cancelBtn}
+          ${retryBtn}
+        </td>
+      </tr>`;
+    })
+    .join('');
+
+  body.querySelectorAll('button[data-job]').forEach((btn) => {
+    btn.addEventListener('click', () => viewLog(btn.dataset.job, { scroll: true }));
+  });
+  body.querySelectorAll('button[data-cancel]').forEach((btn) => {
+    btn.addEventListener('click', () => cancelJob(btn.dataset.account, btn.dataset.cancel, btn.dataset.status));
+  });
+  body.querySelectorAll('button[data-retry]').forEach((btn) => {
+    btn.addEventListener('click', () => retryJob(btn.dataset.retry));
+  });
+}
+
+async function retryJob(jobId) {
+  try {
+    await Api.post(`/api/jobs/${jobId}/retry`);
+    toast('已重新加入同步队列');
+    await loadJobs();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function stopLogPolling() {
+  if (logPollTimer) clearTimeout(logPollTimer);
+  logPollTimer = null;
+}
+
+function scheduleLogRefresh(jobId) {
+  stopLogPolling();
+  if (selectedJobId !== String(jobId)) return;
+  logPollTimer = setTimeout(
+    () => viewLog(jobId, { scroll: false, silent: true }),
+    document.hidden ? 10000 : 2000
+  );
+}
+
+async function viewLog(jobId, { scroll = false, silent = false } = {}) {
+  stopLogPolling();
+  selectedJobId = String(jobId);
+  try {
+    const result = await fetch(`/api/jobs/${jobId}/log`, { credentials: 'same-origin' }).then(async (r) => {
+      if (r.status === 401) {
+        window.location.href = '/login.html';
+        throw new Error('登录已过期');
+      }
+      if (!r.ok) {
+        const error = new Error('日志不存在或已被清理');
+        error.jobStatus = r.headers.get('X-Job-Status') || '';
+        throw error;
+      }
+      return {
+        text: await r.text(),
+        status: r.headers.get('X-Job-Status') || '',
+        truncated: r.headers.get('X-Log-Truncated') === 'true',
+        totalBytes: Number(r.headers.get('X-Log-Total-Bytes') || 0),
+      };
+    });
+    if (selectedJobId !== String(jobId)) return;
+    // 用textContent而不是innerHTML,原始日志内容不做任何HTML解析
+    const notices = [];
+    if (result.status === 'running') notices.push('[任务运行中，日志每 2 秒自动刷新；页面转入后台后每 10 秒刷新]');
+    if (result.truncated) notices.push(`[日志较大，仅显示最后 1 MiB；完整文件大小 ${(result.totalBytes / 1024 / 1024).toFixed(2)} MiB]`);
+    const notice = notices.length ? `${notices.join('\n')}\n\n` : '';
+    const logContent = document.getElementById('log-content');
+    const wasNearBottom = logContent.scrollHeight - logContent.scrollTop - logContent.clientHeight < 60;
+    logContent.textContent = notice + (result.text || '(空日志)');
+    document.getElementById('log-panel').style.display = 'block';
+    if (scroll) document.getElementById('log-panel').scrollIntoView({ behavior: 'smooth' });
+    if (scroll || wasNearBottom) logContent.scrollTop = logContent.scrollHeight;
+    if (result.status === 'running') {
+      scheduleLogRefresh(jobId);
+    } else {
+      loadJobs().catch((e) => toast(e.message, 'error'));
+    }
+  } catch (e) {
+    if (selectedJobId !== String(jobId)) return;
+    if (e.jobStatus === 'running') {
+      const logContent = document.getElementById('log-content');
+      logContent.textContent = '[任务运行中，正在等待日志输出…]';
+      document.getElementById('log-panel').style.display = 'block';
+      if (scroll) document.getElementById('log-panel').scrollIntoView({ behavior: 'smooth' });
+      scheduleLogRefresh(jobId);
+    } else {
+      if (!silent) toast(e.message, 'error');
+      loadJobs().catch((error) => toast(error.message, 'error'));
+    }
+  }
+}
+
+async function cancelJob(accountId, jobId, status) {
+  if (status === 'running' && !window.confirm('确定停止正在运行的同步吗？imapsync 会先尝试正常退出。')) return;
+  try {
+    const result = await Api.post(`/api/accounts/${accountId}/jobs/${jobId}/cancel`);
+    toast(result.status === 'cancelling' ? '已请求停止同步' : '已取消排队任务');
+    setTimeout(() => loadJobs().catch((e) => toast(e.message, 'error')), result.status === 'cancelling' ? 800 : 0);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+document.getElementById('close-log').addEventListener('click', () => {
+  selectedJobId = null;
+  stopLogPolling();
+  document.getElementById('log-panel').style.display = 'none';
+});
+
+document.getElementById('filter-btn').addEventListener('click', () => {
+  currentPage = 1;
+  loadJobs().catch((e) => toast(e.message, 'error'));
+});
+
+document.getElementById('clear-filter-btn').addEventListener('click', () => {
+  document.getElementById('account-filter').value = '';
+  document.getElementById('status-filter').value = '';
+  document.getElementById('page-size').value = '25';
+  currentPage = 1;
+  loadJobs().catch((e) => toast(e.message, 'error'));
+});
+
+document.getElementById('cleanup-btn').addEventListener('click', async () => {
+  if (!window.confirm('确定清理每个账号最近 30 条以外的已结束任务及其日志文件吗？')) return;
+  try {
+    const result = await Api.del('/api/jobs/old?keep=30');
+    toast(`已清理 ${result.deletedJobs} 条任务和 ${result.deletedFiles} 个日志文件`);
+    await loadJobs();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+});
+
+load();
+</script>
+</body>
+</html>

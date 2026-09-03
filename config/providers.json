@@ -1,0 +1,67 @@
+{
+  "qq": {
+    "label": "QQ邮箱",
+    "host": "imap.qq.com",
+    "port": 993,
+    "ssl": true,
+    "auth_type": "password",
+    "note": "使用邮箱设置里生成的授权码,不是QQ登录密码",
+    "help_links": [
+      { "label": "打开 QQ 邮箱设置", "url": "https://mail.qq.com/" },
+      { "label": "查看 QQ 授权码说明", "url": "https://hiflow.tencent.com/document/applications/qq-mail/" }
+    ]
+  },
+  "163": {
+    "label": "163邮箱",
+    "host": "imap.163.com",
+    "port": 993,
+    "ssl": true,
+    "auth_type": "password",
+    "note": "使用邮箱设置里生成的客户端授权密码",
+    "help_links": [
+      { "label": "打开网易邮箱设置", "url": "https://email.163.com/" }
+    ]
+  },
+  "gmail_app_password": {
+    "label": "Gmail（应用专用密码）",
+    "host": "imap.gmail.com",
+    "port": 993,
+    "ssl": true,
+    "auth_type": "password",
+    "note": "填写 Google 应用专用密码（16位），不是 Google 登录密码；需先开启两步验证",
+    "help_links": [
+      { "label": "生成 Google 应用专用密码", "url": "https://myaccount.google.com/apppasswords" },
+      { "label": "开启 Google 两步验证", "url": "https://myaccount.google.com/signinoptions/two-step-verification" }
+    ]
+  },
+  "gmail": {
+    "label": "Gmail（OAuth2）",
+    "host": "imap.gmail.com",
+    "port": 993,
+    "ssl": true,
+    "auth_type": "oauth2",
+    "note": "使用OAuth2授权，支持离线自动刷新访问令牌；需要已配置 HTTPS 回调地址",
+    "help_links": [
+      { "label": "打开 Google Cloud OAuth 凭据", "url": "https://console.cloud.google.com/apis/credentials" }
+    ]
+  },
+  "outlook": {
+    "label": "Outlook / Microsoft 365",
+    "host": "outlook.office365.com",
+    "port": 993,
+    "ssl": true,
+    "auth_type": "oauth2",
+    "note": "使用Microsoft OAuth2授权，支持个人Outlook和Microsoft 365账号",
+    "help_links": [
+      { "label": "打开 Microsoft Entra 应用注册", "url": "https://entra.microsoft.com/" }
+    ]
+  },
+  "custom": {
+    "label": "自定义 IMAP",
+    "host": "",
+    "port": 993,
+    "ssl": true,
+    "auth_type": "password",
+    "note": "手动填写服务器信息"
+  }
+}

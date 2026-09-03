@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Dashboard - Mail Aggregator</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="layout">
+  <div class="sidebar">
+    <div class="brand">📬 <span id="sidebar-brand-text">Mail Aggregator</span></div>
+    <nav id="sidebar-nav"></nav>
+    <div class="footer-bar" id="footer-text"></div>
+  </div>
+  <div class="main">
+    <div class="topbar">
+      <h1>Dashboard</h1>
+      <button class="btn secondary" id="refresh-btn">重新检查</button>
+    </div>
+
+    <h2>系统状态</h2>
+    <div class="grid" id="system-grid"></div>
+
+    <div class="panel">
+      <h2>自动同步调度器</h2>
+      <div id="scheduler-alert" class="hint" style="display:none;margin-bottom:12px;"></div>
+      <div class="grid" id="scheduler-grid" style="margin-bottom:0;"></div>
+    </div>
+
+    <div class="panel">
+      <h2>系统健康检查</h2>
+      <div id="health-summary" class="hint" style="margin-bottom:12px;">正在检查…</div>
+      <div class="grid" id="health-grid"></div>
+    </div>
+
+    <h2>Dovecot</h2>
+    <div id="dovecot-warnings"></div>
+    <div class="grid" id="dovecot-grid"></div>
+
+    <h2>账号统计</h2>
+    <div class="grid" id="account-stats-grid"></div>
+
+    <div class="panel">
+      <h2>邮件账号</h2>
+      <table>
+        <thead>
+          <tr><th>名称</th><th>状态</th><th>邮件总数</th><th>文件夹</th><th>最近一次复制</th><th>最后同步</th></tr>
+        </thead>
+        <tbody id="accounts-body"></tbody>
+      </table>
+      <div class="empty" id="accounts-empty" style="display:none;">还没有添加任何邮箱账号 · <a href="/accounts.html">去添加</a></div>
+    </div>
+  </div>
+</div>
+<script src="/js/api.js"></script>
+<script src="/js/branding.js"></script>
+<script src="/js/i18n.js"></script>
+<script>
+function statusBadge(status) {
+  const cls = status || 'idle';
+  return `<span class="badge ${cls}">${statusLabel(status)}</span>`;
+}
+
+async function load() {
+  applyBranding();
+  await requireLogin();
+  renderNav('dashboard');
+  try {
+    const data = await Api.get('/api/dashboard');
+    const health = await Api.get('/api/health');
+    renderSystem(data.system);
+    renderScheduler(data.system.scheduler);
+    renderDovecot(data.dovecotStatus);
+    renderAccountStats(data.accountStats);
+    renderAccounts(data.recentAccounts);
+    renderHealth(health);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function renderHealth(report) {
+  const summary = document.getElementById('health-summary');
+  summary.className = `hint ${report.ok ? 'ok' : 'err'}`;
+  summary.textContent = report.ok
+    ? `健康：${report.summary.total} 项检查通过`
+    : `发现 ${report.summary.failed} 项问题，其中 ${report.summary.critical} 项需要处理`;
+  document.getElementById('health-grid').innerHTML = report.checks.map((item) => `
+    <div class="card"><div class="label">${escapeHtml(item.label)}</div>
+      <div class="value ${item.ok ? 'ok' : item.severity === 'critical' ? 'err' : ''}">${item.ok ? '正常' : '需处理'}</div>
+      ${item.detail ? `<div class="hint">${escapeHtml(item.detail)}</div>` : ''}
+      ${item.ok ? '' : `<div class="hint" style="margin-top:6px">${escapeHtml(item.fix)}</div>`}
+    </div>`).join('');
+}
+
+function renderSystem(sys) {
+  const cards = [
+    { label: 'Dovecot', value: sys.dovecot.ok ? '正常' : '异常', cls: sys.dovecot.ok ? 'ok' : 'err' },
+    { label: 'imapsync', value: sys.imapsync.available ? `v${escapeHtml(sys.imapsync.version || '?')}` : '未找到', cls: sys.imapsync.available ? 'ok' : 'err' },
+    { label: '调度器', value: sys.scheduler.healthLabel, cls: sys.scheduler.healthy ? 'ok' : 'err' },
+    { label: '磁盘可用', value: sys.disk ? `${sys.disk.availMb} MB` : '未知', cls: '' },
+    { label: '内存', value: `${sys.memory.usedMb}/${sys.memory.totalMb} MB`, cls: '' },
+    { label: 'CPU 负载', value: `${sys.cpu.loadavg1} (${sys.cpu.cores}核)`, cls: '' },
+  ];
+  document.getElementById('system-grid').innerHTML = cards
+    .map(
+      (c) => `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div></div>`
+    )
+    .join('');
+}
+
+function renderScheduler(scheduler) {
+  const result = scheduler.lastResult || {};
+  const alert = document.getElementById('scheduler-alert');
+  if (scheduler.healthCode === 'error') {
+    alert.style.display = 'block';
+    alert.style.color = 'var(--err)';
+    alert.textContent = `最近调度出现异常：${scheduler.lastError}`;
+  } else if (scheduler.healthCode === 'stale') {
+    alert.style.display = 'block';
+    alert.style.color = 'var(--warn)';
+    alert.textContent = '调度器长时间没有运行记录，可能已经停滞，请检查服务日志。';
+  } else if (scheduler.healthCode === 'stopped') {
+    alert.style.display = 'block';
+    alert.style.color = 'var(--err)';
+    alert.textContent = '调度器当前已停止，自动同步不会运行。';
+  } else {
+    alert.style.display = 'none';
+    alert.textContent = '';
+  }
+
+  const summary = scheduler.lastResult
+    ? `检查 ${result.checked || 0} · 触发 ${result.triggered || 0} · 活跃 ${result.active || 0} · 未到期 ${result.notDue || 0} · 禁用 ${result.disabled || 0} · 异常 ${result.errors || 0}`
+    : '暂无运行记录';
+  const cards = [
+    { label: '健康状态', value: scheduler.healthLabel, cls: scheduler.healthy ? 'ok' : 'err' },
+    { label: '最近检查', value: fmtTime(scheduler.lastTickAt), cls: '' },
+    { label: '最近无异常检查', value: fmtTime(scheduler.lastSuccessAt), cls: scheduler.lastSuccessAt ? 'ok' : '' },
+    { label: '本轮结果', value: summary, cls: '', compact: true },
+  ];
+  document.getElementById('scheduler-grid').innerHTML = cards.map((c) =>
+    `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}" style="${c.compact ? 'font-size:14px;line-height:1.5' : ''}">${escapeHtml(c.value)}</div></div>`
+  ).join('');
+}
+
+function renderDovecot(status) {
+  const warningsEl = document.getElementById('dovecot-warnings');
+  const gridEl = document.getElementById('dovecot-grid');
+
+  if (!status || status.error) {
+    gridEl.innerHTML = `<div class="card"><div class="label">状态</div><div class="value err">获取失败</div></div>`;
+    warningsEl.innerHTML = '';
+    return;
+  }
+
+  const warnings = [];
+  if (status.usingDefaultPassword) {
+    warnings.push(
+      `<div class="hint" style="background:rgba(245,166,35,0.1);border:1px solid var(--warn);border-radius:8px;padding:10px 14px;margin-bottom:10px;color:var(--warn);">⚠️ 当前仍在使用默认密码 123456，请尽快去<a href="/settings.html#dovecot">设置页</a>修改</div>`
+    );
+  }
+  if (status.driftStatus === 'drifted') {
+    warnings.push(
+      `<div class="hint" style="background:rgba(240,85,90,0.1);border:1px solid var(--err);border-radius:8px;padding:10px 14px;margin-bottom:10px;color:var(--err);">⚠️ Dovecot 密码状态:可能与 Mail Aggregator 保存的密码不同步(比如被人绕过Web直接改过 /etc/dovecot/users)。请去<a href="/settings.html#dovecot">设置页</a>重新设置一次密码。</div>`
+    );
+  }
+  warningsEl.innerHTML = warnings.join('');
+
+  const authLabel = status.authTestOk === null ? '未测试' : status.authTestOk ? '成功' : '失败';
+  const authCls = status.authTestOk === null ? '' : status.authTestOk ? 'ok' : 'err';
+
+  const cards = [
+    { label: 'Dovecot 目标用户', value: escapeHtml(status.targetUser), cls: '' },
+    { label: '本地 IMAP', value: status.reachable ? '正常' : '异常', cls: status.reachable ? 'ok' : 'err' },
+    { label: '用户存在', value: status.userExists ? '是' : '否', cls: status.userExists ? 'ok' : 'err' },
+    { label: 'Maildir', value: status.maildirExists ? '存在' : '不存在', cls: status.maildirExists ? 'ok' : 'err' },
+    { label: '密码认证测试', value: authLabel, cls: authCls },
+  ];
+  gridEl.innerHTML = cards
+    .map(
+      (c) => `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div></div>`
+    )
+    .join('');
+}
+
+function renderAccountStats(stats) {
+  const cards = [
+    { label: '账号总数', value: stats.total },
+    { label: '正常', value: stats.ok, cls: 'ok' },
+    { label: '异常', value: stats.failed, cls: stats.failed ? 'err' : '' },
+    { label: '正在同步', value: stats.running },
+    { label: '排队中', value: stats.queued },
+  ];
+  document.getElementById('account-stats-grid').innerHTML = cards
+    .map(
+      (c) => `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls || ''}">${c.value}</div></div>`
+    )
+    .join('');
+}
+
+function renderAccounts(accounts) {
+  const body = document.getElementById('accounts-body');
+  const empty = document.getElementById('accounts-empty');
+  if (!accounts.length) {
+    body.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  body.innerHTML = accounts
+    .map((a) => {
+      const totalMsg = a.last_host2_messages ?? 'N/A';
+      const totalFolders = a.last_host2_folders ?? 'N/A';
+      const transferred = a.last_transferred ?? 'N/A';
+      return `<tr>
+        <td data-i18n-skip>${escapeHtml(a.name)}</td>
+        <td>${statusBadge(a.last_sync_status)}</td>
+        <td>${totalMsg}</td>
+        <td>${totalFolders}</td>
+        <td>${transferred}</td>
+        <td>${fmtTime(a.last_sync_at)}</td>
+      </tr>`;
+    })
+    .join('');
+}
+
+document.getElementById('refresh-btn').addEventListener('click', load);
+load();
+</script>
+</body>
+</html>

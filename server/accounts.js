@@ -1,0 +1,294 @@
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const { db, DIRS } = require('./db');
+const { sendJobLog } = require('./log-reader');
+const { getProvider, loadProviders } = require('./providers');
+const { validateAccountPayload } = require('./account-validation');
+const {
+  saveSourceSecret,
+  deleteSourceSecret,
+  saveTargetSecret,
+  hasSourceSecret,
+  hasOAuthTokens,
+  deleteOAuthTokens,
+  deleteAccountSecrets,
+} = require('./credentials');
+const {
+  triggerSync,
+  cancelJob,
+  testConnection,
+  isAccountLocked,
+  hasActiveJob,
+} = require('./sync');
+
+const router = express.Router();
+
+const PUBLIC_FIELDS = `
+  id, name, provider, host, port, ssl, username, auth_type, enabled,
+  sync_interval, local_user, sync_mode, destination_mode, destination_folder,
+  folder_includes, folder_excludes, max_age_days, max_size_mb, deletion_mode,
+  created_at, updated_at,
+  last_sync_at, last_sync_status, last_sync_message,
+  last_host2_messages, last_host2_folders, last_transferred, last_skipped, last_errors
+`;
+
+// null统一用N/A表示"没有可信数据",不能显示成0(0是一个真实的、有意义的值)
+function naSafe(v) {
+  return v === null || v === undefined ? 'N/A' : v;
+}
+
+function serializeAccount(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    ssl: !!row.ssl,
+    enabled: !!row.enabled,
+    syncing: isAccountLocked(row.id),
+    queued: !isAccountLocked(row.id) && hasActiveJob(row.id),
+    hasSecret: row.auth_type === 'oauth2' ? hasOAuthTokens(row.id) : hasSourceSecret(row.id),
+    oauthAuthorized: row.auth_type === 'oauth2' && hasOAuthTokens(row.id),
+    // 前端展示用的N/A安全字段
+    display: {
+      totalMessages: naSafe(row.last_host2_messages),
+      totalFolders: naSafe(row.last_host2_folders),
+      lastTransferred: naSafe(row.last_transferred),
+      lastSkipped: naSafe(row.last_skipped),
+      lastErrors: naSafe(row.last_errors),
+    },
+  };
+}
+
+router.get('/providers', (req, res) => {
+  res.json(loadProviders());
+});
+
+router.get('/', (req, res) => {
+  const rows = db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts ORDER BY id DESC`).all();
+  res.json(rows.map(serializeAccount));
+});
+
+router.get('/:id', (req, res) => {
+  const row = db
+    .prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ?`)
+    .get(req.params.id);
+  if (!row) return res.status(404).json({ error: '账号不存在' });
+  res.json(serializeAccount(row));
+});
+
+function validatePayload(body, {
+  requireSecret,
+  defaultLocalUser,
+  defaultDestinationMode,
+  defaultDestinationFolder,
+  defaultSyncPolicy,
+}) {
+  return validateAccountPayload(body, {
+    requireSecret,
+    getProvider,
+    defaultLocalUser: defaultLocalUser || require('./config').localDovecot().user,
+    defaultDestinationMode,
+    defaultDestinationFolder,
+    defaultSyncPolicy,
+  });
+}
+
+function destinationFolderInUse(account, excludeId = null) {
+  if (account.destination_mode !== 'subfolder') return false;
+  const params = [account.local_user, account.destination_folder];
+  let sql = `SELECT 1 FROM accounts
+    WHERE local_user = ? AND destination_mode = 'subfolder'
+      AND destination_folder = ? COLLATE NOCASE`;
+  if (excludeId !== null) {
+    sql += ' AND id != ?';
+    params.push(excludeId);
+  }
+  return !!db.prepare(sql).get(...params);
+}
+
+router.post('/', (req, res) => {
+  const { errors, normalized } = validatePayload(req.body || {}, { requireSecret: true });
+  if (errors.length) return res.status(400).json({ error: errors.join('; ') });
+  if (destinationFolderInUse(normalized)) {
+    return res.status(409).json({ error: '该本地用户下已有账号使用同名隔离文件夹，请换一个名称' });
+  }
+
+  const info = db
+    .prepare(
+      `INSERT INTO accounts
+        (name, provider, host, port, ssl, username, auth_type, enabled, sync_interval,
+         local_user, sync_mode, destination_mode, destination_folder,
+         folder_includes, folder_excludes, max_age_days, max_size_mb, deletion_mode)
+       VALUES (@name, @provider, @host, @port, @ssl, @username, @auth_type, @enabled,
+         @sync_interval, @local_user, @sync_mode, @destination_mode, @destination_folder,
+         @folder_includes, @folder_excludes, @max_age_days, @max_size_mb, @deletion_mode)`
+    )
+    .run(normalized);
+
+  const accountId = info.lastInsertRowid;
+  if (normalized.auth_type === 'password') saveSourceSecret(accountId, req.body.secret);
+  if (req.body.local_secret) {
+    saveTargetSecret(accountId, req.body.local_secret);
+  }
+
+  res.status(201).json(
+    serializeAccount(
+      db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ?`).get(accountId)
+    )
+  );
+});
+
+router.put('/:id', (req, res) => {
+  const existing = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: '账号不存在' });
+
+  const { errors, normalized } = validatePayload(req.body || {}, {
+    requireSecret: !hasSourceSecret(req.params.id),
+    // 编辑页目前不展示local_user；请求未显式提交时必须保留账号原值，
+    // 不能因为全局默认目标后来变化就悄悄覆盖已有账号。
+    defaultLocalUser: existing.local_user,
+    defaultDestinationMode: existing.destination_mode,
+    defaultDestinationFolder: existing.destination_folder,
+    defaultSyncPolicy: existing,
+  });
+  if (errors.length) return res.status(400).json({ error: errors.join('; ') });
+  if (destinationFolderInUse(normalized, existing.id)) {
+    return res.status(409).json({ error: '该本地用户下已有账号使用同名隔离文件夹，请换一个名称' });
+  }
+
+  const destinationChanged = existing.destination_mode !== normalized.destination_mode
+    || existing.destination_folder !== normalized.destination_folder;
+  if (destinationChanged && (isAccountLocked(existing.id) || hasActiveJob(existing.id))) {
+    return res.status(409).json({ error: '账号正在同步或排队中，结束任务后才能修改目标文件夹策略' });
+  }
+  const oauthIdentityChanged = existing.auth_type !== normalized.auth_type
+    || existing.provider !== normalized.provider
+    || existing.username !== normalized.username;
+  if (oauthIdentityChanged && (isAccountLocked(existing.id) || hasActiveJob(existing.id))) {
+    return res.status(409).json({ error: '账号正在同步或排队中，结束任务后才能修改认证身份' });
+  }
+  const syncPolicyChanged = existing.folder_includes !== normalized.folder_includes
+    || existing.folder_excludes !== normalized.folder_excludes
+    || existing.max_age_days !== normalized.max_age_days
+    || existing.max_size_mb !== normalized.max_size_mb
+    || existing.deletion_mode !== normalized.deletion_mode;
+  if (syncPolicyChanged && (isAccountLocked(existing.id) || hasActiveJob(existing.id))) {
+    return res.status(409).json({ error: '账号正在同步或排队中，结束任务后才能修改高级同步规则' });
+  }
+
+  db.prepare(
+    `UPDATE accounts SET
+      name=@name, provider=@provider, host=@host, port=@port, ssl=@ssl,
+      username=@username, auth_type=@auth_type, enabled=@enabled,
+      sync_interval=@sync_interval, local_user=@local_user, sync_mode=@sync_mode,
+      destination_mode=@destination_mode, destination_folder=@destination_folder,
+      folder_includes=@folder_includes, folder_excludes=@folder_excludes,
+      max_age_days=@max_age_days, max_size_mb=@max_size_mb, deletion_mode=@deletion_mode,
+      updated_at = datetime('now')
+     WHERE id=@id`
+  ).run({ ...normalized, id: req.params.id });
+
+  if (destinationChanged) {
+    // --useuid缓存与目标文件夹映射相关；切换落盘策略后必须重新建立映射。
+    // 这里只删除可重建的cache，不碰已经同步到Maildir中的邮件。
+    fs.rmSync(path.join(DIRS.cache, String(existing.id)), { recursive: true, force: true });
+  }
+
+  if (normalized.auth_type === 'password' && req.body.secret) {
+    saveSourceSecret(req.params.id, req.body.secret);
+  }
+  if (normalized.auth_type === 'oauth2') {
+    deleteSourceSecret(req.params.id);
+    if (oauthIdentityChanged) deleteOAuthTokens(req.params.id);
+  } else {
+    deleteOAuthTokens(req.params.id);
+  }
+  if (req.body.local_secret) {
+    saveTargetSecret(req.params.id, req.body.local_secret);
+  }
+
+  res.json(
+    serializeAccount(
+      db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ?`).get(req.params.id)
+    )
+  );
+});
+
+router.delete('/:id', (req, res) => {
+  const existing = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: '账号不存在' });
+  if (isAccountLocked(existing.id) || hasActiveJob(existing.id)) {
+    return res.status(409).json({ error: '账号正在同步或排队中,请稍后再删除' });
+  }
+
+  const deleteCache = req.query.deleteCache === 'true';
+  db.prepare('DELETE FROM accounts WHERE id = ?').run(req.params.id);
+  db.prepare('DELETE FROM sync_jobs WHERE account_id = ?').run(req.params.id);
+  deleteAccountSecrets(req.params.id);
+
+  if (deleteCache) {
+    const cacheDir = path.join(DIRS.cache, String(req.params.id));
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+  }
+  // 注意:默认不删除本地已同步的邮件(Maildir内容),只删除账号配置/密码/cache
+
+  res.json({ ok: true });
+});
+
+router.post('/:id/test', async (req, res) => {
+  const existing = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: '账号不存在' });
+  const result = await testConnection(req.params.id);
+  res.json(result);
+});
+
+router.post('/:id/sync', (req, res) => {
+  const existing = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: '账号不存在' });
+  const result = triggerSync(parseInt(req.params.id, 10));
+  if (!result.ok && result.reason === 'already_running') {
+    return res.status(409).json({ error: '当前账号正在同步或已在排队,请勿重复启动' });
+  }
+  if (!result.ok && result.reason === 'missing_credentials') {
+    return res.status(409).json({ error: '账号尚未完成凭据配置或OAuth2授权' });
+  }
+  if (!result.ok && result.reason === 'maintenance') {
+    return res.status(409).json({ error: '系统正在恢复，请稍后再启动同步' });
+  }
+  res.json(result);
+});
+
+router.get('/:id/jobs', (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT * FROM sync_jobs WHERE account_id = ? ORDER BY started_at DESC LIMIT 30`
+    )
+    .all(req.params.id);
+  res.json(rows);
+});
+
+router.post('/:id/jobs/:jobId/cancel', (req, res) => {
+  const result = cancelJob(req.params.jobId, req.params.id);
+  if (!result.ok) {
+    const messages = {
+      not_found: '任务不存在，或不属于当前账号',
+      not_owned: '运行任务不属于当前服务进程，无法安全停止；请重启服务完成状态恢复',
+      already_stopping: '任务已经在停止中',
+      not_cancellable: '该任务已经结束，无法取消',
+    };
+    return res.status(result.reason === 'not_found' ? 404 : 409)
+      .json({ error: messages[result.reason] || '任务无法取消' });
+  }
+  res.json(result);
+});
+
+router.get('/:id/jobs/:jobId/log', (req, res) => {
+  const job = db
+    .prepare('SELECT * FROM sync_jobs WHERE id = ? AND account_id = ?')
+    .get(req.params.jobId, req.params.id);
+  if (!job || !sendJobLog(res, DIRS.logs, job)) {
+    return res.status(404).json({ error: '日志不存在' });
+  }
+});
+
+module.exports = router;

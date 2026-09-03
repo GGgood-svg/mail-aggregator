@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>设置 - Mail Aggregator</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="layout">
+  <div class="sidebar">
+    <div class="brand">📬 <span id="sidebar-brand-text">Mail Aggregator</span></div>
+    <nav id="sidebar-nav"></nav>
+    <div class="footer-bar" id="footer-text"></div>
+  </div>
+  <div class="main">
+    <div class="topbar"><h1>设置</h1></div>
+
+    <div class="panel" style="max-width:520px;">
+      <h2>本地 Dovecot 目标</h2>
+      <div class="form-group">
+        <label>本地 IMAP 地址</label>
+        <input type="text" id="dovecot_host">
+      </div>
+      <div class="form-row"><div class="form-group" style="max-width:120px;"><label>端口</label><input type="number" id="dovecot_port"></div></div>
+      <div class="form-group"><label>默认同步目标用户</label><input type="text" id="dovecot_user"><div class="hint">所有未单独配置目标用户的外部邮箱，默认同步到此本地 Dovecot 用户。已单独指定同步目标的账号不会自动跟随修改。</div></div>
+      <div class="grid" id="local-target-status-grid"></div>
+    </div>
+
+    <div class="panel" style="max-width:520px;" id="dovecot">
+      <h2>Dovecot 本地邮箱</h2>
+      <div class="grid" id="dovecot-status-grid" style="margin-bottom:16px;"></div>
+
+      <h2 style="margin-top:20px;">修改本地 Dovecot 密码</h2>
+      <div class="hint" style="margin-bottom:12px;">
+        <span>这里修改的是本地 Dovecot 用户</span><span id="dovecot-password-user" data-i18n-skip></span><span>的登录密码。</span>
+        修改会先验证当前密码，写入新密码后立即用新密码实际尝试登录一次确认生效，
+        整个过程中 Dovecot 配置和 local-target.pass 保持一致——任何一步失败都会自动回滚,
+        不会出现"密码已经改了但imapsync还在用旧密码"这种情况。
+      </div>
+      <div class="form-group">
+        <label>当前密码</label>
+        <input type="password" id="dovecot_current_password" autocomplete="current-password">
+      </div>
+      <div class="form-group">
+        <label>新密码(至少8位)</label>
+        <input type="password" id="dovecot_new_password" autocomplete="new-password">
+      </div>
+      <div class="form-group">
+        <label>确认新密码</label>
+        <input type="password" id="dovecot_confirm_password" autocomplete="new-password">
+      </div>
+      <button class="btn" id="dovecot-change-btn">修改密码</button>
+      <div id="dovecot-change-msg" style="margin-top:10px; font-size:13px;"></div>
+    </div>
+
+    <div class="panel" style="max-width:520px;">
+      <h2>同步行为</h2>
+      <div class="form-group">
+        <label>最大同时同步任务数</label>
+        <input type="number" id="max_concurrent_syncs" min="1" max="4">
+        <div class="hint">VM 内存有限时建议保持 1~2,避免多个 imapsync 同时跑爆内存</div>
+      </div>
+      <div class="form-group">
+        <label>单次同步超时（分钟）</label>
+        <input type="number" id="sync_timeout_minutes" min="5" max="1440">
+        <div class="hint">默认 120 分钟；超时后先请求退出，10 秒后仍未结束则强制终止</div>
+      </div>
+      <div class="form-group">
+        <label>同步任务与日志保留天数</label>
+        <input type="number" id="log_retention_days" min="1" max="3650">
+        <div class="hint">默认 90 天；服务启动时及之后每 24 小时自动清理已结束任务和对应日志，不会清理排队或运行中的任务</div>
+      </div>
+      <div class="form-group">
+        <label>默认同步间隔(新建账号时的初始值)</label>
+        <select id="default_sync_interval">
+          <option value="300">每 5 分钟</option>
+          <option value="600">每 10 分钟</option>
+          <option value="900">每 15 分钟</option>
+          <option value="1800">每 30 分钟</option>
+          <option value="3600">每小时</option>
+        </select>
+      </div>
+      <div class="hint" style="margin-top:-6px;">修改后立即生效,不需要重启服务。已有账号的间隔不受影响。</div>
+    </div>
+
+    <div class="panel" style="max-width:520px;">
+      <h2>Web 服务端口</h2>
+      <div class="form-group">
+        <label>端口(1-65535)</label>
+        <input type="number" id="web_port" min="1" max="65535">
+        <div class="hint" id="port-current-hint"></div>
+      </div>
+      <div class="hint" style="color:var(--warn);margin-top:-6px;">⚠️ 修改端口后需要重启服务才会生效,保存后请点击下方「重启服务」或手动执行 <code>rc-service mail-aggregator restart</code>。</div>
+    </div>
+
+    <div class="panel" style="max-width:520px;" id="oauth-settings">
+      <h2>Gmail / Microsoft OAuth2</h2>
+      <div class="hint" style="margin-bottom:12px;">需要先分别在 Google Cloud 和 Microsoft Entra 注册 Web 应用，并把下方回调地址原样加入允许列表。Client Secret 只写入服务器权限 600 的密钥文件，页面不会回显。</div>
+      <div class="form-group">
+        <label>外部可访问的 Web 根地址</label>
+        <input type="url" id="oauth_public_base_url" placeholder="https://mail.example.com">
+        <div class="hint">正式环境必须使用 HTTPS，不要带路径；仅 localhost/127.0.0.1 测试允许 HTTP。</div>
+      </div>
+      <div class="form-group">
+        <label>Google 回调地址</label>
+        <code id="google-callback-uri">请先填写外部地址</code>
+      </div>
+      <div class="form-group">
+        <label>Google Client ID</label>
+        <input type="text" id="google_oauth_client_id" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>Google Client Secret</label>
+        <input type="password" id="google_oauth_client_secret" autocomplete="new-password" placeholder="留空则保留现有密钥">
+        <div class="hint" id="google-secret-status"></div>
+      </div>
+      <hr style="border:0;border-top:1px solid var(--border);margin:20px 0;">
+      <div class="form-group">
+        <label>Microsoft 回调地址</label>
+        <code id="microsoft-callback-uri">请先填写外部地址</code>
+      </div>
+      <div class="form-group">
+        <label>Microsoft Client ID</label>
+        <input type="text" id="microsoft_oauth_client_id" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>Microsoft Client Secret</label>
+        <input type="password" id="microsoft_oauth_client_secret" autocomplete="new-password" placeholder="留空则保留现有密钥">
+        <div class="hint" id="microsoft-secret-status"></div>
+      </div>
+      <div class="form-group">
+        <label>Microsoft Tenant</label>
+        <input type="text" id="microsoft_oauth_tenant" value="common" placeholder="common">
+        <div class="hint">个人 Outlook 和多租户一般使用 common；企业也可以填写租户 ID 或租户域名。</div>
+      </div>
+      <button class="btn secondary" id="oauth-save-btn" type="button">保存 OAuth2 设置</button>
+      <div id="oauth-msg" style="margin-top:10px;font-size:13px"></div>
+    </div>
+
+    <div class="panel" style="max-width:520px;">
+      <h2>界面语言</h2>
+      <div class="form-group"><label>语言</label><select id="web_language"><option value="zh-CN">简体中文</option><option value="en-US">English</option><option value="ja-JP">日本語</option><option value="ko-KR">한국어</option><option value="es-ES">Español</option><option value="fr-FR">Français</option><option value="de-DE">Deutsch</option></select><div class="hint">保存后刷新页面生效。</div></div>
+    </div>
+
+    <div class="panel" style="max-width:520px;">
+      <h2>同步失败通知</h2>
+      <div class="form-group"><label><input type="checkbox" id="notification_enabled"> 启用同步失败通知</label></div>
+      <div class="form-group"><label>通知方式</label><select id="notification_provider"><option value="webhook">HTTPS Webhook</option><option value="telegram">Telegram</option></select></div>
+      <div id="webhook-fields"><div class="form-group"><label>Webhook 地址</label><input type="url" id="notification_webhook_url" placeholder="https://example.com/mail-alert"><div class="hint">会发送 JSON 事件，不会包含邮箱密码或授权码。</div></div></div>
+      <div id="telegram-fields" style="display:none"><div class="form-group"><label>Telegram Bot Token</label><input type="password" id="notification_telegram_token" autocomplete="new-password"></div><div class="form-group"><label>Telegram Chat ID</label><input type="text" id="notification_telegram_chat_id"></div></div>
+      <div class="form-group"><label>通知冷却时间（分钟）</label><input type="number" min="1" max="1440" id="notification_cooldown" value="30"><div class="hint">同一账号连续失败时，在冷却时间内仅发送一次通知。</div></div>
+      <button class="btn secondary" id="notification-save-btn" type="button">保存通知设置</button><div id="notification-msg" style="margin-top:10px;font-size:13px"></div>
+    </div>
+
+    <div class="panel" style="max-width:520px;">
+      <h2>界面 Branding</h2>
+      <div class="form-group">
+        <label>应用名称</label>
+        <input type="text" id="app_name" maxlength="60">
+      </div>
+      <div class="form-group">
+        <label>应用副标题</label>
+        <input type="text" id="app_subtitle" maxlength="120">
+      </div>
+      <div class="form-group">
+        <label>浏览器标签标题</label>
+        <input type="text" id="browser_title" maxlength="80">
+      </div>
+      <div class="form-group">
+        <label>侧边栏标题</label>
+        <input type="text" id="sidebar_title" maxlength="60">
+      </div>
+      <div class="form-group">
+        <label>登录页标题</label>
+        <input type="text" id="login_title" maxlength="60">
+      </div>
+      <div class="form-group">
+        <label>页脚文字</label>
+        <input type="text" id="footer_text" maxlength="200">
+      </div>
+      <div class="hint" style="margin-top:-6px;">修改后立即生效,刷新页面就能看到,不需要重启服务。</div>
+    </div>
+
+    <button class="btn" id="save-btn">保存设置</button>
+    <div id="msg" style="margin-top:12px; font-size:13px;"></div>
+
+    <div class="panel" style="max-width:520px; margin-top:24px;">
+      <h2>安全备份导出</h2>
+      <div class="hint" style="color:var(--warn);margin-bottom:12px;">备份包含账号数据库、邮箱密码/授权码和通知密钥，不包含邮件正文、日志、缓存或会话签名。下载后请离线加密保存，绝不要上传到公共仓库。</div>
+      <div class="form-group">
+        <label>当前 Web 管理员密码</label>
+        <input type="password" id="backup-password" autocomplete="current-password">
+      </div>
+      <button class="btn secondary" id="backup-btn" type="button">生成并下载备份</button>
+      <div id="backup-msg" style="margin-top:10px;font-size:13px"></div>
+      <pre id="backup-checksum" class="log" style="display:none;max-height:none;margin-bottom:8px;"></pre>
+      <button class="btn small secondary" id="checksum-download-btn" type="button" style="display:none;">下载 .sha256 校验文件</button>
+    </div>
+
+    <div class="panel" style="max-width:520px; margin-top:24px;">
+      <h2>Web 恢复中心</h2>
+      <div class="hint" style="color:var(--warn);margin-bottom:12px;">先上传并只读预检，不会立刻改动系统。正式恢复前会自动保存当前数据库和密钥快照；邮件正文、当前管理员、登录会话及当前本地 Dovecot 密码不会被替换。</div>
+      <div class="form-group">
+        <label>Mail Aggregator 备份文件（.tar.gz）</label>
+        <input type="file" id="restore-file" accept=".gz,.tar.gz,application/gzip">
+      </div>
+      <button class="btn secondary" id="restore-inspect-btn" type="button">上传并预检</button>
+      <div id="restore-msg" style="margin-top:10px;font-size:13px"></div>
+      <pre id="restore-preview" class="log" style="display:none;max-height:none;margin-bottom:12px;"></pre>
+
+      <div id="restore-confirm-panel" style="display:none;border-top:1px solid var(--panel-border);padding-top:14px;margin-top:14px;">
+        <div class="form-group">
+          <label>当前 Web 管理员密码</label>
+          <input type="password" id="restore-password" autocomplete="current-password">
+        </div>
+        <div class="form-group">
+          <label>输入 <code>RESTORE</code> 确认</label>
+          <input type="text" id="restore-confirmation" autocomplete="off" placeholder="RESTORE">
+        </div>
+        <button class="btn danger" id="restore-apply-btn" type="button">执行安全恢复</button>
+      </div>
+      <button class="btn small secondary" id="restore-snapshot-btn" type="button" style="display:none;margin-top:10px;">下载恢复前快照</button>
+      <div class="hint" style="margin-top:14px;">服务器会保留最近7天的恢复前快照：</div>
+      <div id="restore-points-list" style="margin-top:8px;font-size:13px;"></div>
+    </div>
+
+    <div class="panel" style="max-width:520px; margin-top:24px;">
+      <h2>服务控制</h2>
+      <div class="hint" style="margin-bottom:12px;">只会重启 mail-aggregator 这一个服务,不影响 Dovecot 和其它服务。需要提前在系统上配置好对应的最小 sudo 权限(见 README),否则点击会失败,这时候手动执行 <code>rc-service mail-aggregator restart</code> 即可。</div>
+      <button class="btn danger" id="restart-btn">重启 Mail Aggregator</button>
+      <div id="restart-msg" style="margin-top:10px; font-size:13px;"></div>
+    </div>
+
+    <div class="panel danger-panel" style="max-width:520px; margin-top:24px;">
+      <h2>卸载 Mail Aggregator</h2>
+      <div class="hint" style="color:var(--warn); margin-bottom:12px;">
+        卸载操作不可通过网页撤销。程序卸载会删除 Mail Aggregator 和运行数据，但保留 Dovecot 与邮件；彻底卸载会额外删除 Dovecot、本地邮箱用户和 Maildir 中的全部邮件。
+      </div>
+      <div class="form-group">
+        <label>当前 Web 管理员密码</label>
+        <input type="password" id="uninstall-password" autocomplete="current-password">
+      </div>
+      <div class="form-row">
+        <div class="form-group" style="flex:1;min-width:220px">
+          <label>程序卸载确认：输入 <code>REMOVE</code></label>
+          <input type="text" id="remove-confirmation" placeholder="REMOVE" autocomplete="off">
+          <button class="btn danger" id="uninstall-app-btn" type="button" style="margin-top:8px">卸载程序（保留邮件）</button>
+        </div>
+        <div class="form-group" style="flex:1;min-width:220px">
+          <label>彻底卸载确认：输入 <code>PURGE</code></label>
+          <input type="text" id="purge-confirmation" placeholder="PURGE" autocomplete="off">
+          <button class="btn danger" id="purge-btn" type="button" style="margin-top:8px">彻底卸载并删除邮件</button>
+        </div>
+      </div>
+      <div id="uninstall-msg" style="margin-top:10px;font-size:13px"></div>
+    </div>
+  </div>
+</div>
+<script src="/js/api.js"></script>
+<script src="/js/branding.js"></script>
+<script src="/js/i18n.js"></script>
+<script>
+async function load() {
+  applyBranding();
+  await requireLogin();
+  await I18n.ready;
+  renderNav('settings');
+  try {
+    const s = await Api.get('/api/settings');
+    document.getElementById('dovecot_host').value = s.dovecot_host || '127.0.0.1';
+    document.getElementById('dovecot_port').value = s.dovecot_port || 143;
+    document.getElementById('max_concurrent_syncs').value = s.max_concurrent_syncs || 1;
+    document.getElementById('sync_timeout_minutes').value = s.sync_timeout_minutes || 120;
+    document.getElementById('log_retention_days').value = s.log_retention_days || 90;
+    document.getElementById('default_sync_interval').value = s.default_sync_interval || 600;
+    document.getElementById('web_port').value = s.web_port || 8080;
+    document.getElementById('web_language').value = s.web_language || 'zh-CN';
+    document.getElementById('app_name').value = s.app_name || '';
+    document.getElementById('app_subtitle').value = s.app_subtitle || '';
+    document.getElementById('browser_title').value = s.browser_title || '';
+    document.getElementById('sidebar_title').value = s.sidebar_title || '';
+    document.getElementById('login_title').value = s.login_title || '';
+    document.getElementById('footer_text').value = s.footer_text || '';
+    document.getElementById('dovecot_user').value = s.dovecot_user || 'mailuser';
+    const dovecotUser = s.dovecot_user || 'mailuser';
+    document.getElementById('dovecot-password-user').textContent =
+      document.documentElement.lang === 'zh-CN' ? dovecotUser : ` ${dovecotUser}`;
+
+    const savedPort = parseInt(s.web_port || '8080', 10);
+    const hint = document.getElementById('port-current-hint');
+    if (s.actualPort && s.actualPort !== savedPort) {
+      hint.style.color = 'var(--warn)';
+      hint.textContent = `当前实际监听端口是 ${s.actualPort},和保存的设置(${savedPort})不一致,说明改过之后还没重启服务`;
+    } else {
+      hint.style.color = 'var(--text-dim)';
+      hint.textContent = `当前实际监听端口: ${s.actualPort || savedPort}`;
+    }
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+  loadDovecotStatus();
+  loadNotifications();
+  loadOAuthConfig();
+  loadRestorePoints();
+}
+
+function updateOAuthCallbackUris() {
+  const raw = document.getElementById('oauth_public_base_url').value.trim().replace(/\/$/, '');
+  document.getElementById('google-callback-uri').textContent = raw
+    ? `${raw}/api/oauth/callback/google`
+    : '请先填写外部地址';
+  document.getElementById('microsoft-callback-uri').textContent = raw
+    ? `${raw}/api/oauth/callback/microsoft`
+    : '请先填写外部地址';
+}
+
+async function loadOAuthConfig() {
+  try {
+    const config = await Api.get('/api/oauth/config');
+    document.getElementById('oauth_public_base_url').value = config.publicBaseUrl || '';
+    document.getElementById('google_oauth_client_id').value = config.google.clientId || '';
+    document.getElementById('microsoft_oauth_client_id').value = config.microsoft.clientId || '';
+    document.getElementById('microsoft_oauth_tenant').value = config.microsoft.tenant || 'common';
+    document.getElementById('google-secret-status').textContent = config.google.hasClientSecret ? '已保存密钥；留空不会修改' : '尚未保存密钥';
+    document.getElementById('microsoft-secret-status').textContent = config.microsoft.hasClientSecret ? '已保存密钥；留空不会修改' : '尚未保存密钥';
+    updateOAuthCallbackUris();
+  } catch (error) {
+    document.getElementById('oauth-msg').textContent = error.message;
+  }
+}
+
+document.getElementById('oauth_public_base_url').addEventListener('input', updateOAuthCallbackUris);
+document.getElementById('oauth-save-btn').addEventListener('click', async () => {
+  const msg = document.getElementById('oauth-msg');
+  msg.className = '';
+  msg.textContent = '正在保存…';
+  try {
+    await Api.put('/api/oauth/config', {
+      publicBaseUrl: document.getElementById('oauth_public_base_url').value.trim(),
+      googleClientId: document.getElementById('google_oauth_client_id').value.trim(),
+      googleClientSecret: document.getElementById('google_oauth_client_secret').value,
+      microsoftClientId: document.getElementById('microsoft_oauth_client_id').value.trim(),
+      microsoftClientSecret: document.getElementById('microsoft_oauth_client_secret').value,
+      microsoftTenant: document.getElementById('microsoft_oauth_tenant').value.trim(),
+    });
+    document.getElementById('google_oauth_client_secret').value = '';
+    document.getElementById('microsoft_oauth_client_secret').value = '';
+    msg.className = 'ok';
+    msg.textContent = 'OAuth2设置已保存';
+    loadOAuthConfig();
+  } catch (error) {
+    msg.className = 'err';
+    msg.textContent = error.message;
+  }
+});
+
+function updateNotificationFields() {
+  const telegram = document.getElementById('notification_provider').value === 'telegram';
+  document.getElementById('webhook-fields').style.display = telegram ? 'none' : 'block';
+  document.getElementById('telegram-fields').style.display = telegram ? 'block' : 'none';
+}
+async function loadNotifications() {
+  try {
+    const n = await Api.get('/api/notifications/settings');
+    document.getElementById('notification_enabled').checked = n.enabled;
+    document.getElementById('notification_provider').value = n.provider || 'webhook';
+    document.getElementById('notification_cooldown').value = n.cooldownMinutes || 30;
+    updateNotificationFields();
+  } catch (_) { /* notification config is optional */ }
+}
+
+async function loadDovecotStatus() {
+  const grid = document.getElementById('dovecot-status-grid');
+  try {
+    const s = await Api.get('/api/dovecot/status');
+    const authLabel = s.authTestOk === null ? '未测试' : s.authTestOk ? '成功' : '失败';
+    const authCls = s.authTestOk === null ? '' : s.authTestOk ? 'ok' : 'err';
+    const driftLabel = { in_sync: '一致', drifted: '可能不同步', unknown: '未知' }[s.driftStatus] || '未知';
+    const driftCls = s.driftStatus === 'in_sync' ? 'ok' : s.driftStatus === 'drifted' ? 'err' : '';
+    const cards = [
+      { label: '用户名', value: escapeHtml(s.targetUser) },
+      { label: 'IMAP', value: s.reachable ? '正常' : '异常', cls: s.reachable ? 'ok' : 'err' },
+      { label: '认证测试', value: authLabel, cls: authCls },
+      { label: '密码同步状态', value: driftLabel, cls: driftCls },
+    ];
+    grid.innerHTML = cards
+      .map((c) => `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls || ''}">${c.value}</div></div>`)
+      .join('');
+    document.getElementById('local-target-status-grid').innerHTML = [
+      { label: 'Dovecot 状态', value: s.reachable ? '正常 ✅' : '异常', cls: s.reachable ? 'ok' : 'err' },
+      { label: '认证状态', value: authLabel, cls: authCls },
+      { label: '本地目标凭据', value: s.authTestOk === null ? '未配置' : '已配置 ✅', cls: s.authTestOk === null ? '' : 'ok' },
+    ].map((c) => `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls || ''}">${c.value}</div></div>`).join('');
+  } catch (e) {
+    grid.innerHTML = `<div class="card"><div class="label">状态</div><div class="value err">获取失败</div></div>`;
+  }
+}
+
+document.getElementById('save-btn').addEventListener('click', async () => {
+  const msg = document.getElementById('msg');
+  msg.textContent = '';
+  try {
+    const payload = {
+      dovecot_host: document.getElementById('dovecot_host').value.trim(),
+      dovecot_port: document.getElementById('dovecot_port').value,
+      max_concurrent_syncs: document.getElementById('max_concurrent_syncs').value,
+      sync_timeout_minutes: document.getElementById('sync_timeout_minutes').value,
+      log_retention_days: document.getElementById('log_retention_days').value,
+      default_sync_interval: document.getElementById('default_sync_interval').value,
+      web_port: document.getElementById('web_port').value,
+      web_language: document.getElementById('web_language').value,
+      app_name: document.getElementById('app_name').value.trim(),
+      app_subtitle: document.getElementById('app_subtitle').value.trim(),
+      browser_title: document.getElementById('browser_title').value.trim(),
+      sidebar_title: document.getElementById('sidebar_title').value.trim(),
+      login_title: document.getElementById('login_title').value.trim(),
+      footer_text: document.getElementById('footer_text').value.trim(),
+      dovecot_user: document.getElementById('dovecot_user').value.trim(),
+    };
+    const result = await Api.put('/api/settings', payload);
+    if (result.needsRestart) {
+      toast('已保存,端口修改需要重启服务才能生效');
+    } else {
+      toast('已保存');
+    }
+    load();
+  } catch (e) {
+    msg.style.color = 'var(--err)';
+    msg.textContent = e.message;
+  }
+});
+
+document.getElementById('dovecot-change-btn').addEventListener('click', async () => {
+  const msg = document.getElementById('dovecot-change-msg');
+  const currentPassword = document.getElementById('dovecot_current_password').value;
+  const newPassword = document.getElementById('dovecot_new_password').value;
+  const confirmPassword = document.getElementById('dovecot_confirm_password').value;
+
+  msg.textContent = '';
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    msg.style.color = 'var(--err)';
+    msg.textContent = '当前密码、新密码、确认密码都要填';
+    return;
+  }
+
+  const btn = document.getElementById('dovecot-change-btn');
+  btn.disabled = true;
+  msg.style.color = 'var(--text-dim)';
+  msg.textContent = '正在验证并修改,请稍候...(会实际尝试登录验证,可能需要几秒)';
+
+  try {
+    await Api.post('/api/dovecot/change-password', { currentPassword, newPassword, confirmPassword });
+    msg.style.color = 'var(--ok)';
+    msg.textContent = '密码修改成功,已同步更新到 imapsync 使用的凭证';
+    document.getElementById('dovecot_current_password').value = '';
+    document.getElementById('dovecot_new_password').value = '';
+    document.getElementById('dovecot_confirm_password').value = '';
+    loadDovecotStatus();
+  } catch (e) {
+    msg.style.color = 'var(--err)';
+    msg.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.getElementById('notification_provider').addEventListener('change', updateNotificationFields);
+document.getElementById('notification-save-btn').addEventListener('click', async () => {
+  const msg = document.getElementById('notification-msg');
+  try {
+    await Api.put('/api/notifications/settings', {
+      enabled: document.getElementById('notification_enabled').checked,
+      provider: document.getElementById('notification_provider').value,
+      webhookUrl: document.getElementById('notification_webhook_url').value.trim(),
+      telegramToken: document.getElementById('notification_telegram_token').value.trim(),
+      telegramChatId: document.getElementById('notification_telegram_chat_id').value.trim(),
+      cooldownMinutes: document.getElementById('notification_cooldown').value,
+    });
+    msg.className = 'ok'; msg.textContent = '通知设置已保存。密钥不会回显。';
+    document.getElementById('notification_telegram_token').value = '';
+  } catch (error) { msg.className = 'err'; msg.textContent = error.message; }
+});
+
+document.getElementById('restart-btn').addEventListener('click', async () => {
+  const proceed = confirm('确定要重启 Mail Aggregator 服务吗?正在进行的同步任务会被中断(下次启动会自动标记为interrupted,不会永久卡住,但这次同步需要重新触发)。');
+  if (!proceed) return;
+  const msg = document.getElementById('restart-msg');
+  msg.style.color = 'var(--text-dim)';
+  msg.textContent = '正在触发重启...';
+  try {
+    const result = await Api.post('/api/system/restart');
+    msg.style.color = 'var(--ok)';
+    msg.textContent = result.message + '(如果几秒后页面还是打不开,说明sudo权限没配置好,请手动执行 rc-service mail-aggregator restart)';
+  } catch (e) {
+    msg.style.color = 'var(--err)';
+    msg.textContent = e.message;
+  }
+});
+
+let lastBackupChecksum = null;
+document.getElementById('backup-btn').addEventListener('click', async () => {
+  const password = document.getElementById('backup-password').value;
+  const msg = document.getElementById('backup-msg');
+  if (!password) {
+    msg.className = 'err';
+    msg.textContent = '请输入当前 Web 管理员密码';
+    return;
+  }
+  if (!confirm('备份文件包含邮箱密码和授权码。确认立即生成并下载吗？')) return;
+  const button = document.getElementById('backup-btn');
+  button.disabled = true;
+  msg.className = '';
+  msg.textContent = '正在创建一致性数据库快照并打包…';
+  try {
+    const result = await Api.download('/api/system/backup', { currentPassword: password });
+    const url = URL.createObjectURL(result.blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = result.filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    document.getElementById('backup-password').value = '';
+    const validChecksum = /^[a-f0-9]{64}$/.test(result.sha256);
+    const checksum = document.getElementById('backup-checksum');
+    const checksumButton = document.getElementById('checksum-download-btn');
+    if (validChecksum) {
+      lastBackupChecksum = `${result.sha256}  ${result.filename}\n`;
+      checksum.textContent = `SHA-256\n${result.sha256}`;
+      checksum.style.display = 'block';
+      checksumButton.style.display = 'inline-block';
+    } else {
+      lastBackupChecksum = null;
+      checksum.style.display = 'none';
+      checksumButton.style.display = 'none';
+    }
+    msg.className = 'ok';
+    msg.textContent = validChecksum
+      ? '备份已开始下载。请同时保存下方SHA-256校验值或下载校验文件。'
+      : '备份已开始下载，请将文件离线加密保存。';
+  } catch (error) {
+    msg.className = 'err';
+    msg.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById('checksum-download-btn').addEventListener('click', () => {
+  if (!lastBackupChecksum) return;
+  const filename = lastBackupChecksum.trim().split(/\s+/).slice(1).join(' ');
+  const url = URL.createObjectURL(new Blob([lastBackupChecksum], { type: 'text/plain' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${filename}.sha256`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
+let pendingRestoreId = null;
+let restoreSnapshot = null;
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(2)} GiB`;
+}
+
+async function downloadRestorePoint(filename) {
+  const result = await Api.downloadGet(
+    `/api/system/restore/snapshots/${encodeURIComponent(filename)}`,
+    filename
+  );
+  const url = URL.createObjectURL(result.blob);
+  const link = document.createElement('a');
+  link.href = url; link.download = result.filename;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function loadRestorePoints() {
+  const container = document.getElementById('restore-points-list');
+  try {
+    const points = await Api.get('/api/system/restore/snapshots');
+    container.replaceChildren();
+    if (!points.length) {
+      container.textContent = '暂无恢复前快照';
+      return;
+    }
+    for (const point of points) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;margin:6px 0;';
+      const label = document.createElement('span');
+      label.textContent = `${new Date(point.createdAt).toLocaleString((window.I18n && window.I18n.locale) || 'zh-CN')} · ${formatBytes(point.size)}`;
+      const button = document.createElement('button');
+      button.className = 'btn small secondary';
+      button.type = 'button';
+      button.textContent = '下载';
+      button.addEventListener('click', () => downloadRestorePoint(point.filename).catch((error) => {
+        const msg = document.getElementById('restore-msg');
+        msg.className = 'err'; msg.textContent = error.message;
+      }));
+      row.append(label, button);
+      container.appendChild(row);
+    }
+  } catch (error) {
+    container.textContent = error.message;
+  }
+}
+
+document.getElementById('restore-inspect-btn').addEventListener('click', async () => {
+  const file = document.getElementById('restore-file').files[0];
+  const msg = document.getElementById('restore-msg');
+  if (!file) {
+    msg.className = 'err'; msg.textContent = '请选择 .tar.gz 备份文件'; return;
+  }
+  const button = document.getElementById('restore-inspect-btn');
+  button.disabled = true;
+  pendingRestoreId = null;
+  document.getElementById('restore-confirm-panel').style.display = 'none';
+  document.getElementById('restore-preview').style.display = 'none';
+  msg.className = ''; msg.textContent = '正在上传并验证压缩包、清单、文件哈希和SQLite数据库…';
+  try {
+    const result = await Api.uploadBackup('/api/system/restore/inspect', file);
+    pendingRestoreId = result.restoreId;
+    const preview = document.getElementById('restore-preview');
+    preview.textContent = [
+      '预检通过',
+      `备份时间：${result.createdAt || '未知'}`,
+      `应用版本：${result.backupVersion || '未知'}`,
+      `压缩包：${formatBytes(result.uploadBytes)}`,
+      `解压内容：${formatBytes(result.uncompressedBytes)}`,
+      `账号：${result.accountCount} 个` ,
+      `同步记录：${result.jobCount} 条`,
+      `设置：${result.settingCount} 项`,
+      `SHA-256：${result.archiveSha256}`,
+      '',
+      ...(result.notes || []).map((note) => `• ${note}`),
+    ].join('\n');
+    preview.style.display = 'block';
+    document.getElementById('restore-confirm-panel').style.display = 'block';
+    msg.className = 'ok'; msg.textContent = '备份有效。请核对摘要后再确认恢复，预检结果30分钟内有效。';
+  } catch (error) {
+    msg.className = 'err'; msg.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById('restore-apply-btn').addEventListener('click', async () => {
+  const msg = document.getElementById('restore-msg');
+  if (!pendingRestoreId) {
+    msg.className = 'err'; msg.textContent = '请先上传并通过备份预检'; return;
+  }
+  if (!confirm('即将恢复账号、设置、同步历史和远端邮箱密钥。系统会先保存当前状态快照，确定继续吗？')) return;
+  const button = document.getElementById('restore-apply-btn');
+  button.disabled = true;
+  msg.className = ''; msg.textContent = '正在创建恢复前快照并执行恢复，请不要关闭页面…';
+  try {
+    const result = await Api.post('/api/system/restore/apply', {
+      restoreId: pendingRestoreId,
+      currentPassword: document.getElementById('restore-password').value,
+      confirmation: document.getElementById('restore-confirmation').value,
+    });
+    pendingRestoreId = null;
+    restoreSnapshot = { id: result.snapshotId, filename: result.snapshotFilename };
+    document.getElementById('restore-password').value = '';
+    document.getElementById('restore-confirmation').value = '';
+    document.getElementById('restore-confirm-panel').style.display = 'none';
+    document.getElementById('restore-snapshot-btn').style.display = 'inline-block';
+    msg.className = 'ok';
+    msg.textContent = `${result.message}。建议立即下载恢复前快照，然后刷新页面检查账号和设置。`;
+    loadRestorePoints();
+  } catch (error) {
+    if (error.details && error.details.snapshotId) {
+      restoreSnapshot = {
+        id: error.details.snapshotId,
+        filename: error.details.snapshotFilename || 'pre-restore-backup.tar.gz',
+      };
+      document.getElementById('restore-snapshot-btn').style.display = 'inline-block';
+    }
+    msg.className = 'err'; msg.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById('restore-snapshot-btn').addEventListener('click', async () => {
+  if (!restoreSnapshot) return;
+  const msg = document.getElementById('restore-msg');
+  try {
+    const result = await Api.downloadGet(
+      `/api/system/restore/snapshot/${restoreSnapshot.id}`,
+      restoreSnapshot.filename
+    );
+    const url = URL.createObjectURL(result.blob);
+    const link = document.createElement('a');
+    link.href = url; link.download = result.filename;
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    msg.className = 'ok'; msg.textContent = '恢复前快照已开始下载，请离线加密保存。';
+  } catch (error) {
+    msg.className = 'err'; msg.textContent = error.message;
+  }
+});
+
+async function requestUninstall(mode) {
+  const password = document.getElementById('uninstall-password').value;
+  const confirmation = document.getElementById(mode === 'purge' ? 'purge-confirmation' : 'remove-confirmation').value.trim();
+  const msg = document.getElementById('uninstall-msg');
+  const expected = mode === 'purge' ? 'PURGE' : 'REMOVE';
+  if (!password || confirmation !== expected) {
+    msg.className = 'err';
+    msg.textContent = `请输入当前 Web 管理员密码，并在对应输入框准确输入 ${expected}`;
+    return;
+  }
+  const warning = mode === 'purge'
+    ? '这会删除 Dovecot、本地邮箱用户和 Maildir 中的全部邮件，且无法恢复。确定继续吗？'
+    : '这会停止并删除 Mail Aggregator 及其运行数据，但保留 Dovecot 和邮件。确定继续吗？';
+  if (!confirm(warning)) return;
+  document.getElementById('uninstall-app-btn').disabled = true;
+  document.getElementById('purge-btn').disabled = true;
+  try {
+    const result = await Api.post('/api/system/uninstall', { currentPassword: password, mode, confirmation });
+    msg.className = 'ok';
+    msg.textContent = result.message;
+    setTimeout(() => { window.location.href = '/login.html'; }, 3000);
+  } catch (error) {
+    msg.className = 'err';
+    msg.textContent = error.message;
+    document.getElementById('uninstall-app-btn').disabled = false;
+    document.getElementById('purge-btn').disabled = false;
+  }
+}
+
+document.getElementById('uninstall-app-btn').addEventListener('click', () => requestUninstall('remove-app'));
+document.getElementById('purge-btn').addEventListener('click', () => requestUninstall('purge'));
+
+load();
+</script>
+</body>
+</html>

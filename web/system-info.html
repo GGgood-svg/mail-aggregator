@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>系统信息 - Mail Aggregator</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="layout">
+  <div class="sidebar">
+    <div class="brand">📬 <span id="sidebar-brand-text">Mail Aggregator</span></div>
+    <nav id="sidebar-nav"></nav>
+    <div class="footer-bar" id="footer-text"></div>
+  </div>
+  <div class="main">
+    <div class="topbar">
+      <h1>系统信息</h1>
+      <button class="btn secondary" id="refresh-btn">刷新</button>
+    </div>
+
+    <div class="panel">
+      <table>
+        <tbody id="info-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script src="/js/api.js"></script>
+<script src="/js/branding.js"></script>
+<script src="/js/i18n.js"></script>
+<script>
+function row(label, value) {
+  return `<tr><th style="width:220px;">${label}</th><td>${value}</td></tr>`;
+}
+
+function okBadge(ok, textOk, textFail) {
+  return ok
+    ? `<span class="badge success">${textOk || '正常'}</span>`
+    : `<span class="badge failed">${textFail || '未检测到'}</span>`;
+}
+
+async function load() {
+  applyBranding();
+  await requireLogin();
+  renderNav('system-info');
+  try {
+    const info = await Api.get('/api/system-info');
+    render(info);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function render(info) {
+  const rows = [
+    row('Alpine 版本', info.alpineVersion ? escapeHtml(info.alpineVersion) : '未知(可能不是Alpine)'),
+    row('Kernel', escapeHtml(info.kernel)),
+    row('架构', escapeHtml(info.arch)),
+    row('Node.js 版本', escapeHtml(info.nodeVersion)),
+    row('npm 版本', info.npmVersion ? escapeHtml(info.npmVersion) : okBadge(false)),
+    row('imapsync', info.imapsync.available ? `${okBadge(true)} v${escapeHtml(info.imapsync.version || '?')}` : okBadge(false)),
+    row('Dovecot', info.dovecot.available ? `${okBadge(true)} ${escapeHtml(info.dovecot.version || '')}` : okBadge(false)),
+    row(`Dovecot IMAP (${escapeHtml(String(info.dovecot.host))}:${escapeHtml(String(info.dovecot.port))})`, okBadge(info.dovecot.reachable, '可连接', '连不上')),
+    row('Web 监听端口', info.webPort),
+    row('运行用户', escapeHtml(info.runningUser)),
+    row('内存', `${info.memory.totalMb - info.memory.freeMb} / ${info.memory.totalMb} MB`),
+    row('CPU', `${info.cpu.cores} 核,负载 ${info.cpu.loadavg.join(' / ')}`),
+  ];
+  document.getElementById('info-body').innerHTML = rows.join('');
+}
+
+document.getElementById('refresh-btn').addEventListener('click', load);
+load();
+</script>
+</body>
+</html>

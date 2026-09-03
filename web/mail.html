@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>查看邮件 - Mail Aggregator</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="layout">
+  <div class="sidebar">
+    <div class="brand">📬 <span id="sidebar-brand-text">Mail Aggregator</span></div>
+    <nav id="sidebar-nav"></nav>
+    <div class="footer-bar" id="footer-text"></div>
+  </div>
+  <main class="main mail-main">
+    <div class="topbar">
+      <div>
+        <h1>查看邮件</h1>
+        <div class="hint mail-intro">这里显示已同步到本机 Dovecot 的邮件，只读查看不会修改邮箱内容。</div>
+      </div>
+      <button class="btn secondary" id="refresh-mail">刷新邮件</button>
+    </div>
+
+    <div class="mail-layout">
+      <section class="mail-folders" aria-label="邮箱文件夹">
+        <div class="mail-pane-title">邮箱文件夹</div>
+        <div id="folder-list" class="folder-list"><div class="mail-loading">正在加载…</div></div>
+      </section>
+
+      <section class="mail-list-pane" aria-label="邮件列表">
+        <div class="mail-list-header">
+          <div>
+            <div class="mail-pane-title" id="current-folder" data-i18n-skip>INBOX</div>
+            <div class="hint" id="message-total"></div>
+          </div>
+          <div class="mail-pager">
+            <button class="btn secondary small" id="previous-page">上一页</button>
+            <span id="page-label" class="hint"></span>
+            <button class="btn secondary small" id="next-page">下一页</button>
+          </div>
+        </div>
+        <div id="message-list" class="message-list"><div class="mail-loading">请选择文件夹</div></div>
+      </section>
+
+      <section class="mail-reader" aria-label="邮件正文">
+        <div id="reader-empty" class="mail-reader-empty">选择一封邮件查看正文</div>
+        <article id="reader-content" style="display:none">
+          <header class="mail-message-header">
+            <h2 id="reader-subject" data-i18n-skip></h2>
+            <dl class="mail-meta">
+              <div><dt>发件人</dt><dd id="reader-from" data-i18n-skip></dd></div>
+              <div><dt>收件人</dt><dd id="reader-to" data-i18n-skip></dd></div>
+              <div id="reader-cc-row"><dt>抄送</dt><dd id="reader-cc" data-i18n-skip></dd></div>
+              <div><dt>时间</dt><dd id="reader-date" data-i18n-skip></dd></div>
+            </dl>
+          </header>
+          <div id="reader-attachments" class="mail-attachments" style="display:none"></div>
+          <div id="reader-image-controls" class="mail-image-controls" style="display:none">
+            <button class="btn secondary small" id="load-remote-images" type="button">加载远程图片</button>
+            <span id="remote-image-warning">远程图片可能让发件人知道你打开了邮件，并看到你的网络地址。</span>
+          </div>
+          <div id="reader-body" class="mail-body" data-i18n-skip></div>
+          <div class="mail-safety-note" id="mail-safety-note">内嵌图片和安全排版已还原；脚本、表单、外部样式和危险布局始终被屏蔽。</div>
+        </article>
+      </section>
+    </div>
+  </main>
+</div>
+<script src="/js/api.js"></script>
+<script src="/js/branding.js"></script>
+<script src="/js/i18n.js"></script>
+<script>
+const mailState = { folder: 'INBOX', page: 1, pageSize: 30, totalPages: 1, selectedUid: null, requestId: 0 };
+
+function t(source) {
+  return window.I18n ? window.I18n.t(source) : source;
+}
+
+function readableBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function clearReader(message = '选择一封邮件查看正文') {
+  document.getElementById('reader-empty').textContent = t(message);
+  document.getElementById('reader-empty').style.display = 'flex';
+  document.getElementById('reader-content').style.display = 'none';
+}
+
+async function loadFolders() {
+  const list = document.getElementById('folder-list');
+  list.innerHTML = `<div class="mail-loading">${escapeHtml(t('正在加载…'))}</div>`;
+  const data = await Api.get('/api/mail/folders');
+  if (!data.folders.length) {
+    list.innerHTML = `<div class="mail-loading">${escapeHtml(t('没有可查看的文件夹'))}</div>`;
+    return;
+  }
+  if (!data.folders.some((item) => item.path === mailState.folder)) {
+    mailState.folder = data.folders[0].path;
+  }
+  list.innerHTML = data.folders.map((folder) => `
+    <button class="folder-item ${folder.path === mailState.folder ? 'active' : ''}" data-folder="${escapeHtml(folder.path)}">
+      <span data-i18n-skip>${escapeHtml(folder.name)}</span>
+      <span class="folder-count">${folder.unseen ? `${folder.unseen}/` : ''}${folder.messages}</span>
+    </button>`).join('');
+  list.querySelectorAll('.folder-item').forEach((button) => button.addEventListener('click', () => {
+    mailState.folder = button.dataset.folder;
+    mailState.page = 1;
+    mailState.selectedUid = null;
+    loadFolders().catch(showError);
+    loadMessages().catch(showError);
+    clearReader();
+  }));
+}
+
+async function loadMessages() {
+  const requestId = ++mailState.requestId;
+  const list = document.getElementById('message-list');
+  list.innerHTML = `<div class="mail-loading">${escapeHtml(t('正在加载…'))}</div>`;
+  const query = new URLSearchParams({ folder: mailState.folder, page: mailState.page, pageSize: mailState.pageSize });
+  const data = await Api.get(`/api/mail/messages?${query}`);
+  if (requestId !== mailState.requestId) return;
+  mailState.totalPages = data.totalPages;
+  document.getElementById('current-folder').textContent = data.folder;
+  document.getElementById('message-total').textContent = `${t('共')} ${data.total} ${t('封邮件')}`;
+  document.getElementById('page-label').textContent = `${data.page} / ${data.totalPages}`;
+  document.getElementById('previous-page').disabled = data.page <= 1;
+  document.getElementById('next-page').disabled = data.page >= data.totalPages;
+  if (!data.messages.length) {
+    list.innerHTML = `<div class="mail-loading">${escapeHtml(t('这个文件夹还没有邮件'))}</div>`;
+    return;
+  }
+  list.innerHTML = data.messages.map((message) => `
+    <button class="message-item ${message.seen ? '' : 'unread'} ${message.uid === mailState.selectedUid ? 'active' : ''}" data-uid="${message.uid}">
+      <div class="message-row"><span class="message-from" data-i18n-skip>${escapeHtml(message.from || t('未知发件人'))}</span><time>${escapeHtml(fmtTime(message.date))}</time></div>
+      <div class="message-subject" data-i18n-skip>${escapeHtml(message.subject)}</div>
+      <div class="message-size">${readableBytes(message.size)}${message.flagged ? ' · ★' : ''}</div>
+    </button>`).join('');
+  list.querySelectorAll('.message-item').forEach((button) => button.addEventListener('click', () => {
+    mailState.selectedUid = Number(button.dataset.uid);
+    list.querySelectorAll('.message-item').forEach((item) => item.classList.toggle('active', item === button));
+    loadMessage(mailState.selectedUid).catch(showError);
+  }));
+}
+
+async function loadMessage(uid) {
+  clearReader('正在加载邮件正文…');
+  const folderAtRequest = mailState.folder;
+  const query = new URLSearchParams({ folder: folderAtRequest });
+  const data = await Api.get(`/api/mail/messages/${uid}?${query}`);
+  if (mailState.folder !== folderAtRequest || mailState.selectedUid !== uid) return;
+  const message = data.message;
+  document.getElementById('reader-subject').textContent = message.subject;
+  document.getElementById('reader-from').textContent = message.from || '-';
+  document.getElementById('reader-to').textContent = message.to || '-';
+  document.getElementById('reader-cc').textContent = message.cc || '-';
+  document.getElementById('reader-cc-row').style.display = message.cc ? 'grid' : 'none';
+  document.getElementById('reader-date').textContent = message.date
+    ? new Date(message.date).toLocaleString((window.I18n && window.I18n.locale) || 'zh-CN')
+    : '-';
+
+  const attachments = document.getElementById('reader-attachments');
+  if (message.attachments.length) {
+    attachments.style.display = 'block';
+    attachments.innerHTML = `<strong>${escapeHtml(t('附件'))} (${message.attachments.length})</strong>` + message.attachments.map((item) =>
+      `<span data-i18n-skip>📎 ${escapeHtml(item.filename)} · ${readableBytes(item.size)}</span>`
+    ).join('');
+  } else {
+    attachments.style.display = 'none';
+    attachments.innerHTML = '';
+  }
+
+  const body = document.getElementById('reader-body');
+  if (message.html) body.innerHTML = message.html;
+  else {
+    const pre = document.createElement('pre');
+    pre.textContent = message.text || t('这封邮件没有可显示的正文');
+    body.replaceChildren(pre);
+  }
+  const imageControls = document.getElementById('reader-image-controls');
+  const remoteImageCount = Number(message.remoteImageCount || 0);
+  imageControls.style.display = remoteImageCount ? 'flex' : 'none';
+  document.getElementById('load-remote-images').textContent = remoteImageCount
+    ? `${t('加载远程图片')} (${remoteImageCount})`
+    : t('加载远程图片');
+  document.getElementById('mail-safety-note').textContent = remoteImageCount
+    ? t('内嵌图片和安全排版已还原；远程图片仍被拦截，脚本和危险布局已移除。')
+    : t('内嵌图片和安全排版已还原；脚本、表单、外部样式和危险布局始终被屏蔽。');
+  document.getElementById('reader-empty').style.display = 'none';
+  document.getElementById('reader-content').style.display = 'block';
+  if (window.matchMedia('(max-width: 760px)').matches) {
+    document.querySelector('.mail-reader').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+function loadRemoteImages() {
+  const body = document.getElementById('reader-body');
+  let loaded = 0;
+  body.querySelectorAll('img[data-remote-src]').forEach((image) => {
+    try {
+      const url = new URL(image.dataset.remoteSrc);
+      if (!['http:', 'https:'].includes(url.protocol)) return;
+      image.src = url.href;
+      image.removeAttribute('data-remote-src');
+      loaded += 1;
+    } catch (_) {}
+  });
+  document.getElementById('reader-image-controls').style.display = 'none';
+  if (loaded) document.getElementById('mail-safety-note').textContent = t('远程图片已由你主动加载；脚本、表单、外部样式和危险布局仍然被屏蔽。');
+}
+
+function showError(error) {
+  toast(error.message, 'error');
+}
+
+async function refreshAll() {
+  try {
+    await Promise.all([loadFolders(), loadMessages()]);
+    if (mailState.selectedUid) await loadMessage(mailState.selectedUid);
+  } catch (error) { showError(error); }
+}
+
+document.getElementById('refresh-mail').addEventListener('click', refreshAll);
+document.getElementById('load-remote-images').addEventListener('click', loadRemoteImages);
+document.getElementById('previous-page').addEventListener('click', () => {
+  if (mailState.page > 1) { mailState.page -= 1; clearReader(); loadMessages().catch(showError); }
+});
+document.getElementById('next-page').addEventListener('click', () => {
+  if (mailState.page < mailState.totalPages) { mailState.page += 1; clearReader(); loadMessages().catch(showError); }
+});
+
+(async function initializeMail() {
+  applyBranding();
+  await requireLogin();
+  renderNav('mail');
+  await refreshAll();
+})();
+</script>
+</body>
+</html>
