@@ -146,7 +146,7 @@ test('read-only mail API exposes folders, newest-first list, and sanitized detai
       async connect() { this.connected = true; },
       async logout() { this.usable = false; },
       async list() {
-        return [{ path: 'INBOX', name: 'INBOX', flags: new Set(), status: { messages: 2, unseen: 1 } }];
+        return [{ path: 'Work/INBOX', name: 'INBOX', delimiter: '/', flags: new Set(), status: { messages: 2, unseen: 1 } }];
       },
       async mailboxOpen(folder, options) {
         this.openedReadOnly.push(options.readOnly);
@@ -178,6 +178,7 @@ test('read-only mail API exposes folders, newest-first list, and sanitized detai
 
   const folders = await fetch(`${base}/folders`).then((response) => response.json());
   assert.equal(folders.folders[0].unseen, 1);
+  assert.equal(folders.folders[0].delimiter, '/');
 
   const page = await fetch(`${base}/messages?folder=INBOX&page=1&pageSize=30`).then((response) => response.json());
   assert.deepEqual(page.messages.map((message) => message.uid), [11, 10]);

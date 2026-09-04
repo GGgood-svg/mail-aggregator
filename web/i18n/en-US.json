@@ -41,6 +41,6 @@
     "正在加载…": "Loading…", "请选择文件夹": "Select a folder", "邮件列表": "Message list", "邮件正文": "Message body", "上一页": "Previous", "下一页": "Next", "选择一封邮件查看正文": "Select a message to read it",
     "发件人": "From", "收件人": "To", "抄送": "Cc", "时间": "Date", "加载远程图片": "Load remote images", "远程图片可能让发件人知道你打开了邮件，并看到你的网络地址。": "Remote images may tell the sender that you opened the message and reveal your network address.",
     "内嵌图片和安全排版已还原；脚本、表单、外部样式和危险布局始终被屏蔽。": "Embedded images and safe formatting are preserved; scripts, forms, external styles, and dangerous layouts are always blocked.", "内嵌图片和安全排版已还原；远程图片仍被拦截，脚本和危险布局已移除。": "Embedded images and safe formatting are preserved; remote images remain blocked, and scripts and dangerous layouts were removed.", "远程图片已由你主动加载；脚本、表单、外部样式和危险布局仍然被屏蔽。": "You chose to load remote images; scripts, forms, external styles, and dangerous layouts remain blocked.",
-    "没有可查看的文件夹": "No readable folders", "共": "Total", "封邮件": "messages", "这个文件夹还没有邮件": "This folder has no messages", "未知发件人": "Unknown sender", "正在加载邮件正文…": "Loading message…", "附件": "Attachments", "这封邮件没有可显示的正文": "This message has no displayable body"
+    "没有可查看的文件夹": "No readable folders", "本地邮箱": "Local mailbox", "全部邮件": "All mail", "封未读邮件": "unread messages", "旧版未隔离目录": "Legacy ungrouped folders", "共": "Total", "封邮件": "messages", "这个文件夹还没有邮件": "This folder has no messages", "未知发件人": "Unknown sender", "正在加载邮件正文…": "Loading message…", "附件": "Attachments", "这封邮件没有可显示的正文": "This message has no displayable body"
   }
 }

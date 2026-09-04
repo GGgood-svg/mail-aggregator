@@ -244,6 +244,7 @@ function createMailRouter(dependencies = {}) {
           .map((entry) => ({
             path: entry.path,
             name: entry.name || entry.path,
+            delimiter: entry.delimiter || '/',
             specialUse: entry.specialUse || null,
             messages: Number(entry.status && entry.status.messages || 0),
             unseen: Number(entry.status && entry.status.unseen || 0),

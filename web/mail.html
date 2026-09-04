@@ -71,7 +71,10 @@
 <script src="/js/branding.js"></script>
 <script src="/js/i18n.js"></script>
 <script>
-const mailState = { folder: 'INBOX', page: 1, pageSize: 30, totalPages: 1, selectedUid: null, requestId: 0 };
+const mailState = {
+  folder: 'INBOX', page: 1, pageSize: 30, totalPages: 1,
+  selectedUid: null, requestId: 0, collapsedGroups: new Set(), groupsInitialized: false,
+};
 
 function t(source) {
   return window.I18n ? window.I18n.t(source) : source;
@@ -90,30 +93,177 @@ function clearReader(message = '选择一封邮件查看正文') {
   document.getElementById('reader-content').style.display = 'none';
 }
 
+function folderBelongsTo(folder, root) {
+  const delimiter = folder.delimiter || '/';
+  return folder.path === root || folder.path.startsWith(`${root}${delimiter}`);
+}
+
+function legacyRootCandidates(account) {
+  const values = [account.destination_folder, account.name, String(account.username || '').split('@')[0]];
+  const candidates = new Set();
+  values.forEach((value) => {
+    const normalized = String(value || '').trim();
+    if (!normalized) return;
+    candidates.add(normalized);
+    // Older installs sometimes used the leading ASCII part (QQ, dayuan, etc.)
+    // before the destination folder name was later made more descriptive.
+    const asciiPrefix = normalized.match(/^[a-z0-9][a-z0-9._-]*/i)?.[0];
+    if (asciiPrefix && asciiPrefix.length >= 2) candidates.add(asciiPrefix);
+  });
+  return [...candidates];
+}
+
+function groupFolders(folders, accounts) {
+  const accountGroups = accounts
+    .filter((account) => account.destination_mode === 'subfolder' && account.destination_folder)
+    .map((account) => ({
+      key: `account-${account.id}`,
+      label: account.name,
+      detail: '',
+      configuredRoot: account.destination_folder,
+      root: '',
+      folders: [],
+    }));
+  const localGroup = { key: 'local', label: t('本地邮箱'), detail: '', root: '', folders: [] };
+
+  // Prefer the configured destination, but recognize folder names left behind by
+  // older releases (for example "QQ" vs "QQ邮箱", or "dayuan" vs "dayuan谷歌").
+  for (const group of accountGroups) {
+    const account = accounts.find((item) => `account-${item.id}` === group.key);
+    group.root = legacyRootCandidates(account)
+      .filter((candidate) => folders.some((folder) => folderBelongsTo(folder, candidate)))
+      .sort((a, b) => b.length - a.length)[0] || '';
+    group.detail = group.root || group.configuredRoot;
+  }
+
+  for (const folder of folders) {
+    const group = accountGroups
+      .filter((candidate) => candidate.root && folderBelongsTo(folder, candidate.root))
+      .sort((a, b) => b.root.length - a.root.length)[0];
+    (group || localGroup).folders.push(folder);
+  }
+
+  // If exactly one configured account has no surviving root directory, the
+  // remaining top-level folders are its legacy flat mailbox. Keeping them under
+  // that account is clearer than mixing them into a generic local bucket.
+  const rootlessGroups = accountGroups.filter((group) => !group.root);
+  if (rootlessGroups.length === 1 && localGroup.folders.length) {
+    const legacyGroup = rootlessGroups[0];
+    legacyGroup.folders.push(...localGroup.folders);
+    localGroup.folders = [];
+    legacyGroup.detail = t('旧版未隔离目录');
+  }
+
+  for (const group of accountGroups) {
+    const hasChildren = group.folders.some((folder) => folder.path !== group.root);
+    if (hasChildren) {
+      group.folders = group.folders.filter((folder) => folder.path !== group.root || folder.messages > 0);
+    }
+  }
+  return [...accountGroups, localGroup].filter((group) => group.folders.length);
+}
+
+function relativeFolderName(folder, group) {
+  if (!group.root) return folder.name || folder.path;
+  if (folder.path === group.root) return t('全部邮件');
+  const delimiter = folder.delimiter || '/';
+  return folder.path.slice(group.root.length + delimiter.length).split(delimiter).pop();
+}
+
+function folderDepth(folder, group) {
+  if (!group.root || folder.path === group.root) return 0;
+  const delimiter = folder.delimiter || '/';
+  return Math.max(0, folder.path.slice(group.root.length + delimiter.length).split(delimiter).length - 1);
+}
+
+function folderIcon(folder) {
+  const marker = `${folder.specialUse || ''} ${folder.name || ''}`.toLowerCase();
+  if (marker.includes('inbox')) return '▣';
+  if (marker.includes('sent') || marker.includes('已发送')) return '↗';
+  if (marker.includes('draft') || marker.includes('草稿')) return '✎';
+  if (marker.includes('trash') || marker.includes('deleted') || marker.includes('已删除')) return '⌫';
+  if (marker.includes('junk') || marker.includes('spam') || marker.includes('垃圾')) return '⊘';
+  if (marker.includes('archive') || marker.includes('归档')) return '▤';
+  if (marker.includes('important') || marker.includes('重要')) return '★';
+  return '◇';
+}
+
+function renderFolder(folder, group) {
+  const unread = folder.unseen
+    ? `<strong class="folder-unread">${folder.unseen}</strong>`
+    : '';
+  const total = folder.messages ? `<span class="folder-total">${folder.messages}</span>` : '';
+  const countLabel = folder.unseen
+    ? `${folder.unseen} ${t('封未读邮件')}，${t('共')} ${folder.messages} ${t('封邮件')}`
+    : `${t('共')} ${folder.messages} ${t('封邮件')}`;
+  return `
+    <button class="folder-item ${folder.path === mailState.folder ? 'active' : ''}"
+      data-folder="${escapeHtml(folder.path)}" style="--folder-depth:${folderDepth(folder, group)}"
+      title="${escapeHtml(`${relativeFolderName(folder, group)} · ${countLabel}`)}">
+      <span class="folder-item-main"><span class="folder-icon" aria-hidden="true">${folderIcon(folder)}</span><span class="folder-name" data-i18n-skip>${escapeHtml(relativeFolderName(folder, group))}</span></span>
+      <span class="folder-count">${unread}${total}</span>
+    </button>`;
+}
+
+function selectFolder(path) {
+  if (path === mailState.folder) return;
+  mailState.folder = path;
+  mailState.page = 1;
+  mailState.selectedUid = null;
+  document.querySelectorAll('.folder-item').forEach((item) => item.classList.toggle('active', item.dataset.folder === path));
+  clearReader();
+  loadMessages().catch(showError);
+}
+
 async function loadFolders() {
   const list = document.getElementById('folder-list');
   list.innerHTML = `<div class="mail-loading">${escapeHtml(t('正在加载…'))}</div>`;
-  const data = await Api.get('/api/mail/folders');
+  const [data, accounts] = await Promise.all([
+    Api.get('/api/mail/folders'),
+    Api.get('/api/accounts'),
+  ]);
   if (!data.folders.length) {
     list.innerHTML = `<div class="mail-loading">${escapeHtml(t('没有可查看的文件夹'))}</div>`;
-    return;
+    return false;
   }
   if (!data.folders.some((item) => item.path === mailState.folder)) {
     mailState.folder = data.folders[0].path;
   }
-  list.innerHTML = data.folders.map((folder) => `
-    <button class="folder-item ${folder.path === mailState.folder ? 'active' : ''}" data-folder="${escapeHtml(folder.path)}">
-      <span data-i18n-skip>${escapeHtml(folder.name)}</span>
-      <span class="folder-count">${folder.unseen ? `${folder.unseen}/` : ''}${folder.messages}</span>
-    </button>`).join('');
-  list.querySelectorAll('.folder-item').forEach((button) => button.addEventListener('click', () => {
-    mailState.folder = button.dataset.folder;
-    mailState.page = 1;
-    mailState.selectedUid = null;
-    loadFolders().catch(showError);
-    loadMessages().catch(showError);
-    clearReader();
+  const groups = groupFolders(data.folders, accounts);
+  groups.sort((a, b) => {
+    const aActive = a.folders.some((folder) => folder.path === mailState.folder);
+    const bActive = b.folders.some((folder) => folder.path === mailState.folder);
+    return Number(bActive) - Number(aActive);
+  });
+  if (!mailState.groupsInitialized) {
+    groups.forEach((group) => {
+      if (!group.folders.some((folder) => folder.path === mailState.folder)) {
+        mailState.collapsedGroups.add(group.key);
+      }
+    });
+    mailState.groupsInitialized = true;
+  }
+  list.innerHTML = groups.map((group) => {
+    const collapsed = mailState.collapsedGroups.has(group.key);
+    const unread = group.folders.reduce((sum, folder) => sum + folder.unseen, 0);
+    return `<div class="folder-group ${collapsed ? 'collapsed' : ''}" data-group="${escapeHtml(group.key)}">
+      <button class="folder-group-header" type="button" aria-expanded="${!collapsed}">
+        <span class="folder-chevron" aria-hidden="true">⌄</span>
+        <span class="folder-group-label"><strong data-i18n-skip>${escapeHtml(group.label)}</strong>${group.detail ? `<small data-i18n-skip>${escapeHtml(group.detail)}</small>` : ''}</span>
+        ${unread ? `<span class="folder-group-unread">${unread}</span>` : ''}
+      </button>
+      <div class="folder-group-items">${group.folders.map((folder) => renderFolder(folder, group)).join('')}</div>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('.folder-group-header').forEach((button) => button.addEventListener('click', () => {
+    const group = button.closest('.folder-group');
+    const collapsed = group.classList.toggle('collapsed');
+    button.setAttribute('aria-expanded', String(!collapsed));
+    if (collapsed) mailState.collapsedGroups.add(group.dataset.group);
+    else mailState.collapsedGroups.delete(group.dataset.group);
   }));
+  list.querySelectorAll('.folder-item').forEach((button) => button.addEventListener('click', () => selectFolder(button.dataset.folder)));
+  return true;
 }
 
 async function loadMessages() {
@@ -135,15 +285,24 @@ async function loadMessages() {
   }
   list.innerHTML = data.messages.map((message) => `
     <button class="message-item ${message.seen ? '' : 'unread'} ${message.uid === mailState.selectedUid ? 'active' : ''}" data-uid="${message.uid}">
-      <div class="message-row"><span class="message-from" data-i18n-skip>${escapeHtml(message.from || t('未知发件人'))}</span><time>${escapeHtml(fmtTime(message.date))}</time></div>
-      <div class="message-subject" data-i18n-skip>${escapeHtml(message.subject)}</div>
-      <div class="message-size">${readableBytes(message.size)}${message.flagged ? ' · ★' : ''}</div>
+      <span class="message-unread-dot" aria-hidden="true"></span>
+      <span class="message-content">
+        <span class="message-row"><span class="message-from" data-i18n-skip>${escapeHtml(message.from || t('未知发件人'))}</span><time>${escapeHtml(fmtTime(message.date))}</time></span>
+        <span class="message-subject" data-i18n-skip>${escapeHtml(message.subject)}</span>
+        <span class="message-size">${message.flagged ? '★ · ' : ''}${readableBytes(message.size)}</span>
+      </span>
     </button>`).join('');
   list.querySelectorAll('.message-item').forEach((button) => button.addEventListener('click', () => {
     mailState.selectedUid = Number(button.dataset.uid);
     list.querySelectorAll('.message-item').forEach((item) => item.classList.toggle('active', item === button));
     loadMessage(mailState.selectedUid).catch(showError);
   }));
+  if (!mailState.selectedUid && data.messages.length && window.matchMedia('(min-width: 761px)').matches) {
+    const first = list.querySelector('.message-item');
+    mailState.selectedUid = Number(first.dataset.uid);
+    first.classList.add('active');
+    loadMessage(mailState.selectedUid).catch(showError);
+  }
 }
 
 async function loadMessage(uid) {
@@ -218,8 +377,8 @@ function showError(error) {
 
 async function refreshAll() {
   try {
-    await Promise.all([loadFolders(), loadMessages()]);
-    if (mailState.selectedUid) await loadMessage(mailState.selectedUid);
+    const hasFolders = await loadFolders();
+    if (hasFolders) await loadMessages();
   } catch (error) { showError(error); }
 }
 
