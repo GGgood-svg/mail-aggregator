@@ -235,6 +235,30 @@ function publicMailError(error) {
 function createMailRouter(dependencies = {}) {
   const router = express.Router();
 
+  router.put('/messages/:uid/seen', async (req, res) => {
+    try {
+      const folder = validateMailboxPath(req.query.folder);
+      const uid = parsePositiveInteger(req.params.uid, null);
+      if (!uid || typeof req.body?.seen !== 'boolean') {
+        return res.status(400).json({ error: 'Invalid UID or seen state' });
+      }
+      const seen = await withClient(async (client) => {
+        await client.mailboxOpen(folder, { readOnly: false });
+        const message = await client.fetchOne(uid, { flags: true }, { uid: true });
+        if (!message) { const error = new Error('邮件不存在或已被移除'); error.statusCode = 404; throw error; }
+        const method = req.body.seen ? 'messageFlagsAdd' : 'messageFlagsRemove';
+        await client[method](uid, ['\\Seen'], { uid: true });
+        const updated = await client.fetchOne(uid, { flags: true }, { uid: true });
+        if (!updated || updated.flags.has('\\Seen') !== req.body.seen) throw new Error('Flag update failed');
+        return updated.flags.has('\\Seen');
+      }, dependencies);
+      res.json({ folder, uid, seen });
+    } catch (error) {
+      const safe = publicMailError(error);
+      res.status(safe.statusCode).json({ error: safe.message });
+    }
+  });
+
   router.get('/folders', async (req, res) => {
     try {
       const folders = await withClient(async (client) => {

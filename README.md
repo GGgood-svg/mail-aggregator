@@ -5,7 +5,7 @@
 [![CI](https://github.com/GGgood-svg/mail-aggregator/actions/workflows/ci.yml/badge.svg)](https://github.com/GGgood-svg/mail-aggregator/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-轻量级、自托管的邮件聚合器：通过 `imapsync` 将多个 IMAP 邮箱同步到本机 Dovecot，并提供账号管理、同步任务、运维和只读邮件浏览界面。
+轻量级、自托管的邮件聚合器：通过 `imapsync` 将多个 IMAP 邮箱同步到本机 Dovecot，并提供账号管理、同步任务、运维和邮件浏览界面。
 
 > 项目状态：Public Beta。Alpine Linux 3.21.7 + Node.js 22 + Dovecot 2.3.21.1 + imapsync 2.290 是当前完整验收环境。Debian/Ubuntu 已提供安装适配，但尚未完成同等级真机验收。
 
@@ -16,7 +16,7 @@
 - 手动、定时、批量同步；排队、停止、取消、重试和日志查看
 - 按来源账号隔离目标文件夹，支持文件夹、时间和大小过滤
 - 可选镜像目标端删除，带严格的防误删限制
-- 登录后直接只读浏览本机 Dovecot 中的邮件
+- 登录后浏览本机邮件；主动打开正文后标为本地已读，支持手动标为已读／未读，自动预览不改变状态
 - HTML 邮件安全渲染、CID 内嵌图片和远程图片按需加载
 - 健康检查、失败通知、安全备份、预检、恢复和恢复前快照
 - 简体中文、English、日本語、한국어、Español、Français、Deutsch
@@ -29,7 +29,7 @@
         ▼
     imapsync 队列 ──► 本机 Dovecot / Maildir
         │                      │
-        └── 日志与状态          └── 只读 Web 邮件浏览
+        └── 日志与状态          └── Web 邮件浏览
                   \            /
                    Mail Aggregator
 ```
@@ -190,7 +190,9 @@ npm test
 
 ## 已知限制
 
-- Web 邮件功能目前只读，不支持发送、回复、移动、删除和附件下载
+- Web 邮件支持本地已读／未读切换，不支持发送、回复、移动、删除和附件下载
+- 首次复制保留源邮件标记；后续同步使用 `--noresyncflags` 保留本地标记，不再从源邮箱刷新已有邮件的已读、星标等状态。Web 操作不回写源邮箱。
+- 账号角标表示收件箱未读数；各文件夹单独显示自己的未读数，避免 Gmail 标签重复计数。
 - 所有来源默认汇聚到一个本地 Dovecot 用户，可用账号隔离文件夹区分来源
 - Gmail / Microsoft OAuth 最终效果依赖各自控制台配置、租户策略和真实授权验收
 - Debian/Ubuntu 安装层尚未完成与 Alpine 同等级的真机测试

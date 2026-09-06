@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add verified local read/unread updates with CSRF protection, mark mail read only on explicit opening, and use inbox unread counts for account badges. Preserve existing destination flags during subsequent syncs with --noresyncflags.
+
 - Redesign the read-only mailbox with account-aware folder groups (including legacy renamed and ungrouped destinations), collapsible folder trees, clearer unread/total counts, a wider message list, denser message cards, improved empty state, and automatic first-message preview on desktop.
 - Keep the Node.js 20 compatibility CI lane green by skipping the Dovecot database integration fixture when the Node 22.5+ built-in SQLite test driver is unavailable, and update GitHub's official Actions to their Node 24-based v5 releases.
 - Generate a unique random local Dovecot password for unattended and quick installations instead of using the shared `123456` default; legacy installations keep their existing warning and upgrade behavior.

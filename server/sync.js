@@ -58,6 +58,8 @@ function buildArgs(account, { justFolders = false } = {}) {
     '--passfile2', resolveTargetPassPath(account.id),
 
     '--useuid',
+    // Keep local read/unread edits on messages that have already been copied.
+    '--noresyncflags',
     '--tmpdir', accountCacheDir(account.id),
     '--nofoldersizes',
     '--addheader',

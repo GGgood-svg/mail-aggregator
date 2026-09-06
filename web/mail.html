@@ -17,7 +17,7 @@
     <div class="topbar">
       <div>
         <h1>查看邮件</h1>
-        <div class="hint mail-intro">这里显示已同步到本机 Dovecot 的邮件，只读查看不会修改邮箱内容。</div>
+        <div class="hint mail-intro">主动打开邮件会标为本地已读；账号数字表示收件箱未读数。</div>
       </div>
       <button class="btn secondary" id="refresh-mail">刷新邮件</button>
     </div>
@@ -48,6 +48,7 @@
         <article id="reader-content" style="display:none">
           <header class="mail-message-header">
             <h2 id="reader-subject" data-i18n-skip></h2>
+            <button class="btn secondary small" id="toggle-seen" type="button" data-i18n-skip></button>
             <dl class="mail-meta">
               <div><dt>发件人</dt><dd id="reader-from" data-i18n-skip></dd></div>
               <div><dt>收件人</dt><dd id="reader-to" data-i18n-skip></dd></div>
@@ -245,7 +246,7 @@ async function loadFolders() {
   }
   list.innerHTML = groups.map((group) => {
     const collapsed = mailState.collapsedGroups.has(group.key);
-    const unread = group.folders.reduce((sum, folder) => sum + folder.unseen, 0);
+    const unread = group.folders.filter((folder) => (folder.name || '').toUpperCase() === 'INBOX').reduce((sum, folder) => sum + folder.unseen, 0);
     return `<div class="folder-group ${collapsed ? 'collapsed' : ''}" data-group="${escapeHtml(group.key)}">
       <button class="folder-group-header" type="button" aria-expanded="${!collapsed}">
         <span class="folder-chevron" aria-hidden="true">⌄</span>
@@ -273,6 +274,8 @@ async function loadMessages() {
   const query = new URLSearchParams({ folder: mailState.folder, page: mailState.page, pageSize: mailState.pageSize });
   const data = await Api.get(`/api/mail/messages?${query}`);
   if (requestId !== mailState.requestId) return;
+  const selected = data.messages.find((message) => message.uid === mailState.selectedUid);
+  if (selected) { mailState.seen = selected.seen; updateSeenButton(); }
   mailState.totalPages = data.totalPages;
   document.getElementById('current-folder').textContent = data.folder;
   document.getElementById('message-total').textContent = `${t('共')} ${data.total} ${t('封邮件')}`;
@@ -295,7 +298,7 @@ async function loadMessages() {
   list.querySelectorAll('.message-item').forEach((button) => button.addEventListener('click', () => {
     mailState.selectedUid = Number(button.dataset.uid);
     list.querySelectorAll('.message-item').forEach((item) => item.classList.toggle('active', item === button));
-    loadMessage(mailState.selectedUid).catch(showError);
+    loadMessage(mailState.selectedUid, true).catch(showError);
   }));
   if (!mailState.selectedUid && data.messages.length && window.matchMedia('(min-width: 761px)').matches) {
     const first = list.querySelector('.message-item');
@@ -305,13 +308,15 @@ async function loadMessages() {
   }
 }
 
-async function loadMessage(uid) {
+async function loadMessage(uid, markRead = false) {
   clearReader('正在加载邮件正文…');
   const folderAtRequest = mailState.folder;
   const query = new URLSearchParams({ folder: folderAtRequest });
   const data = await Api.get(`/api/mail/messages/${uid}?${query}`);
   if (mailState.folder !== folderAtRequest || mailState.selectedUid !== uid) return;
   const message = data.message;
+  mailState.seen = message.seen;
+  updateSeenButton();
   document.getElementById('reader-subject').textContent = message.subject;
   document.getElementById('reader-from').textContent = message.from || '-';
   document.getElementById('reader-to').textContent = message.to || '-';
@@ -350,9 +355,29 @@ async function loadMessage(uid) {
     : t('内嵌图片和安全排版已还原；脚本、表单、外部样式和危险布局始终被屏蔽。');
   document.getElementById('reader-empty').style.display = 'none';
   document.getElementById('reader-content').style.display = 'block';
+  if (markRead && !message.seen) await setSeen(true, uid, folderAtRequest);
   if (window.matchMedia('(max-width: 760px)').matches) {
     document.querySelector('.mail-reader').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
+}
+
+function updateSeenButton() {
+  document.getElementById('toggle-seen').textContent = t(mailState.seen ? '标为未读' : '标为已读');
+}
+
+async function setSeen(seen, uid = mailState.selectedUid, folder = mailState.folder) {
+  const button = document.getElementById('toggle-seen');
+  button.disabled = true;
+  try {
+    const result = await Api.put(`/api/mail/messages/${uid}/seen?${new URLSearchParams({ folder })}`, { seen });
+    if (mailState.folder === folder) {
+      document.querySelectorAll('.message-item').forEach((item) => {
+        if (Number(item.dataset.uid) === uid) item.classList.toggle('unread', !result.seen);
+      });
+      if (mailState.selectedUid === uid) { mailState.seen = result.seen; updateSeenButton(); }
+    }
+    await loadFolders();
+  } finally { button.disabled = false; }
 }
 
 function loadRemoteImages() {
@@ -383,12 +408,13 @@ async function refreshAll() {
 }
 
 document.getElementById('refresh-mail').addEventListener('click', refreshAll);
+document.getElementById('toggle-seen').addEventListener('click', () => setSeen(!mailState.seen).catch(showError));
 document.getElementById('load-remote-images').addEventListener('click', loadRemoteImages);
 document.getElementById('previous-page').addEventListener('click', () => {
-  if (mailState.page > 1) { mailState.page -= 1; clearReader(); loadMessages().catch(showError); }
+  if (mailState.page > 1) { mailState.page -= 1; mailState.selectedUid = null; clearReader(); loadMessages().catch(showError); }
 });
 document.getElementById('next-page').addEventListener('click', () => {
-  if (mailState.page < mailState.totalPages) { mailState.page += 1; clearReader(); loadMessages().catch(showError); }
+  if (mailState.page < mailState.totalPages) { mailState.page += 1; mailState.selectedUid = null; clearReader(); loadMessages().catch(showError); }
 });
 
 (async function initializeMail() {

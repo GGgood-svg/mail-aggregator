@@ -1,6 +1,8 @@
 {
   "language": "English",
   "translations": {
+    "标为未读": "Mark as unread", "标为已读": "Mark as read",
+    "主动打开邮件会标为本地已读；账号数字表示收件箱未读数。": "Opening a message marks it read locally; account badges show inbox unread counts.",
     "登录": "Sign in", "用户名": "Username", "密码": "Password", "首次使用,请创建管理员账号(密码至少8位)": "First use: create an administrator account (minimum 8 characters)",
     "邮箱账号": "Mail accounts", "同步日志": "Sync logs", "设置": "Settings", "系统信息": "System information", "退出登录": "Sign out",
     "重新检查": "Check again", "系统状态": "System status", "自动同步调度器": "Automatic sync scheduler", "系统健康检查": "System health check", "正在检查…": "Checking…", "账号统计": "Account statistics", "邮件账号": "Mail accounts", "名称": "Name", "状态": "Status", "邮件总数": "Total messages", "文件夹": "Folders", "最近一次复制": "Last transferred", "最后同步": "Last sync", "还没有添加任何邮箱账号 ·": "No mail account has been added ·", "去添加": "Add one",

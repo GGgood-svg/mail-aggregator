@@ -137,7 +137,7 @@ app.get('/api/branding', (req, res) => {
 // 以下所有API都需要登录 + CSRF token(对GET不做CSRF校验)
 app.use('/api/accounts', requireAuth, requireCsrf, accountsRouter);
 app.use('/api/oauth', requireAuth, requireCsrf, oauthRouter);
-app.use('/api/mail', requireAuth, createMailRouter());
+app.use('/api/mail', requireAuth, requireCsrf, createMailRouter());
 app.use('/api/system/restore', requireAuth, requireCsrf, createRestoreRouter({
   db,
   dirs: DIRS,
