@@ -1,6 +1,9 @@
 {
   "language": "English",
   "translations": {
+    "文件夹全部已读": "Mark folder as read", "此分组全部已读": "Mark group as read",
+    "将以下范围全部标为本地已读（包含所有分页）？": "Mark all local messages in the following folders as read (all pages)?",
+    "部分文件夹失败，请刷新后重试": "Some folders failed; refresh and retry", "已全部标为已读": "All marked as read",
     "标为未读": "Mark as unread", "标为已读": "Mark as read",
     "主动打开邮件会标为本地已读；账号数字表示收件箱未读数。": "Opening a message marks it read locally; account badges show inbox unread counts.",
     "登录": "Sign in", "用户名": "Username", "密码": "Password", "首次使用,请创建管理员账号(密码至少8位)": "First use: create an administrator account (minimum 8 characters)",

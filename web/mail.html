@@ -33,6 +33,7 @@
           <div>
             <div class="mail-pane-title" id="current-folder" data-i18n-skip>INBOX</div>
             <div class="hint" id="message-total"></div>
+            <button class="btn secondary small" id="folder-seen-all" type="button">文件夹全部已读</button>
           </div>
           <div class="mail-pager">
             <button class="btn secondary small" id="previous-page">上一页</button>
@@ -253,6 +254,7 @@ async function loadFolders() {
         <span class="folder-group-label"><strong data-i18n-skip>${escapeHtml(group.label)}</strong>${group.detail ? `<small data-i18n-skip>${escapeHtml(group.detail)}</small>` : ''}</span>
         ${unread ? `<span class="folder-group-unread">${unread}</span>` : ''}
       </button>
+      <button class="btn secondary small group-seen-all" type="button" data-group-key="${escapeHtml(group.key)}">${escapeHtml(t('此分组全部已读'))}</button>
       <div class="folder-group-items">${group.folders.map((folder) => renderFolder(folder, group)).join('')}</div>
     </div>`;
   }).join('');
@@ -264,6 +266,13 @@ async function loadFolders() {
     else mailState.collapsedGroups.delete(group.dataset.group);
   }));
   list.querySelectorAll('.folder-item').forEach((button) => button.addEventListener('click', () => selectFolder(button.dataset.folder)));
+  list.querySelectorAll('.group-seen-all').forEach((button) => {
+    button.disabled = !!mailState.bulkBusy;
+    button.addEventListener('click', () => {
+      const group = groups.find((item) => item.key === button.dataset.groupKey);
+      markAllSeen(group.label, group.folders.map((folder) => folder.path));
+    });
+  });
   return true;
 }
 
@@ -365,6 +374,24 @@ function updateSeenButton() {
   document.getElementById('toggle-seen').textContent = t(mailState.seen ? '标为未读' : '标为已读');
 }
 
+async function markAllSeen(label, folders) {
+  if (mailState.bulkBusy) return;
+  if (!confirm(`${t('将以下范围全部标为本地已读（包含所有分页）？')}\n${label}\n\n${folders.join('\n')}`)) return;
+  mailState.bulkBusy = true;
+  document.querySelectorAll('#folder-seen-all, .group-seen-all').forEach((button) => { button.disabled = true; });
+  try {
+    const data = await Api.put('/api/mail/seen-all', { folders });
+    const failed = data.results.filter((result) => !result.ok);
+    if (failed.length) toast(`${t('部分文件夹失败，请刷新后重试')}：${failed.map((result) => result.folder).join(', ')}`, 'error');
+    else toast(t('已全部标为已读'));
+  } catch (error) { showError(error); }
+  finally {
+    mailState.bulkBusy = false;
+    await refreshAll();
+    document.querySelectorAll('#folder-seen-all, .group-seen-all').forEach((button) => { button.disabled = false; });
+  }
+}
+
 async function setSeen(seen, uid = mailState.selectedUid, folder = mailState.folder) {
   const button = document.getElementById('toggle-seen');
   button.disabled = true;
@@ -408,6 +435,7 @@ async function refreshAll() {
 }
 
 document.getElementById('refresh-mail').addEventListener('click', refreshAll);
+document.getElementById('folder-seen-all').addEventListener('click', () => markAllSeen(mailState.folder, [mailState.folder]));
 document.getElementById('toggle-seen').addEventListener('click', () => setSeen(!mailState.seen).catch(showError));
 document.getElementById('load-remote-images').addEventListener('click', loadRemoteImages);
 document.getElementById('previous-page').addEventListener('click', () => {

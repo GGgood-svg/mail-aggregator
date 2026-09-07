@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add confirmed bulk mark-as-read actions for a folder or displayed account group across all pages, with partial failure reporting and refreshed counts.
+
 - Add verified local read/unread updates with CSRF protection, mark mail read only on explicit opening, and use inbox unread counts for account badges. Preserve existing destination flags during subsequent syncs with --noresyncflags.
 
 - Redesign the read-only mailbox with account-aware folder groups (including legacy renamed and ungrouped destinations), collapsible folder trees, clearer unread/total counts, a wider message list, denser message cards, improved empty state, and automatic first-message preview on desktop.

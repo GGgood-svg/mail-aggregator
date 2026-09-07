@@ -235,6 +235,42 @@ function publicMailError(error) {
 function createMailRouter(dependencies = {}) {
   const router = express.Router();
 
+  router.put('/seen-all', async (req, res) => {
+    try {
+      const input = req.body?.folders;
+      if (!Array.isArray(input) || !input.length || input.length > 500 ||
+          input.some((path) => typeof path !== 'string' || !path.trim())) {
+        return res.status(400).json({ error: 'Invalid folder list' });
+      }
+      const folders = [...new Set(input.map(validateMailboxPath))];
+      const results = await withClient(async (client) => {
+        const available = new Set((await client.list()).filter((entry) => !entry.flags?.has('\\Noselect')).map((entry) => entry.path));
+        if (folders.some((folder) => !available.has(folder))) {
+          const error = new Error('文件夹不存在，请刷新后重试'); error.statusCode = 400; throw error;
+        }
+        const results = [];
+        for (const folder of folders) {
+          try {
+            await client.mailboxOpen(folder, { readOnly: false });
+            const uids = await client.search({ seen: false }, { uid: true });
+            let updated = 0;
+            for (let offset = 0; offset < uids.length; offset += 500) {
+              const batch = uids.slice(offset, offset + 500);
+              if (!await client.messageFlagsAdd(batch, ['\\Seen'], { uid: true })) throw new Error('Flag update failed');
+              updated += batch.length;
+            }
+            results.push({ folder, ok: true, updated });
+          } catch (_) { results.push({ folder, ok: false }); }
+        }
+        return results;
+      }, dependencies);
+      res.json({ results });
+    } catch (error) {
+      const safe = publicMailError(error);
+      res.status(safe.statusCode).json({ error: safe.message });
+    }
+  });
+
   router.put('/messages/:uid/seen', async (req, res) => {
     try {
       const folder = validateMailboxPath(req.query.folder);
