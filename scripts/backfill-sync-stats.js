@@ -14,13 +14,11 @@ const { parseSummary } = require('../server/sync-output');
 
 const logsRoot = `${path.resolve(DIRS.logs)}${path.sep}`;
 const rows = db.prepare(`
-  SELECT j.* FROM sync_jobs j
-  JOIN (
-    SELECT account_id, MAX(id) AS id FROM sync_jobs
-    WHERE status = 'success' AND log_file IS NOT NULL GROUP BY account_id
-  ) latest ON latest.id = j.id
-  JOIN accounts a ON a.id = j.account_id
-  WHERE a.last_host2_messages IS NULL OR a.last_host2_folders IS NULL
+  SELECT * FROM sync_jobs
+  WHERE status = 'success' AND log_file IS NOT NULL
+    AND (host1_messages IS NULL OR host2_messages IS NULL
+      OR host1_folders IS NULL OR host2_folders IS NULL)
+  ORDER BY id
 `).all();
 
 let updated = 0;
@@ -43,4 +41,4 @@ for (const row of rows) {
   } catch (_) {}
 }
 
-console.log(`Backfilled sync totals for ${updated} account(s).`);
+console.log(`Backfilled sync totals for ${updated} job(s).`);

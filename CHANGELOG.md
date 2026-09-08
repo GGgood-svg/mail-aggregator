@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Restore message and folder totals with imapsync 2.290 by parsing its per-folder statistics when legacy Host1/Host2 summary counters are absent.
+- Restore message and folder totals with imapsync 2.290 by parsing its per-folder statistics when legacy Host1/Host2 summary counters are absent, including every retained historical successful job.
 
 - Add confirmed bulk mark-as-read actions for a folder or displayed account group across all pages, with partial failure reporting and refreshed counts.
 
