@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Restore message and folder totals with imapsync 2.290 by parsing its per-folder statistics when legacy Host1/Host2 summary counters are absent.
+
 - Add confirmed bulk mark-as-read actions for a folder or displayed account group across all pages, with partial failure reporting and refreshed counts.
 
 - Add verified local read/unread updates with CSRF protection, mark mail read only on explicit opening, and use inbox unread counts for account badges. Preserve existing destination flags during subsequent syncs with --noresyncflags.

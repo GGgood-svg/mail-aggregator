@@ -1,16 +1,31 @@
 // imapsync output parsing is kept dependency-free so it can be tested without
 // SQLite, Dovecot, or a real imapsync process.
 function parseSummary(output) {
+  const text = String(output || '');
   const grabInt = (re) => {
-    const match = String(output || '').match(re);
+    const match = text.match(re);
     return match ? parseInt(match[1], 10) : null;
   };
 
+  // imapsync 2.290 no longer prints the old "HostN Nb messages/folders"
+  // summary lines. Reconstruct the same totals from its per-folder SELECT
+  // diagnostics, de-duplicating folder names in case a retry repeats a line.
+  const folderTotals = (host) => {
+    const totals = new Map();
+    const pattern = new RegExp(`Host${host}:\\s+folder\\s+\\[(.*)\\]\\s+has\\s+(\\d+)\\s+messages\\s+in\\s+total`, 'gi');
+    let match;
+    while ((match = pattern.exec(text))) totals.set(match[1], parseInt(match[2], 10));
+    if (!totals.size) return null;
+    return { messages: [...totals.values()].reduce((sum, value) => sum + value, 0), folders: totals.size };
+  };
+  const host1Fallback = folderTotals(1);
+  const host2Fallback = folderTotals(2);
+
   return {
-    host1Messages: grabInt(/Host1\s+Nb\s+messages\s*:\s*(\d+)/i),
-    host2Messages: grabInt(/Host2\s+Nb\s+messages\s*:\s*(\d+)/i),
-    host1Folders: grabInt(/Host1\s+Nb\s+folders\s*:\s*(\d+)/i),
-    host2Folders: grabInt(/Host2\s+Nb\s+folders\s*:\s*(\d+)/i),
+    host1Messages: grabInt(/Host1\s+Nb\s+messages\s*:\s*(\d+)/i) ?? host1Fallback?.messages ?? null,
+    host2Messages: grabInt(/Host2\s+Nb\s+messages\s*:\s*(\d+)/i) ?? host2Fallback?.messages ?? null,
+    host1Folders: grabInt(/Host1\s+Nb\s+folders\s*:\s*(\d+)/i) ?? host1Fallback?.folders ?? null,
+    host2Folders: grabInt(/Host2\s+Nb\s+folders\s*:\s*(\d+)/i) ?? host2Fallback?.folders ?? null,
     messagesTransferred: grabInt(/Messages\s+transferred\s*:\s*(\d+)/i),
     messagesSkipped: grabInt(/Messages\s+skipped\s*:\s*(\d+)/i),
     errors: grabInt(/Detected\s+(\d+)\s+errors?/i),

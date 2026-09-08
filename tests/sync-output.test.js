@@ -37,6 +37,28 @@ test('parseSummary returns null for counters absent from output', () => {
   });
 });
 
+test('parseSummary reconstructs totals from imapsync 2.290 per-folder output', () => {
+  const output = `
+Host1: folder [INBOX] has 4868 messages in total (mentioned by SELECT)
+Host2: folder [QQ.INBOX] has 4868 messages in total (mentioned by SELECT)
+Host1: folder [Drafts] has 4 messages in total (mentioned by SELECT)
+Host2: folder [QQ.Drafts] has 4 messages in total (mentioned by SELECT)
+Host2: folder [QQ.INBOX] has 4868 messages in total (mentioned by SELECT)
+Messages transferred : 0
+Messages skipped : 4872
+Detected 0 errors
+`;
+  assert.deepEqual(parseSummary(output), {
+    host1Messages: 4872,
+    host2Messages: 4872,
+    host1Folders: 2,
+    host2Folders: 2,
+    messagesTransferred: 0,
+    messagesSkipped: 4872,
+    errors: 0,
+  });
+});
+
 test('categorizeTestError gives timeout precedence over process output', () => {
   assert.equal(categorizeTestError('SSL authentication failed', true).category, 'timeout');
 });
