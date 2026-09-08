@@ -14,7 +14,7 @@ function isValidDestinationFolder(value) {
 
 function applyDestinationStrategy(args, account) {
   if (account.destination_mode === 'subfolder') {
-    args.push('--subfolder2', account.destination_folder);
+    args.push('--subfolder2', account.mailbox_folder || account.destination_folder);
   }
   return args;
 }

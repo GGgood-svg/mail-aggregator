@@ -75,8 +75,10 @@ function cleanupExpired(db, logDir, retentionDays, nowMs = Date.now()) {
   };
 }
 
-function cleanupKeepLatest(db, logDir, keep) {
-  const accounts = db.prepare('SELECT id FROM accounts').all();
+function cleanupKeepLatest(db, logDir, keep, ownerUserId = null) {
+  const accounts = ownerUserId === null
+    ? db.prepare('SELECT id FROM accounts').all()
+    : db.prepare('SELECT id FROM accounts WHERE owner_user_id=?').all(ownerUserId);
   const jobs = [];
   const selectOld = db.prepare(
     `SELECT id, log_file FROM sync_jobs

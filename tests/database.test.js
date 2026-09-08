@@ -90,9 +90,33 @@ integrationTest('database initialization enables WAL, foreign keys, and current 
       assert.equal(account.max_age_days, null);
       assert.equal(account.max_size_mb, null);
       assert.equal(account.deletion_mode, 'archive');
+      const accountColumns = db.prepare('PRAGMA table_info(accounts)').all().map((row) => row.name);
+      const userColumns = db.prepare('PRAGMA table_info(admin_users)').all().map((row) => row.name);
+      for (const name of ['owner_user_id', 'mailbox_folder']) assert.ok(accountColumns.includes(name));
+      for (const name of ['role', 'enabled', 'session_version', 'mail_access_all']) assert.ok(userColumns.includes(name));
     } finally {
       db.close();
     }
+  });
+});
+
+integrationTest('startup assigns legacy accounts to the first administrator without moving folders', () => {
+  withTempDatabase((dataDir) => {
+    let loaded = loadDatabase(dataDir);
+    const userId = loaded.db.prepare("INSERT INTO admin_users(username,password_hash) VALUES('legacy','x')").run().lastInsertRowid;
+    const accountId = loaded.db.prepare(`INSERT INTO accounts(name,provider,host,username,destination_mode,destination_folder)
+      VALUES('old','custom','imap.example.test','old@example.test','subfolder','Old Mail')`).run().lastInsertRowid;
+    loaded.db.close();
+    delete require.cache[dbModulePath];
+    loaded = loadDatabase(dataDir);
+    try {
+      const user = loaded.db.prepare('SELECT role,mail_access_all FROM admin_users WHERE id=?').get(userId);
+      const account = loaded.db.prepare('SELECT owner_user_id,mailbox_folder FROM accounts WHERE id=?').get(accountId);
+      assert.equal(user.role, 'admin');
+      assert.equal(user.mail_access_all, 1);
+      assert.equal(account.owner_user_id, userId);
+      assert.equal(account.mailbox_folder, 'Old Mail');
+    } finally { loaded.db.close(); }
   });
 });
 
@@ -130,19 +154,21 @@ integrationTest('database permits only one active job per account and cascades d
   });
 });
 
-integrationTest('isolated accounts cannot share a destination folder under the same local user', () => {
+integrationTest('display folders are unique per Web user but reusable by another user', () => {
   withTempDatabase((dataDir) => {
     const { db } = loadDatabase(dataDir);
     try {
+      const firstOwner = db.prepare("INSERT INTO admin_users(username,password_hash) VALUES('first','x')").run().lastInsertRowid;
+      const secondOwner = db.prepare("INSERT INTO admin_users(username,password_hash) VALUES('second','x')").run().lastInsertRowid;
       const insert = db.prepare(`INSERT INTO accounts
-        (name, provider, host, port, ssl, username, local_user, destination_mode, destination_folder)
-        VALUES (?, 'custom', 'imap.example.test', 993, 1, ?, ?, 'subfolder', ?)`);
-      insert.run('one', 'one@example.test', 'mailuser', 'QQ Mail');
+        (name, provider, host, port, ssl, username, local_user, destination_mode, destination_folder, owner_user_id)
+        VALUES (?, 'custom', 'imap.example.test', 993, 1, ?, ?, 'subfolder', ?, ?)`);
+      insert.run('one', 'one@example.test', 'mailuser', 'QQ Mail', firstOwner);
       assert.throws(
-        () => insert.run('two', 'two@example.test', 'mailuser', 'qq mail'),
+        () => insert.run('two', 'two@example.test', 'mailuser', 'qq mail', firstOwner),
         /UNIQUE constraint failed/
       );
-      assert.doesNotThrow(() => insert.run('three', 'three@example.test', 'otheruser', 'QQ Mail'));
+      assert.doesNotThrow(() => insert.run('three', 'three@example.test', 'mailuser', 'QQ Mail', secondOwner));
     } finally {
       db.close();
     }

@@ -352,9 +352,12 @@ function cancelJob(jobId, accountId) {
 
 // v0.1.6: 对失败/中断/已取消的历史任务创建一个新的同步任务。
 // 不复用旧记录，保留完整审计轨迹；仍然通过账号级唯一索引防止重复排队。
-function retryJob(jobId) {
+function retryJob(jobId, ownerUserId = null) {
   if (maintenanceLock.current() === 'restore') return { ok: false, reason: 'maintenance' };
-  const previous = db.prepare('SELECT account_id FROM sync_jobs WHERE id=?').get(jobId);
+  const previous = ownerUserId === null
+    ? db.prepare('SELECT account_id FROM sync_jobs WHERE id=?').get(jobId)
+    : db.prepare(`SELECT j.account_id FROM sync_jobs j JOIN accounts a ON a.id=j.account_id
+        WHERE j.id=? AND a.owner_user_id=?`).get(jobId, ownerUserId);
   if (!previous) return { ok: false, reason: 'not_found' };
   const account = getAccount(previous.account_id);
   if (!account || !accountHasCredential(account)) {
@@ -367,8 +370,10 @@ function retryJob(jobId) {
   return result;
 }
 
-function triggerAllEnabled() {
-  const accounts = db.prepare('SELECT id FROM accounts WHERE enabled = 1 ORDER BY id').all();
+function triggerAllEnabled(ownerUserId = null) {
+  const accounts = ownerUserId === null
+    ? db.prepare('SELECT id FROM accounts WHERE enabled = 1 ORDER BY id').all()
+    : db.prepare('SELECT id FROM accounts WHERE enabled=1 AND owner_user_id=? ORDER BY id').all(ownerUserId);
   const result = { queued: [], skipped: [] };
   for (const account of accounts) {
     const outcome = triggerSync(account.id);
@@ -378,8 +383,11 @@ function triggerAllEnabled() {
   return result;
 }
 
-function cancelAllQueued() {
-  return jobStore.cancelAllQueued(db);
+function cancelAllQueued(ownerUserId = null) {
+  if (ownerUserId === null) return jobStore.cancelAllQueued(db);
+  const info = db.prepare(`UPDATE sync_jobs SET status='cancelled',finished_at=datetime('now')
+    WHERE status='queued' AND account_id IN (SELECT id FROM accounts WHERE owner_user_id=?)`).run(ownerUserId);
+  return { cancelled: info.changes };
 }
 
 // ---- 连接测试:60秒后请求终止,错误分类,不做正式同步 ----

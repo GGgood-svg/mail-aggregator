@@ -96,24 +96,28 @@ async function getSystemStatus(localImapHost, localImapPort, schedulerStatus) {
   };
 }
 
-function getAccountStats() {
-  const total = db.prepare('SELECT COUNT(*) c FROM accounts').get().c;
+function getAccountStats(ownerUserId = null) {
+  const ownerSql = ownerUserId === null ? '' : ' AND owner_user_id = ?';
+  const ownerParams = ownerUserId === null ? [] : [ownerUserId];
+  const total = db.prepare(`SELECT COUNT(*) c FROM accounts WHERE 1=1${ownerSql}`).get(...ownerParams).c;
   const ok = db
-    .prepare("SELECT COUNT(*) c FROM accounts WHERE last_sync_status = 'success'")
-    .get().c;
+    .prepare(`SELECT COUNT(*) c FROM accounts WHERE last_sync_status='success'${ownerSql}`)
+    .get(...ownerParams).c;
   const failed = db
-    .prepare("SELECT COUNT(*) c FROM accounts WHERE last_sync_status IN ('failed', 'timed_out')")
-    .get().c;
+    .prepare(`SELECT COUNT(*) c FROM accounts WHERE last_sync_status IN ('failed','timed_out')${ownerSql}`)
+    .get(...ownerParams).c;
   const running = db
     .prepare(
-      `SELECT COUNT(*) c FROM sync_jobs WHERE status = 'running'`
+      `SELECT COUNT(*) c FROM sync_jobs j JOIN accounts a ON a.id=j.account_id
+       WHERE j.status='running'${ownerUserId === null ? '' : ' AND a.owner_user_id=?'}`
     )
-    .get().c;
+    .get(...ownerParams).c;
   const queued = db
     .prepare(
-      `SELECT COUNT(*) c FROM sync_jobs WHERE status = 'queued'`
+      `SELECT COUNT(*) c FROM sync_jobs j JOIN accounts a ON a.id=j.account_id
+       WHERE j.status='queued'${ownerUserId === null ? '' : ' AND a.owner_user_id=?'}`
     )
-    .get().c;
+    .get(...ownerParams).c;
   return { total, ok, failed, running, queued };
 }
 

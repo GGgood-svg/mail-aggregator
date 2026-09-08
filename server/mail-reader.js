@@ -232,17 +232,42 @@ function publicMailError(error) {
   return wrapped;
 }
 
+function mailAccessForRequest(req, dependencies = {}) {
+  if (dependencies.mailAccessForRequest) return dependencies.mailAccessForRequest(req);
+  // Pure router tests mount this module without the application's auth middleware.
+  if (!req.user) return { all: true, roots: [] };
+  if (req.user.mail_access_all) return { all: true, roots: [] };
+  const { db } = require('./db');
+  const rows = db.prepare(`SELECT COALESCE(mailbox_folder,destination_folder) AS mailbox_folder FROM accounts
+    WHERE owner_user_id=? AND destination_mode='subfolder' AND destination_folder IS NOT NULL`).all(req.user.id);
+  return { all: false, roots: rows.map((row) => row.mailbox_folder) };
+}
+
+function folderAllowed(folder, access) {
+  if (access.all) return true;
+  return access.roots.some((root) => folder === root || folder.startsWith(`${root}.`) || folder.startsWith(`${root}/`));
+}
+
+function requireFolderAccess(folder, access) {
+  if (folderAllowed(folder, access)) return;
+  const error = new Error('文件夹不存在或不属于当前用户');
+  error.statusCode = 404;
+  throw error;
+}
+
 function createMailRouter(dependencies = {}) {
   const router = express.Router();
 
   router.put('/seen-all', async (req, res) => {
     try {
+      const access = mailAccessForRequest(req, dependencies);
       const input = req.body?.folders;
       if (!Array.isArray(input) || !input.length || input.length > 500 ||
           input.some((path) => typeof path !== 'string' || !path.trim())) {
         return res.status(400).json({ error: 'Invalid folder list' });
       }
       const folders = [...new Set(input.map(validateMailboxPath))];
+      folders.forEach((folder) => requireFolderAccess(folder, access));
       const results = await withClient(async (client) => {
         const available = new Set((await client.list()).filter((entry) => !entry.flags?.has('\\Noselect')).map((entry) => entry.path));
         if (folders.some((folder) => !available.has(folder))) {
@@ -274,6 +299,7 @@ function createMailRouter(dependencies = {}) {
   router.put('/messages/:uid/seen', async (req, res) => {
     try {
       const folder = validateMailboxPath(req.query.folder);
+      requireFolderAccess(folder, mailAccessForRequest(req, dependencies));
       const uid = parsePositiveInteger(req.params.uid, null);
       if (!uid || typeof req.body?.seen !== 'boolean') {
         return res.status(400).json({ error: 'Invalid UID or seen state' });
@@ -297,10 +323,12 @@ function createMailRouter(dependencies = {}) {
 
   router.get('/folders', async (req, res) => {
     try {
+      const access = mailAccessForRequest(req, dependencies);
       const folders = await withClient(async (client) => {
         const entries = await client.list({ statusQuery: { messages: true, unseen: true } });
         return entries
           .filter((entry) => !(entry.flags instanceof Set && entry.flags.has('\\Noselect')))
+          .filter((entry) => folderAllowed(entry.path, access))
           .map((entry) => ({
             path: entry.path,
             name: entry.name || entry.path,
@@ -325,6 +353,7 @@ function createMailRouter(dependencies = {}) {
   router.get('/messages', async (req, res) => {
     try {
       const folder = validateMailboxPath(req.query.folder);
+      requireFolderAccess(folder, mailAccessForRequest(req, dependencies));
       const page = parsePositiveInteger(req.query.page, 1);
       const pageSize = parsePositiveInteger(req.query.pageSize, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
       const result = await withClient(async (client) => {
@@ -359,6 +388,7 @@ function createMailRouter(dependencies = {}) {
   router.get('/messages/:uid', async (req, res) => {
     try {
       const folder = validateMailboxPath(req.query.folder);
+      requireFolderAccess(folder, mailAccessForRequest(req, dependencies));
       const uid = parsePositiveInteger(req.params.uid, null);
       if (!uid) {
         const error = new Error('邮件编号不合法');
@@ -418,5 +448,6 @@ module.exports = {
   sanitizeMessageHtml,
   serializeSummary,
   serializeParsedMessage,
+  folderAllowed,
   createMailRouter,
 };

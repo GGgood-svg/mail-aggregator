@@ -1,6 +1,7 @@
 // CSRF token在登录/me接口返回后缓存在这个模块变量里,不落盘(不用localStorage/sessionStorage),
 // 每次页面加载都通过 requireLogin() -> /api/auth/me 重新获取一次
 let csrfToken = null;
+let currentUser = null;
 
 function setCsrfToken(token) {
   csrfToken = token || null;
@@ -154,6 +155,7 @@ async function requireLogin() {
     if (window.I18n && window.I18n.ready) await window.I18n.ready;
     const me = await Api.get('/api/auth/me');
     setCsrfToken(me.csrfToken);
+    currentUser = me;
     return me;
   } catch (e) {
     window.location.href = '/login.html';
@@ -172,8 +174,12 @@ function renderNav(active) {
     { href: '/mail.html', label: '查看邮件', key: 'mail' },
     { href: '/accounts.html', label: '邮箱账号', key: 'accounts' },
     { href: '/logs.html', label: '同步日志', key: 'logs' },
-    { href: '/settings.html', label: '设置', key: 'settings' },
-    { href: '/system-info.html', label: '系统信息', key: 'system-info' },
+    { href: '/profile.html', label: '个人安全', key: 'profile' },
+    ...(currentUser && currentUser.role === 'admin' ? [
+      { href: '/users.html', label: '用户管理', key: 'users' },
+      { href: '/settings.html', label: '设置', key: 'settings' },
+      { href: '/system-info.html', label: '系统信息', key: 'system-info' },
+    ] : []),
   ];
   const nav = document.getElementById('sidebar-nav');
   if (!nav) return;
@@ -182,7 +188,7 @@ function renderNav(active) {
       (i) =>
         `<a href="${i.href}" class="${i.key === active ? 'active' : ''}">${window.I18n ? window.I18n.t(i.label) : i.label}</a>`
     )
-    .join('') + `<a href="#" id="logout-link" style="margin-top:12px;border-top:1px solid var(--panel-border);padding-top:14px;">${window.I18n ? window.I18n.t('退出登录') : '退出登录'}</a>`;
+    .join('') + `<div style="padding:14px 20px 3px;color:var(--text-dim);font-size:12px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(currentUser?.username || '')}</div><a href="#" id="logout-link" style="border-top:1px solid var(--panel-border);padding-top:14px;">${window.I18n ? window.I18n.t('退出登录') : '退出登录'}</a>`;
   document.getElementById('logout-link').addEventListener('click', (e) => {
     e.preventDefault();
     logout();

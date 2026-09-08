@@ -31,17 +31,19 @@ function callbackUri(baseUrl, oauthProvider) {
 }
 
 router.get('/config', (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: '仅管理员可以查看OAuth2系统配置' });
   try { res.json(publicOAuthConfig()); }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 router.put('/config', (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: '仅管理员可以修改OAuth2系统配置' });
   try { res.json({ ok: true, ...saveOAuthConfig(req.body || {}) }); }
   catch (error) { res.status(400).json({ error: error.message }); }
 });
 
 router.post('/accounts/:id/start', (req, res) => {
-  const account = db.prepare('SELECT * FROM accounts WHERE id=?').get(req.params.id);
+  const account = db.prepare('SELECT * FROM accounts WHERE id=? AND owner_user_id=?').get(req.params.id, req.user.id);
   if (!account) return res.status(404).json({ error: '账号不存在' });
   if (account.auth_type !== 'oauth2') return res.status(400).json({ error: '该账号未使用OAuth2' });
   const active = db.prepare("SELECT 1 FROM sync_jobs WHERE account_id=? AND status IN ('queued','running')").get(account.id);
@@ -63,6 +65,7 @@ router.post('/accounts/:id/start', (req, res) => {
       oauthProvider,
       redirectUri,
       createdAt: Date.now(),
+      ownerUserId: req.user.id,
     };
     const authorizationUrl = buildAuthorizationUrl({
       accountProvider: account.provider,
@@ -99,7 +102,7 @@ router.get('/callback/:provider', async (req, res) => {
   if (typeof req.query.code !== 'string' || !req.query.code) return redirect('error', '授权服务器没有返回授权码');
 
   try {
-    const account = db.prepare('SELECT * FROM accounts WHERE id=?').get(flow.accountId);
+    const account = db.prepare('SELECT * FROM accounts WHERE id=? AND owner_user_id=?').get(flow.accountId, flow.ownerUserId);
     if (!account || account.auth_type !== 'oauth2' || account.provider !== flow.accountProvider) {
       throw new Error('账号已删除或认证方式已经改变');
     }

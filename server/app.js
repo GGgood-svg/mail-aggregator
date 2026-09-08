@@ -7,8 +7,9 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const { db, DIRS } = require('./db');
-const { router: authRouter, requireAuth, requireCsrf, verifyAdminPassword } = require('./auth');
+const { router: authRouter, requireAuth, requireAdmin, requireCsrf, verifyAdminPassword, sessionUser } = require('./auth');
 const accountsRouter = require('./accounts');
+const usersRouter = require('./users');
 const oauthRouter = require('./oauth-router');
 const scheduler = require('./scheduler');
 const { getSystemStatus, getAccountStats, getExtendedSystemInfo, getUpdateStatus } = require('./system');
@@ -138,7 +139,8 @@ app.get('/api/branding', (req, res) => {
 app.use('/api/accounts', requireAuth, requireCsrf, accountsRouter);
 app.use('/api/oauth', requireAuth, requireCsrf, oauthRouter);
 app.use('/api/mail', requireAuth, requireCsrf, createMailRouter());
-app.use('/api/system/restore', requireAuth, requireCsrf, createRestoreRouter({
+app.use('/api/users', requireAuth, requireAdmin, requireCsrf, usersRouter);
+app.use('/api/system/restore', requireAuth, requireAdmin, requireCsrf, createRestoreRouter({
   db,
   dirs: DIRS,
   version: APP_VERSION,
@@ -148,7 +150,7 @@ app.use('/api/system/restore', requireAuth, requireCsrf, createRestoreRouter({
   isSecureRequest: (req) => req.secure || isLoopbackAddress(req.ip),
 }));
 
-app.get('/api/settings', requireAuth, (req, res) => {
+app.get('/api/settings', requireAuth, requireAdmin, (req, res) => {
   const rows = db.prepare('SELECT key, value FROM settings').all();
   const settings = {};
   for (const r of rows) settings[r.key] = r.value;
@@ -160,21 +162,21 @@ app.get('/api/settings', requireAuth, (req, res) => {
   res.json(settings);
 });
 
-app.get('/api/health', requireAuth, async (req, res) => {
+app.get('/api/health', requireAuth, requireAdmin, async (req, res) => {
   try { res.json(await getHealthReport()); }
   catch (error) { res.status(500).json({ error: '健康检查失败' }); }
 });
 
-app.get('/api/notifications/settings', requireAuth, (req, res) => {
+app.get('/api/notifications/settings', requireAuth, requireAdmin, (req, res) => {
   res.json(notifications.publicConfig());
 });
 
-app.put('/api/notifications/settings', requireAuth, requireCsrf, (req, res) => {
+app.put('/api/notifications/settings', requireAuth, requireAdmin, requireCsrf, (req, res) => {
   try { res.json({ ok: true, ...notifications.saveConfig(req.body || {}) }); }
   catch (error) { res.status(400).json({ error: error.message }); }
 });
 
-app.put('/api/settings', requireAuth, requireCsrf, (req, res) => {
+app.put('/api/settings', requireAuth, requireAdmin, requireCsrf, (req, res) => {
   const errors = [];
 
   // branding字段做长度限制,防止极端内容把页面布局撑坏;内容本身允许任意文本,
@@ -286,24 +288,24 @@ app.get('/api/jobs', requireAuth, (req, res) => {
   if (status !== null && !JOB_STATUSES.includes(status)) {
     return res.status(400).json({ error: '任务状态筛选值不合法' });
   }
-  res.json(listJobs(db, { accountId, status, page, pageSize }));
+  res.json(listJobs(db, { accountId, ownerUserId: req.user.id, status, page, pageSize }));
 });
 
 app.post('/api/sync/all', requireAuth, requireCsrf, (req, res) => {
   try {
-    res.json({ ok: true, ...triggerAllEnabled() });
+    res.json({ ok: true, ...triggerAllEnabled(req.user.id) });
   } catch (error) {
     res.status(500).json({ error: `批量同步失败: ${error.message}` });
   }
 });
 
 app.post('/api/jobs/cancel-queued', requireAuth, requireCsrf, (req, res) => {
-  res.json({ ok: true, ...cancelAllQueued() });
+  res.json({ ok: true, ...cancelAllQueued(req.user.id) });
 });
 
 app.post('/api/jobs/:jobId/retry', requireAuth, requireCsrf, (req, res) => {
   try {
-    const result = retryJob(req.params.jobId);
+    const result = retryJob(req.params.jobId, req.user.id);
     if (!result.ok) {
       const messages = {
         not_found: '任务不存在',
@@ -324,25 +326,26 @@ app.post('/api/jobs/:jobId/retry', requireAuth, requireCsrf, (req, res) => {
 app.delete('/api/jobs/old', requireAuth, requireCsrf, (req, res) => {
   const keep = req.query.keep === undefined ? 30 : parseIntegerInRange(req.query.keep, 1, 1000);
   if (keep === null) return res.status(400).json({ error: '保留条数必须是 1-1000 之间的整数' });
-  const result = cleanupKeepLatest(db, DIRS.logs, keep);
+  const result = cleanupKeepLatest(db, DIRS.logs, keep, req.user.id);
   res.json({ ok: true, ...result });
 });
 
 app.get('/api/jobs/:jobId/log', requireAuth, (req, res) => {
-  const job = db.prepare('SELECT * FROM sync_jobs WHERE id = ?').get(req.params.jobId);
+  const job = db.prepare(`SELECT j.* FROM sync_jobs j JOIN accounts a ON a.id=j.account_id
+    WHERE j.id=? AND a.owner_user_id=?`).get(req.params.jobId, req.user.id);
   if (!job || !sendJobLog(res, DIRS.logs, job)) {
     return res.status(404).json({ error: '日志不存在' });
   }
 });
 
-app.get('/api/system-info', requireAuth, async (req, res) => {
+app.get('/api/system-info', requireAuth, requireAdmin, async (req, res) => {
   const local = localDovecot();
   const info = await getExtendedSystemInfo(local.host, local.port);
   info.webPort = PORT;
   res.json(info);
 });
 
-app.get('/api/system-updates', requireAuth, async (req, res) => {
+app.get('/api/system-updates', requireAuth, requireAdmin, async (req, res) => {
   try {
     res.json(await getUpdateStatus());
   } catch (e) {
@@ -350,7 +353,7 @@ app.get('/api/system-updates', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/system/backup', requireAuth, requireCsrf, async (req, res) => {
+app.post('/api/system/backup', requireAuth, requireAdmin, requireCsrf, async (req, res) => {
   if (!req.secure && !isLoopbackAddress(req.ip)) {
     return res.status(400).json({ error: '远程备份下载必须使用 HTTPS；HTTP 仅允许服务器本机访问' });
   }
@@ -392,7 +395,7 @@ app.post('/api/system/backup', requireAuth, requireCsrf, async (req, res) => {
 // (只允许免密执行这一条固定命令,不是 ALL=(ALL) NOPASSWD:ALL)。
 // 如果没有配置这条sudo规则,这个操作会失败,用户需要手动执行
 // `rc-service mail-aggregator restart`。
-app.post('/api/system/restart', requireAuth, requireCsrf, (req, res) => {
+app.post('/api/system/restart', requireAuth, requireAdmin, requireCsrf, (req, res) => {
   res.json({ ok: true, message: '重启已触发,请稍等几秒后刷新页面' });
   setTimeout(() => {
     const restartArgs = process.env.MAIL_AGG_SERVICE_MANAGER === 'systemd'
@@ -409,7 +412,7 @@ app.post('/api/system/restart', requireAuth, requireCsrf, (req, res) => {
   }, 300);
 });
 
-app.post('/api/system/uninstall', requireAuth, requireCsrf, (req, res) => {
+app.post('/api/system/uninstall', requireAuth, requireAdmin, requireCsrf, (req, res) => {
   const { currentPassword, mode, confirmation } = req.body || {};
   if (!verifyAdminPassword(req.session.userId, currentPassword)) {
     return res.status(401).json({ error: '管理员密码验证失败' });
@@ -434,7 +437,7 @@ app.post('/api/system/uninstall', requireAuth, requireCsrf, (req, res) => {
 });
 
 // v0.1.3: Dovecot密码管理
-app.get('/api/dovecot/status', requireAuth, async (req, res) => {
+app.get('/api/dovecot/status', requireAuth, requireAdmin, async (req, res) => {
   try {
     const status = await dovecot.getDovecotStatus();
     res.json(status);
@@ -443,7 +446,7 @@ app.get('/api/dovecot/status', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/dovecot/change-password', requireAuth, requireCsrf, async (req, res) => {
+app.post('/api/dovecot/change-password', requireAuth, requireAdmin, requireCsrf, async (req, res) => {
   const { currentPassword, newPassword, confirmPassword } = req.body || {};
   if (!currentPassword || !newPassword || !confirmPassword) {
     return res.status(400).json({ error: '当前密码、新密码、确认密码均为必填' });
@@ -473,19 +476,36 @@ app.post('/api/dovecot/change-password', requireAuth, requireCsrf, async (req, r
 });
 
 app.get('/api/dashboard', requireAuth, async (req, res) => {
-  const local = localDovecot();
-  const system = await getSystemStatus(local.host, local.port, scheduler.getStatus());
-  const dovecotStatus = await dovecot.getDovecotStatus().catch((e) => ({ error: e.message }));
-  const accountStats = getAccountStats();
+  let system = null;
+  let dovecotStatus = null;
+  if (req.user.role === 'admin') {
+    const local = localDovecot();
+    system = await getSystemStatus(local.host, local.port, scheduler.getStatus());
+    dovecotStatus = await dovecot.getDovecotStatus().catch((e) => ({ error: e.message }));
+  }
+  const accountStats = getAccountStats(req.user.id);
   const recentAccounts = db
     .prepare(
       `SELECT id, name, provider, enabled, last_sync_at, last_sync_status,
               last_sync_message, last_host2_messages, last_host2_folders,
               last_transferred, last_skipped, last_errors
-       FROM accounts ORDER BY last_sync_at DESC LIMIT 20`
+       FROM accounts WHERE owner_user_id=? ORDER BY last_sync_at DESC LIMIT 20`
     )
-    .all();
+    .all(req.user.id);
   res.json({ system, accountStats, recentAccounts, dovecotStatus });
+});
+
+// HTML页面在服务端先检查会话，避免未登录用户直接看到管理界面骨架。
+// CSS/JS仍可公开读取，它们不包含密码或运行数据。
+app.use((req, res, next) => {
+  const protectedPage = req.path === '/' || req.path.endsWith('.html');
+  if (req.method !== 'GET' || !protectedPage || req.path === '/login.html') return next();
+  const user = sessionUser(req);
+  if (user && ['/users.html', '/settings.html', '/system-info.html'].includes(req.path) && user.role !== 'admin') {
+    return res.redirect('/index.html');
+  }
+  if (user) return next();
+  return res.redirect('/login.html');
 });
 
 // 静态前端文件

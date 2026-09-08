@@ -2,6 +2,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { db, DIRS } = require('./db');
+const { ownerId, ownedAccount } = require('./access-control');
 const { sendJobLog } = require('./log-reader');
 const { getProvider, loadProviders } = require('./providers');
 const { validateAccountPayload } = require('./account-validation');
@@ -26,7 +27,7 @@ const router = express.Router();
 
 const PUBLIC_FIELDS = `
   id, name, provider, host, port, ssl, username, auth_type, enabled,
-  sync_interval, local_user, sync_mode, destination_mode, destination_folder,
+  sync_interval, local_user, sync_mode, destination_mode, destination_folder, mailbox_folder,
   folder_includes, folder_excludes, max_age_days, max_size_mb, deletion_mode,
   created_at, updated_at,
   last_sync_at, last_sync_status, last_sync_message,
@@ -64,14 +65,14 @@ router.get('/providers', (req, res) => {
 });
 
 router.get('/', (req, res) => {
-  const rows = db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts ORDER BY id DESC`).all();
+  const rows = db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE owner_user_id=? ORDER BY id DESC`).all(ownerId(req));
   res.json(rows.map(serializeAccount));
 });
 
 router.get('/:id', (req, res) => {
   const row = db
-    .prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ?`)
-    .get(req.params.id);
+    .prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ? AND owner_user_id=?`)
+    .get(req.params.id, ownerId(req));
   if (!row) return res.status(404).json({ error: '账号不存在' });
   res.json(serializeAccount(row));
 });
@@ -93,11 +94,11 @@ function validatePayload(body, {
   });
 }
 
-function destinationFolderInUse(account, excludeId = null) {
+function destinationFolderInUse(account, accountOwnerId, excludeId = null) {
   if (account.destination_mode !== 'subfolder') return false;
-  const params = [account.local_user, account.destination_folder];
+  const params = [accountOwnerId, account.destination_folder];
   let sql = `SELECT 1 FROM accounts
-    WHERE local_user = ? AND destination_mode = 'subfolder'
+    WHERE owner_user_id = ? AND destination_mode = 'subfolder'
       AND destination_folder = ? COLLATE NOCASE`;
   if (excludeId !== null) {
     sql += ' AND id != ?';
@@ -108,9 +109,17 @@ function destinationFolderInUse(account, excludeId = null) {
 
 router.post('/', (req, res) => {
   const { errors, normalized } = validatePayload(req.body || {}, { requireSecret: true });
+  // 多用户共享同一个本地Dovecot时，flat会把不同用户的邮件混进公共根目录。
+  // 新账号一律要求独立目标文件夹，旧版迁移账号仍可继续读取但不能新建flat。
+  if (normalized.destination_mode !== 'subfolder') errors.push('多用户模式下新账号必须使用按账号文件夹隔离');
+  const configuredLocalUser = require('./config').localDovecot().user;
+  if (req.user.role !== 'admin' && normalized.local_user !== configuredLocalUser) {
+    errors.push('普通用户不能修改本地Dovecot目标用户');
+  }
+  if (req.user.role !== 'admin' && req.body?.local_secret) errors.push('普通用户不能覆盖本地Dovecot密码');
   if (errors.length) return res.status(400).json({ error: errors.join('; ') });
-  if (destinationFolderInUse(normalized)) {
-    return res.status(409).json({ error: '该本地用户下已有账号使用同名隔离文件夹，请换一个名称' });
+  if (destinationFolderInUse(normalized, ownerId(req))) {
+    return res.status(409).json({ error: '你已有账号使用同名隔离文件夹，请换一个名称' });
   }
 
   const info = db
@@ -118,14 +127,17 @@ router.post('/', (req, res) => {
       `INSERT INTO accounts
         (name, provider, host, port, ssl, username, auth_type, enabled, sync_interval,
          local_user, sync_mode, destination_mode, destination_folder,
-         folder_includes, folder_excludes, max_age_days, max_size_mb, deletion_mode)
+         folder_includes, folder_excludes, max_age_days, max_size_mb, deletion_mode, owner_user_id)
        VALUES (@name, @provider, @host, @port, @ssl, @username, @auth_type, @enabled,
          @sync_interval, @local_user, @sync_mode, @destination_mode, @destination_folder,
-         @folder_includes, @folder_excludes, @max_age_days, @max_size_mb, @deletion_mode)`
+         @folder_includes, @folder_excludes, @max_age_days, @max_size_mb, @deletion_mode, @owner_user_id)`
     )
-    .run(normalized);
+    .run({ ...normalized, owner_user_id: ownerId(req) });
 
   const accountId = info.lastInsertRowid;
+  // 实际Dovecot根目录不可由用户控制，避免用户把目录名伪造成INBOX或别人的根目录。
+  const mailboxFolder = `U${ownerId(req)}-A${accountId}`;
+  db.prepare('UPDATE accounts SET mailbox_folder=? WHERE id=?').run(mailboxFolder, accountId);
   if (normalized.auth_type === 'password') saveSourceSecret(accountId, req.body.secret);
   if (req.body.local_secret) {
     saveTargetSecret(accountId, req.body.local_secret);
@@ -133,13 +145,13 @@ router.post('/', (req, res) => {
 
   res.status(201).json(
     serializeAccount(
-      db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ?`).get(accountId)
+      db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ? AND owner_user_id=?`).get(accountId, ownerId(req))
     )
   );
 });
 
 router.put('/:id', (req, res) => {
-  const existing = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
+  const existing = ownedAccount(req, req.params.id);
   if (!existing) return res.status(404).json({ error: '账号不存在' });
 
   const { errors, normalized } = validatePayload(req.body || {}, {
@@ -151,9 +163,13 @@ router.put('/:id', (req, res) => {
     defaultDestinationFolder: existing.destination_folder,
     defaultSyncPolicy: existing,
   });
+  if (req.user.role !== 'admin' && normalized.local_user !== existing.local_user) {
+    errors.push('普通用户不能修改本地Dovecot目标用户');
+  }
+  if (req.user.role !== 'admin' && req.body?.local_secret) errors.push('普通用户不能覆盖本地Dovecot密码');
   if (errors.length) return res.status(400).json({ error: errors.join('; ') });
-  if (destinationFolderInUse(normalized, existing.id)) {
-    return res.status(409).json({ error: '该本地用户下已有账号使用同名隔离文件夹，请换一个名称' });
+  if (destinationFolderInUse(normalized, ownerId(req), existing.id)) {
+    return res.status(409).json({ error: '你已有账号使用同名隔离文件夹，请换一个名称' });
   }
 
   const destinationChanged = existing.destination_mode !== normalized.destination_mode
@@ -187,6 +203,10 @@ router.put('/:id', (req, res) => {
       updated_at = datetime('now')
      WHERE id=@id`
   ).run({ ...normalized, id: req.params.id });
+  if (normalized.destination_mode === 'subfolder' && !existing.mailbox_folder) {
+    db.prepare('UPDATE accounts SET mailbox_folder=? WHERE id=?')
+      .run(`U${ownerId(req)}-A${existing.id}`, existing.id);
+  }
 
   if (destinationChanged) {
     // --useuid缓存与目标文件夹映射相关；切换落盘策略后必须重新建立映射。
@@ -209,13 +229,13 @@ router.put('/:id', (req, res) => {
 
   res.json(
     serializeAccount(
-      db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ?`).get(req.params.id)
+      db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ? AND owner_user_id=?`).get(req.params.id, ownerId(req))
     )
   );
 });
 
 router.delete('/:id', (req, res) => {
-  const existing = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
+  const existing = ownedAccount(req, req.params.id);
   if (!existing) return res.status(404).json({ error: '账号不存在' });
   if (isAccountLocked(existing.id) || hasActiveJob(existing.id)) {
     return res.status(409).json({ error: '账号正在同步或排队中,请稍后再删除' });
@@ -236,14 +256,14 @@ router.delete('/:id', (req, res) => {
 });
 
 router.post('/:id/test', async (req, res) => {
-  const existing = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
+  const existing = ownedAccount(req, req.params.id);
   if (!existing) return res.status(404).json({ error: '账号不存在' });
   const result = await testConnection(req.params.id);
   res.json(result);
 });
 
 router.post('/:id/sync', (req, res) => {
-  const existing = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
+  const existing = ownedAccount(req, req.params.id);
   if (!existing) return res.status(404).json({ error: '账号不存在' });
   const result = triggerSync(parseInt(req.params.id, 10));
   if (!result.ok && result.reason === 'already_running') {
@@ -259,6 +279,7 @@ router.post('/:id/sync', (req, res) => {
 });
 
 router.get('/:id/jobs', (req, res) => {
+  if (!ownedAccount(req, req.params.id, 'id')) return res.status(404).json({ error: '账号不存在' });
   const rows = db
     .prepare(
       `SELECT * FROM sync_jobs WHERE account_id = ? ORDER BY started_at DESC LIMIT 30`
@@ -268,6 +289,7 @@ router.get('/:id/jobs', (req, res) => {
 });
 
 router.post('/:id/jobs/:jobId/cancel', (req, res) => {
+  if (!ownedAccount(req, req.params.id, 'id')) return res.status(404).json({ error: '账号不存在' });
   const result = cancelJob(req.params.jobId, req.params.id);
   if (!result.ok) {
     const messages = {
@@ -284,8 +306,9 @@ router.post('/:id/jobs/:jobId/cancel', (req, res) => {
 
 router.get('/:id/jobs/:jobId/log', (req, res) => {
   const job = db
-    .prepare('SELECT * FROM sync_jobs WHERE id = ? AND account_id = ?')
-    .get(req.params.jobId, req.params.id);
+    .prepare(`SELECT j.* FROM sync_jobs j JOIN accounts a ON a.id=j.account_id
+      WHERE j.id=? AND j.account_id=? AND a.owner_user_id=?`)
+    .get(req.params.jobId, req.params.id, ownerId(req));
   if (!job || !sendJobLog(res, DIRS.logs, job)) {
     return res.status(404).json({ error: '日志不存在' });
   }

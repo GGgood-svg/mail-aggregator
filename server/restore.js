@@ -186,6 +186,8 @@ function restoreApplicationState({ Database, currentDb, backupDbPath, currentSec
     const secretResult = prepareRestoredSecrets(backupSecretsDir, currentSecretsDir, preparedSecrets);
     const localUserRow = currentDb.prepare("SELECT value FROM settings WHERE key='dovecot_user'").get();
     const currentLocalUser = localUserRow ? localUserRow.value : 'mailuser';
+    const fallbackOwner = currentDb.prepare('SELECT id FROM admin_users ORDER BY id LIMIT 1').get();
+    const validOwnerIds = new Set(currentDb.prepare('SELECT id FROM admin_users').all().map((row) => Number(row.id)));
     const restore = currentDb.transaction(() => {
       currentDb.prepare('DELETE FROM notification_events').run();
       currentDb.prepare('DELETE FROM sync_jobs').run();
@@ -194,9 +196,20 @@ function restoreApplicationState({ Database, currentDb, backupDbPath, currentSec
       const accounts = copyTableRows(currentDb, source, 'accounts', {
         transform(row) {
           if (Object.prototype.hasOwnProperty.call(row, 'local_user')) row.local_user = currentLocalUser;
+          if (Object.prototype.hasOwnProperty.call(row, 'owner_user_id')
+              && !validOwnerIds.has(Number(row.owner_user_id))) {
+            row.owner_user_id = fallbackOwner ? fallbackOwner.id : null;
+          }
           return row;
         },
       });
+      if (fallbackOwner && tableColumns(currentDb, 'accounts').includes('owner_user_id')) {
+        currentDb.prepare('UPDATE accounts SET owner_user_id=? WHERE owner_user_id IS NULL').run(fallbackOwner.id);
+      }
+      if (tableColumns(currentDb, 'accounts').includes('mailbox_folder')) {
+        currentDb.prepare(`UPDATE accounts SET mailbox_folder=destination_folder
+          WHERE mailbox_folder IS NULL AND destination_mode='subfolder'`).run();
+      }
       const now = new Date().toISOString();
       const jobs = copyTableRows(currentDb, source, 'sync_jobs', {
         transform(row) {

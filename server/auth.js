@@ -7,6 +7,7 @@ const router = express.Router();
 
 const MAX_FAILS = 5;
 const LOCK_MS = 5 * 60 * 1000; // 5分钟
+const USERNAME_RE = /^[\p{L}\p{N}_.@-]{2,64}$/u;
 
 function hasAdmin() {
   const row = db.prepare('SELECT COUNT(*) c FROM admin_users').get();
@@ -43,12 +44,13 @@ function clearFailures(ip) {
   db.prepare('DELETE FROM login_attempts WHERE ip = ?').run(ip);
 }
 
-function issueSession(req, username, callback) {
+function issueSession(req, user, callback) {
   // Rotate the session identifier after authentication so an identifier that
   // existed before login cannot be fixed and reused by another party.
   req.session.regenerate((error) => {
     if (error) return callback(error);
-    req.session.userId = username;
+    req.session.userId = Number(user.id);
+    req.session.sessionVersion = Number(user.session_version || 0);
     req.session.csrfToken = crypto.randomBytes(24).toString('hex');
     callback(null, req.session.csrfToken);
   });
@@ -59,16 +61,17 @@ router.post('/setup', (req, res) => {
   if (hasAdmin()) {
     return res.status(400).json({ error: '管理员账号已存在' });
   }
-  const { username, password } = req.body || {};
-  if (!username || !password || password.length < 8) {
-    return res.status(400).json({ error: '用户名必填,密码至少8位' });
+  const username = String(req.body?.username || '').normalize('NFKC').trim();
+  const password = String(req.body?.password || '');
+  if (!USERNAME_RE.test(username) || password.length < 10 || password.length > 256) {
+    return res.status(400).json({ error: '用户名需为2-64位，密码需为10-256位' });
   }
-  const hash = bcrypt.hashSync(password, 10);
-  db.prepare('INSERT INTO admin_users (username, password_hash) VALUES (?, ?)').run(
+  const hash = bcrypt.hashSync(password, 12);
+  const info = db.prepare("INSERT INTO admin_users (username, password_hash, role, mail_access_all) VALUES (?, ?, 'admin', 1)").run(
     username,
     hash
   );
-  issueSession(req, username, (error, csrfToken) => {
+  issueSession(req, { id: info.lastInsertRowid, session_version: 0 }, (error, csrfToken) => {
     if (error) return res.status(500).json({ error: '创建登录会话失败，请重试' });
     res.json({ ok: true, csrfToken });
   });
@@ -89,9 +92,10 @@ router.post('/login', (req, res) => {
     });
   }
 
-  const { username, password } = req.body || {};
-  const user = db.prepare('SELECT * FROM admin_users WHERE username = ?').get(username);
-  const ok = user && bcrypt.compareSync(password || '', user.password_hash);
+  const username = String(req.body?.username || '').normalize('NFKC').trim();
+  const password = String(req.body?.password || '');
+  const user = db.prepare('SELECT * FROM admin_users WHERE username = ? AND enabled = 1').get(username);
+  const ok = password.length <= 256 && user && bcrypt.compareSync(password, user.password_hash);
 
   if (!ok) {
     registerFailure(ip);
@@ -99,31 +103,80 @@ router.post('/login', (req, res) => {
   }
 
   clearFailures(ip);
-  issueSession(req, user.username, (error, csrfToken) => {
+  issueSession(req, user, (error, csrfToken) => {
     if (error) return res.status(500).json({ error: '创建登录会话失败，请重试' });
     res.json({ ok: true, csrfToken });
   });
 });
 
-router.post('/logout', (req, res) => {
+router.post('/logout', requireAuth, requireCsrf, (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
+router.post('/change-password', requireAuth, requireCsrf, (req, res) => {
+  const currentPassword = String(req.body?.currentPassword || '');
+  const newPassword = String(req.body?.newPassword || '');
+  if (newPassword.length < 10 || newPassword.length > 256) return res.status(400).json({ error: '新密码需为10-256位' });
+  const full = db.prepare('SELECT * FROM admin_users WHERE id=?').get(req.user.id);
+  if (!full || !bcrypt.compareSync(currentPassword, full.password_hash)) {
+    return res.status(401).json({ error: '当前密码错误' });
+  }
+  db.prepare('UPDATE admin_users SET password_hash=?,session_version=session_version+1 WHERE id=?')
+    .run(bcrypt.hashSync(newPassword, 12), full.id);
+  const updated = db.prepare('SELECT * FROM admin_users WHERE id=?').get(full.id);
+  issueSession(req, updated, (error, csrfToken) => {
+    if (error) return res.status(500).json({ error: '密码已修改，但创建新会话失败，请重新登录' });
+    res.json({ ok: true, csrfToken });
+  });
+});
+
 router.get('/me', (req, res) => {
-  if (req.session && req.session.userId) {
+  const user = sessionUser(req);
+  if (user) {
     // 兼容老session里可能还没有csrfToken的情况(比如升级后遗留的session)
     if (!req.session.csrfToken) {
       req.session.csrfToken = crypto.randomBytes(24).toString('hex');
     }
-    res.json({ username: req.session.userId, csrfToken: req.session.csrfToken });
+    res.json({
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      csrfToken: req.session.csrfToken,
+      secureTransport: Boolean(req.secure),
+    });
   } else {
     res.status(401).json({ error: '未登录' });
   }
 });
 
 function requireAuth(req, res, next) {
-  if (req.session && req.session.userId) return next();
+  const user = sessionUser(req);
+  if (user) {
+    req.user = user;
+    return next();
+  }
   res.status(401).json({ error: '未登录' });
+}
+
+function sessionUser(req) {
+  if (!req.session || req.session.userId === undefined || req.session.userId === null) return null;
+  // 兼容升级前 session 把 username 存在 userId 的格式。
+  const stored = req.session.userId;
+  const user = typeof stored === 'number'
+    ? db.prepare('SELECT id,username,role,enabled,session_version,mail_access_all FROM admin_users WHERE id=?').get(stored)
+    : db.prepare('SELECT id,username,role,enabled,session_version,mail_access_all FROM admin_users WHERE username=?').get(stored);
+  if (!user || !user.enabled) return null;
+  if (req.session.sessionVersion === undefined && Number(user.session_version || 0) !== 0) return null;
+  if (req.session.sessionVersion !== undefined
+      && Number(req.session.sessionVersion) !== Number(user.session_version || 0)) return null;
+  req.session.userId = Number(user.id);
+  req.session.sessionVersion = Number(user.session_version || 0);
+  return user;
+}
+
+function requireAdmin(req, res, next) {
+  if (req.user && req.user.role === 'admin') return next();
+  res.status(403).json({ error: '仅管理员可以执行此操作' });
 }
 
 // CSRF校验:所有状态变更请求(POST/PUT/DELETE/PATCH)必须带上和session里
@@ -140,8 +193,10 @@ function requireCsrf(req, res, next) {
 }
 
 function verifyAdminPassword(username, password) {
-  const user = db.prepare('SELECT password_hash FROM admin_users WHERE username = ?').get(username);
+  const user = typeof username === 'number'
+    ? db.prepare("SELECT password_hash FROM admin_users WHERE id = ? AND role='admin' AND enabled=1").get(username)
+    : db.prepare("SELECT password_hash FROM admin_users WHERE username = ? AND role='admin' AND enabled=1").get(username);
   return !!user && bcrypt.compareSync(String(password || ''), user.password_hash);
 }
 
-module.exports = { router, requireAuth, requireCsrf, hasAdmin, verifyAdminPassword };
+module.exports = { router, requireAuth, requireAdmin, requireCsrf, hasAdmin, verifyAdminPassword, issueSession, sessionUser };

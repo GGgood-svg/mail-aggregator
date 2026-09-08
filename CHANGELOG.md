@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add administrator-managed multi-user login with server-side role checks, account/job/log ownership filtering, per-user mailbox scopes, forced isolated destinations for new accounts, unforgeable Dovecot storage roots, session invalidation on user changes, personal password updates, and server-side page redirects. Existing accounts migrate to the first administrator without moving legacy mail.
+- Clearly report HTTP as unencrypted instead of presenting application-layer password wrapping as a replacement for HTTPS.
+
 - Restore message and folder totals with imapsync 2.290 by parsing its per-folder statistics when legacy Host1/Host2 summary counters are absent, including every retained historical successful job.
 
 - Add confirmed bulk mark-as-read actions for a folder or displayed account group across all pages, with partial failure reporting and refreshed counts.

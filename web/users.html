@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>用户管理</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="layout">
+  <div class="sidebar">
+    <div class="brand">📬 <span id="sidebar-brand-text">Mail Aggregator</span></div>
+    <nav id="sidebar-nav"></nav>
+  </div>
+  <main class="content">
+    <h1>用户管理</h1>
+    <p class="hint">不开放公开注册。管理员在这里创建用户，每个用户只能管理自己的邮箱账号、同步任务和邮件文件夹。</p>
+    <div class="panel" style="max-width:720px;margin-top:18px;">
+      <h2>创建用户</h2>
+      <div class="grid-2">
+        <div class="form-group"><label>用户名</label><input id="new-username" maxlength="64" autocomplete="off"></div>
+        <div class="form-group"><label>初始密码（至少10位）</label><input id="new-password" type="password" autocomplete="new-password"></div>
+      </div>
+      <div class="form-group"><label>角色</label><select id="new-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></div>
+      <button class="btn" id="create-btn">创建用户</button>
+      <span id="create-msg" class="hint" style="margin-left:10px"></span>
+    </div>
+    <div class="panel" style="margin-top:18px;">
+      <h2>现有用户</h2>
+      <div style="overflow-x:auto"><table><thead><tr><th>用户名</th><th>角色</th><th>邮箱数</th><th>状态</th><th>重置密码</th><th>操作</th></tr></thead><tbody id="user-list"></tbody></table></div>
+    </div>
+  </main>
+</div>
+<script src="/js/api.js"></script><script src="/js/branding.js"></script><script src="/js/i18n.js"></script>
+<script>
+async function loadUsers() {
+  const users = await Api.get('/api/users');
+  document.getElementById('user-list').innerHTML = users.map((u) => `<tr>
+    <td>${escapeHtml(u.username)}${u.id === currentUser.id ? '（当前）' : ''}</td>
+    <td><select data-role="${u.id}" ${u.id === currentUser.id ? 'disabled' : ''}><option value="user" ${u.role === 'user' ? 'selected' : ''}>普通用户</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>管理员</option></select></td>
+    <td>${u.account_count}</td><td><select data-enabled="${u.id}" ${u.id === currentUser.id ? 'disabled' : ''}><option value="1" ${u.enabled ? 'selected' : ''}>启用</option><option value="0" ${!u.enabled ? 'selected' : ''}>停用</option></select></td>
+    <td><input type="password" data-password="${u.id}" placeholder="留空则不修改" autocomplete="new-password" style="min-width:160px" ${u.id === currentUser.id ? 'disabled' : ''}></td>
+    <td><button class="btn secondary" onclick="saveUser(${u.id})" ${u.id === currentUser.id ? 'disabled' : ''}>保存</button> <button class="btn danger" onclick="deleteUser(${u.id})" ${u.id === currentUser.id ? 'disabled' : ''}>删除</button></td>
+  </tr>`).join('');
+}
+async function saveUser(id) {
+  const role = document.querySelector(`[data-role="${id}"]`).value;
+  const password = document.querySelector(`[data-password="${id}"]`).value;
+  const enabled = document.querySelector(`[data-enabled="${id}"]`).value === '1';
+  try { await Api.put(`/api/users/${id}`, { role, enabled, ...(password ? { password } : {}) }); toast('用户已更新'); await loadUsers(); }
+  catch (e) { toast(e.message, 'error'); }
+}
+async function deleteUser(id) {
+  if (!confirm('确定删除该用户？有邮箱账号的用户不能删除。')) return;
+  try { await Api.del(`/api/users/${id}`); toast('用户已删除'); await loadUsers(); } catch (e) { toast(e.message, 'error'); }
+}
+document.getElementById('create-btn').onclick = async () => {
+  const message = document.getElementById('create-msg'); message.textContent = '';
+  try {
+    await Api.post('/api/users', { username: document.getElementById('new-username').value.trim(), password: document.getElementById('new-password').value, role: document.getElementById('new-role').value });
+    document.getElementById('new-username').value = ''; document.getElementById('new-password').value = ''; message.textContent = '创建成功'; await loadUsers();
+  } catch (e) { message.textContent = e.message; }
+};
+(async () => { applyBranding(); const me = await requireLogin(); if (!me || me.role !== 'admin') { location.href='/index.html'; return; } renderNav('users'); await loadUsers(); })();
+</script>
+</body></html>

@@ -12,6 +12,7 @@ A lightweight, self-hosted mail aggregator. It synchronizes multiple remote IMAP
 ## Features
 
 - QQ Mail, NetEase 163, Gmail, and custom IMAP accounts
+- Administrator-managed users with isolated mail accounts, sync jobs, logs, and Web mailbox folders
 - Gmail app passwords plus Gmail and Microsoft 365 OAuth2
 - Manual, scheduled, and bulk sync with queueing, stop, cancel, retry, and logs
 - Per-account destination folders and folder, age, and size filters
@@ -64,6 +65,12 @@ rc-service mail-aggregator status
 
 Open `http://server-address:8080` to create the first administrator. Plain HTTP is suitable only for temporary testing on a trusted LAN. Put the application behind an HTTPS reverse proxy before exposing it to the Internet.
 
+## Users and isolation
+
+The first account is the primary administrator. Administrators create standard users or additional administrators from User management; public registration is disabled. Standard users can access only their own mail accounts, sync jobs, logs, and mailbox folders. Global settings, OAuth client credentials, backup/restore, service control, and uninstall remain administrator-only.
+
+Users choose a display name for each mailbox, while the server assigns an unforgeable Dovecot storage root from the user and account IDs. Existing accounts are assigned to the first administrator without moving existing mail. Because legacy `flat` mode already merged messages into shared root folders, only the first administrator retains access to those legacy folders; other users can read only their server-assigned isolated roots.
+
 If Dovecot is already configured, run `./scripts/install.sh` without `--quick`, `--custom`, or `--full`. This installs the application without rebuilding the existing Dovecot configuration.
 
 ## Account authentication
@@ -91,6 +98,8 @@ https://mail.example.com/api/oauth/callback/microsoft
 App passwords and authorization codes use ordinary IMAP authentication and do not require an OAuth callback.
 
 ## Production proxy settings
+
+Sign-in passwords are stored only as bcrypt hashes and mailbox credentials use protected files, but at-rest protection does not encrypt HTTP traffic. Over HTTP, both the password and session cookie can be intercepted, and a man in the middle can replace the page script. Mail Aggregator therefore does not present browser-side RSA/AES wrapping as a substitute for HTTPS.
 
 Bind the application to loopback and terminate TLS at Caddy, Nginx, or another reverse proxy. The runtime configuration is `/etc/mail-aggregator/config`:
 
@@ -134,6 +143,7 @@ Node.js 22.5 or later runs the complete test suite. Older supported Node.js vers
 
 - Passwords and tokens use mode-`600` files and are not placed in URLs or imapsync arguments
 - Authenticated state changes require CSRF validation
+- Server-side ownership checks cover accounts, jobs, logs, and mailbox roots; administrative operations also require an administrator role
 - Login throttling, persistent sessions, security headers, and configurable Secure cookies
 - Escaped user content and allowlist-based HTML message sanitization
 - Remote message images stay blocked until the user explicitly loads them
@@ -145,7 +155,7 @@ Report vulnerabilities privately as described in [SECURITY.md](./SECURITY.md). D
 ## Current limitations
 
 - The Web mailbox is read-only: no compose, reply, move, delete, or attachment download
-- All sources target one local Dovecot user by default; isolated destination folders distinguish accounts
+- Sources share one local Dovecot service account by default, but new accounts use unforgeable storage roots enforced by the Web API
 - Google and Microsoft OAuth behavior still depends on provider console and tenant configuration
 - Debian and Ubuntu installer support needs broader real-machine validation
 - Back up and verify data before every upgrade or restore while the project remains in beta

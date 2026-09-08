@@ -10,6 +10,9 @@
   <div class="panel">
     <h1 id="form-title" style="margin-bottom:4px;"><span id="login-title-text">登录</span></h1>
     <div id="app-subtitle-text" style="color:var(--text-dim); font-size:13px; margin-bottom:18px;"></div>
+    <div id="http-warning" class="hint" style="display:none;background:rgba(245,166,35,.1);border:1px solid var(--warn);border-radius:8px;padding:10px;margin-bottom:14px;color:var(--warn);">
+      当前通过 HTTP 连接。密码会交给服务器校验，但传输过程无法抵御窃听或网页劫持；外网访问请先配置 HTTPS。
+    </div>
     <div class="form-group">
       <label>用户名</label>
       <input type="text" id="username" autocomplete="username">
@@ -19,7 +22,7 @@
       <input type="password" id="password" autocomplete="current-password">
     </div>
     <div class="form-group" id="password-hint" style="display:none;">
-      <div class="hint">首次使用,请创建管理员账号(密码至少8位)</div>
+      <div class="hint">首次使用,请创建管理员账号(密码至少10位)</div>
     </div>
     <button class="btn" id="submit-btn" style="width:100%;">登录</button>
     <div id="error-msg" style="color:var(--err);font-size:13px;margin-top:10px;"></div>
@@ -32,6 +35,7 @@
 let isSetupMode = false;
 
 async function init() {
+  document.getElementById('http-warning').style.display = location.protocol === 'https:' ? 'none' : 'block';
   // 先套用branding(浏览器标题/登录标题/副标题),再判断是否是首次建管理员这个
   // 业务逻辑——如果是首次建管理员,标题要覆盖成"创建管理员账号",这个优先级
   // 高于branding里配置的login_title,所以要保证在applyBranding()之后执行。

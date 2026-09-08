@@ -24,6 +24,13 @@ test('subfolder strategy uses imapsync native subfolder2 mapping', () => {
   });
   assert.deepEqual(isolated, ['--useuid', '--subfolder2', 'QQ邮箱']);
 
+  const tenantIsolated = applyDestinationStrategy(['--useuid'], {
+    destination_mode: 'subfolder',
+    destination_folder: 'Friendly name',
+    mailbox_folder: 'U2-A7',
+  });
+  assert.deepEqual(tenantIsolated, ['--useuid', '--subfolder2', 'U2-A7']);
+
   const flat = applyDestinationStrategy(['--useuid'], {
     destination_mode: 'flat',
     destination_folder: null,

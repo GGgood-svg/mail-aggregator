@@ -14,14 +14,14 @@ const integrationTest = DatabaseSync ? test : test.skip;
 function createDatabase() {
   const db = new DatabaseSync(':memory:');
   db.exec(`
-    CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+    CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, owner_user_id INTEGER);
     CREATE TABLE sync_jobs (
       id INTEGER PRIMARY KEY,
       account_id INTEGER NOT NULL,
       started_at TEXT NOT NULL,
       status TEXT NOT NULL
     );
-    INSERT INTO accounts(id,name) VALUES(1,'one'),(2,'two');
+    INSERT INTO accounts(id,name,owner_user_id) VALUES(1,'one',10),(2,'two',20);
     INSERT INTO sync_jobs(id,account_id,started_at,status) VALUES
       (1,1,'2026-01-01 00:00:00','success'),
       (2,1,'2026-01-02 00:00:00','failed'),
@@ -68,6 +68,17 @@ integrationTest('job query clamps pages beyond the final page and handles empty 
     const empty = listJobs(db, { status: 'cancelled', page: 99, pageSize: 2 });
     assert.deepEqual(empty.items, []);
     assert.deepEqual(empty.pagination, { page: 1, pageSize: 2, total: 0, totalPages: 1 });
+  } finally {
+    db.close();
+  }
+});
+
+integrationTest('job query never returns another user jobs', () => {
+  const db = createDatabase();
+  try {
+    const result = listJobs(db, { ownerUserId: 10, pageSize: 25 });
+    assert.deepEqual(result.items.map((job) => job.id), [3, 2, 1]);
+    assert.equal(result.pagination.total, 3);
   } finally {
     db.close();
   }

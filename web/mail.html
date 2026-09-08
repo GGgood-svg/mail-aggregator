@@ -101,7 +101,7 @@ function folderBelongsTo(folder, root) {
 }
 
 function legacyRootCandidates(account) {
-  const values = [account.destination_folder, account.name, String(account.username || '').split('@')[0]];
+  const values = [account.mailbox_folder, account.destination_folder, account.name, String(account.username || '').split('@')[0]];
   const candidates = new Set();
   values.forEach((value) => {
     const normalized = String(value || '').trim();
@@ -122,7 +122,8 @@ function groupFolders(folders, accounts) {
       key: `account-${account.id}`,
       label: account.name,
       detail: '',
-      configuredRoot: account.destination_folder,
+      configuredRoot: account.mailbox_folder || account.destination_folder,
+      displayFolder: account.destination_folder,
       root: '',
       folders: [],
     }));
@@ -135,7 +136,7 @@ function groupFolders(folders, accounts) {
     group.root = legacyRootCandidates(account)
       .filter((candidate) => folders.some((folder) => folderBelongsTo(folder, candidate)))
       .sort((a, b) => b.length - a.length)[0] || '';
-    group.detail = group.root || group.configuredRoot;
+    group.detail = group.displayFolder || group.root || group.configuredRoot;
   }
 
   for (const folder of folders) {

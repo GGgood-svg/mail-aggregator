@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>个人安全</title><link rel="stylesheet" href="/css/style.css"></head>
+<body><div class="layout"><div class="sidebar"><div class="brand">📬 <span id="sidebar-brand-text">Mail Aggregator</span></div><nav id="sidebar-nav"></nav></div>
+<main class="content"><h1>个人安全</h1>
+  <div id="transport-warning" class="panel" style="display:none;border-color:var(--warn);max-width:680px;margin:18px 0;color:var(--warn)">当前连接是 HTTP，登录密码和会话无法抵御网络窃听或中间人劫持。可信内网可临时使用，外网必须配置 HTTPS。</div>
+  <div class="panel" style="max-width:680px;margin-top:18px"><h2>登录信息</h2><p>当前用户：<strong id="profile-username"></strong></p><p>角色：<span id="profile-role"></span></p><p>传输保护：<span id="profile-transport"></span></p></div>
+  <div class="panel" style="max-width:680px;margin-top:18px"><h2>修改登录密码</h2>
+    <div class="form-group"><label>当前密码</label><input id="current-password" type="password" autocomplete="current-password"></div>
+    <div class="form-group"><label>新密码（至少10位）</label><input id="new-password" type="password" autocomplete="new-password"></div>
+    <div class="form-group"><label>确认新密码</label><input id="confirm-password" type="password" autocomplete="new-password"></div>
+    <button class="btn" id="change-btn">修改密码</button><span id="change-msg" class="hint" style="margin-left:10px"></span>
+  </div>
+</main></div><script src="/js/api.js"></script><script src="/js/branding.js"></script><script src="/js/i18n.js"></script>
+<script>
+(async () => { applyBranding(); const me=await requireLogin(); if(!me)return; renderNav('profile'); document.getElementById('profile-username').textContent=me.username; document.getElementById('profile-role').textContent=me.role==='admin'?'管理员':'普通用户'; document.getElementById('profile-transport').textContent=me.secureTransport?'HTTPS（已加密）':'HTTP（未加密）'; document.getElementById('transport-warning').style.display=me.secureTransport?'none':'block'; })();
+document.getElementById('change-btn').onclick=async()=>{ const msg=document.getElementById('change-msg'); msg.textContent=''; const currentPassword=document.getElementById('current-password').value; const newPassword=document.getElementById('new-password').value; if(newPassword!==document.getElementById('confirm-password').value){msg.textContent='两次输入的新密码不一致';return;} try{const result=await Api.post('/api/auth/change-password',{currentPassword,newPassword});setCsrfToken(result.csrfToken);document.getElementById('current-password').value='';document.getElementById('new-password').value='';document.getElementById('confirm-password').value='';msg.textContent='登录密码已修改';}catch(e){msg.textContent=e.message;}};
+</script></body></html>

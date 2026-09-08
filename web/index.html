@@ -18,6 +18,7 @@
       <button class="btn secondary" id="refresh-btn">重新检查</button>
     </div>
 
+    <div id="admin-status-sections">
     <h2>系统状态</h2>
     <div class="grid" id="system-grid"></div>
 
@@ -36,6 +37,7 @@
     <h2>Dovecot</h2>
     <div id="dovecot-warnings"></div>
     <div class="grid" id="dovecot-grid"></div>
+    </div>
 
     <h2>账号统计</h2>
     <div class="grid" id="account-stats-grid"></div>
@@ -63,17 +65,22 @@ function statusBadge(status) {
 
 async function load() {
   applyBranding();
-  await requireLogin();
+  const me = await requireLogin();
+  if (!me) return;
   renderNav('dashboard');
   try {
     const data = await Api.get('/api/dashboard');
-    const health = await Api.get('/api/health');
-    renderSystem(data.system);
-    renderScheduler(data.system.scheduler);
-    renderDovecot(data.dovecotStatus);
+    if (me.role === 'admin') {
+      const health = await Api.get('/api/health');
+      renderSystem(data.system);
+      renderScheduler(data.system.scheduler);
+      renderDovecot(data.dovecotStatus);
+      renderHealth(health);
+    } else {
+      document.getElementById('admin-status-sections').style.display = 'none';
+    }
     renderAccountStats(data.accountStats);
     renderAccounts(data.recentAccounts);
-    renderHealth(health);
   } catch (e) {
     toast(e.message, 'error');
   }

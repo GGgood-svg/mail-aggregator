@@ -91,7 +91,7 @@
       <div class="form-group" id="destination-folder-group">
         <label>隔离文件夹名称</label>
         <input type="text" id="destination_folder" maxlength="64" placeholder="例如：我的QQ邮箱">
-        <div class="hint">修改已同步账号的策略会清除可重建的同步缓存，下次重新同步到新位置；旧位置中的邮件不会自动删除。</div>
+        <div class="hint">修改隔离策略会清除可重建的同步缓存；显示名称可以修改，服务器实际隔离目录由系统分配，避免不同用户目录冲突。</div>
       </div>
 
       <details style="margin:18px 0;">
@@ -212,6 +212,8 @@ async function init() {
       msg.textContent = `OAuth2授权失败：${params.get('message') || '未知错误'}`;
     }
   } else {
+    const flatOption = document.querySelector('#destination_mode option[value="flat"]');
+    if (flatOption) flatOption.disabled = true;
     // 新建账号:用系统设置里的"默认同步间隔"预填,而不是写死的10分钟
     try {
       const settings = await Api.get('/api/settings');

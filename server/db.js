@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS admin_users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'user',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  session_version INTEGER NOT NULL DEFAULT 0,
+  mail_access_all INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -48,6 +52,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   sync_mode TEXT NOT NULL DEFAULT 'full',
   destination_mode TEXT NOT NULL DEFAULT 'flat',
   destination_folder TEXT,
+  mailbox_folder TEXT,
   folder_includes TEXT NOT NULL DEFAULT '',
   folder_excludes TEXT NOT NULL DEFAULT '',
   max_age_days INTEGER,
@@ -64,7 +69,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   last_host2_folders INTEGER,
   last_transferred INTEGER,
   last_skipped INTEGER,
-  last_errors INTEGER
+  last_errors INTEGER,
+  owner_user_id INTEGER REFERENCES admin_users(id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS sync_jobs (
@@ -137,17 +143,43 @@ addColumnIfMissing('accounts', 'last_skipped', 'last_skipped INTEGER');
 addColumnIfMissing('accounts', 'last_errors', 'last_errors INTEGER');
 addColumnIfMissing('accounts', 'destination_mode', "destination_mode TEXT NOT NULL DEFAULT 'flat'");
 addColumnIfMissing('accounts', 'destination_folder', 'destination_folder TEXT');
+addColumnIfMissing('accounts', 'mailbox_folder', 'mailbox_folder TEXT');
 addColumnIfMissing('accounts', 'folder_includes', "folder_includes TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing('accounts', 'folder_excludes', "folder_excludes TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing('accounts', 'max_age_days', 'max_age_days INTEGER');
 addColumnIfMissing('accounts', 'max_size_mb', 'max_size_mb INTEGER');
 addColumnIfMissing('accounts', 'deletion_mode', "deletion_mode TEXT NOT NULL DEFAULT 'archive'");
+addColumnIfMissing('admin_users', 'role', "role TEXT NOT NULL DEFAULT 'user'");
+addColumnIfMissing('admin_users', 'enabled', 'enabled INTEGER NOT NULL DEFAULT 1');
+addColumnIfMissing('admin_users', 'session_version', 'session_version INTEGER NOT NULL DEFAULT 0');
+addColumnIfMissing('admin_users', 'mail_access_all', 'mail_access_all INTEGER NOT NULL DEFAULT 0');
+addColumnIfMissing('accounts', 'owner_user_id', 'owner_user_id INTEGER REFERENCES admin_users(id) ON DELETE RESTRICT');
 
-// 同一个本地用户下，两个隔离账号不能写进同一个目标文件夹。旧账号默认 flat，
-// 因此迁移不会改变或冲突现有数据。
+// v0.2.0 多用户迁移：旧版本只有一个管理员，现有邮箱全部归给最早创建的账号。
+// 该账号还需要读取旧版 flat 模式产生的共享文件夹，因此保留一次性的全邮箱读取能力；
+// 后续创建的用户必须使用隔离文件夹，不会获得该能力。
+const firstUser = db.prepare('SELECT id FROM admin_users ORDER BY id LIMIT 1').get();
+if (firstUser) {
+  db.prepare("UPDATE admin_users SET role='admin', mail_access_all=1 WHERE id=?").run(firstUser.id);
+  db.prepare('UPDATE accounts SET owner_user_id=? WHERE owner_user_id IS NULL').run(firstUser.id);
+  // 已有隔离账号必须继续使用原目录，不能在升级时移动数千封邮件。
+  db.prepare(`UPDATE accounts SET mailbox_folder=destination_folder
+    WHERE mailbox_folder IS NULL AND destination_mode='subfolder'`).run();
+}
 db.exec(`
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_account_destination_folder
-  ON accounts(local_user, destination_folder COLLATE NOCASE)
+  CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner_user_id);
+  CREATE INDEX IF NOT EXISTS idx_accounts_owner_updated ON accounts(owner_user_id, updated_at DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_account_mailbox_folder
+  ON accounts(local_user, mailbox_folder COLLATE NOCASE)
+  WHERE mailbox_folder IS NOT NULL;
+`);
+
+// 显示名称只需在同一Web用户内唯一；实际落盘目录由mailbox_folder唯一约束。
+// 删除旧版按local_user做全局唯一的索引，允许不同用户都把自己的账号命名为“Gmail”。
+db.exec(`
+  DROP INDEX IF EXISTS idx_unique_account_destination_folder;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_owner_destination_folder
+  ON accounts(owner_user_id, destination_folder COLLATE NOCASE)
   WHERE destination_mode = 'subfolder'
 `);
 

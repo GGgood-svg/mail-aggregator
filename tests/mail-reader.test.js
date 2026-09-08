@@ -14,8 +14,20 @@ const {
   sanitizeMessageHtml,
   serializeSummary,
   serializeParsedMessage,
+  folderAllowed,
   createMailRouter,
 } = require('../server/mail-reader');
+
+test('tenant mail roots do not permit sibling or legacy mailbox access', () => {
+  const access = { all: false, roots: ['U2-A7'] };
+  assert.equal(folderAllowed('U2-A7', access), true);
+  assert.equal(folderAllowed('U2-A7.INBOX', access), true);
+  assert.equal(folderAllowed('U2-A7/Sent', access), true);
+  assert.equal(folderAllowed('U2-A70', access), false);
+  assert.equal(folderAllowed('INBOX', access), false);
+  assert.equal(folderAllowed('U3-A7.INBOX', access), false);
+  assert.equal(folderAllowed('anything', { all: true, roots: [] }), true);
+});
 
 test('mail query numbers are strict and bounded', () => {
   assert.equal(parsePositiveInteger('2', 1), 2);
