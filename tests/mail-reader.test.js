@@ -29,6 +29,21 @@ test('tenant mail roots do not permit sibling or legacy mailbox access', () => {
   assert.equal(folderAllowed('anything', { all: true, roots: [] }), true);
 });
 
+test('legacy access never crosses into another user isolated root', () => {
+  const access = {
+    all: false,
+    roots: ['Old Admin Mail', 'U1-A9'],
+    allowUnscoped: true,
+    deniedRoots: ['U2-A7'],
+  };
+  assert.equal(folderAllowed('INBOX', access), true);
+  assert.equal(folderAllowed('Old Admin Mail.Sent', access), true);
+  assert.equal(folderAllowed('U1-A9/INBOX', access), true);
+  assert.equal(folderAllowed('U2-A7', access), false);
+  assert.equal(folderAllowed('U2-A7/INBOX', access), false);
+  assert.equal(folderAllowed('U2-A70', access), true);
+});
+
 test('mail query numbers are strict and bounded', () => {
   assert.equal(parsePositiveInteger('2', 1), 2);
   assert.equal(parsePositiveInteger('999', 1, 50), 50);

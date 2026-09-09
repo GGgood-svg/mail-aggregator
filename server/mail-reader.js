@@ -236,16 +236,39 @@ function mailAccessForRequest(req, dependencies = {}) {
   if (dependencies.mailAccessForRequest) return dependencies.mailAccessForRequest(req);
   // Pure router tests mount this module without the application's auth middleware.
   if (!req.user) return { all: true, roots: [] };
-  if (req.user.mail_access_all) return { all: true, roots: [] };
   const { db } = require('./db');
-  const rows = db.prepare(`SELECT COALESCE(mailbox_folder,destination_folder) AS mailbox_folder FROM accounts
-    WHERE owner_user_id=? AND destination_mode='subfolder' AND destination_folder IS NOT NULL`).all(req.user.id);
-  return { all: false, roots: rows.map((row) => row.mailbox_folder) };
+  const rows = db.prepare(`SELECT owner_user_id,COALESCE(mailbox_folder,destination_folder) AS mailbox_folder
+    FROM accounts
+    WHERE destination_mode='subfolder' AND COALESCE(mailbox_folder,destination_folder) IS NOT NULL`).all();
+  const ownRoots = rows
+    .filter((row) => Number(row.owner_user_id) === Number(req.user.id))
+    .map((row) => row.mailbox_folder);
+
+  // The first account keeps access to unscoped folders created by old flat-mode
+  // installations.  This is deliberately not administrator access to every
+  // mailbox: another user's isolated root always wins and is denied first.
+  if (req.user.mail_access_all) {
+    return {
+      all: false,
+      roots: ownRoots,
+      allowUnscoped: true,
+      deniedRoots: rows
+        .filter((row) => Number(row.owner_user_id) !== Number(req.user.id))
+        .map((row) => row.mailbox_folder),
+    };
+  }
+  return { all: false, roots: ownRoots, allowUnscoped: false, deniedRoots: [] };
+}
+
+function folderWithinRoot(folder, root) {
+  return folder === root || folder.startsWith(`${root}.`) || folder.startsWith(`${root}/`);
 }
 
 function folderAllowed(folder, access) {
   if (access.all) return true;
-  return access.roots.some((root) => folder === root || folder.startsWith(`${root}.`) || folder.startsWith(`${root}/`));
+  if ((access.deniedRoots || []).some((root) => folderWithinRoot(folder, root))) return false;
+  if ((access.roots || []).some((root) => folderWithinRoot(folder, root))) return true;
+  return Boolean(access.allowUnscoped);
 }
 
 function requireFolderAccess(folder, access) {
@@ -448,6 +471,7 @@ module.exports = {
   sanitizeMessageHtml,
   serializeSummary,
   serializeParsedMessage,
+  mailAccessForRequest,
   folderAllowed,
   createMailRouter,
 };

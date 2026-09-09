@@ -72,3 +72,23 @@ integrationTest('disabled users and stale session versions are rejected immediat
     assert.equal(sessionUser({ session: { userId: Number(id), sessionVersion: 2 } }), null);
   });
 });
+
+integrationTest('legacy administrator access excludes every other user mailbox root', () => {
+  withDatabase((db) => {
+    const adminId = db.prepare(`INSERT INTO admin_users(username,password_hash,role,mail_access_all)
+      VALUES('admin','x','admin',1)`).run().lastInsertRowid;
+    const userId = db.prepare(`INSERT INTO admin_users(username,password_hash,role)
+      VALUES('member','x','user')`).run().lastInsertRowid;
+    db.prepare(`INSERT INTO accounts(name,provider,host,username,owner_user_id,destination_mode,destination_folder,mailbox_folder)
+      VALUES('admin mail','custom','imap.example.test','admin@example.test',?,'subfolder','Admin Mail','U1-A1')`).run(adminId);
+    db.prepare(`INSERT INTO accounts(name,provider,host,username,owner_user_id,destination_mode,destination_folder,mailbox_folder)
+      VALUES('member mail','custom','imap.example.test','member@example.test',?,'subfolder','Member Mail','U2-A2')`).run(userId);
+
+    const { mailAccessForRequest, folderAllowed } = require('../server/mail-reader');
+    const access = mailAccessForRequest({ user: { id: Number(adminId), mail_access_all: 1 } });
+    assert.equal(folderAllowed('INBOX', access), true);
+    assert.equal(folderAllowed('U1-A1/INBOX', access), true);
+    assert.equal(folderAllowed('U2-A2', access), false);
+    assert.equal(folderAllowed('U2-A2/INBOX', access), false);
+  });
+});

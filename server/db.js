@@ -156,8 +156,8 @@ addColumnIfMissing('admin_users', 'mail_access_all', 'mail_access_all INTEGER NO
 addColumnIfMissing('accounts', 'owner_user_id', 'owner_user_id INTEGER REFERENCES admin_users(id) ON DELETE RESTRICT');
 
 // v0.2.0 多用户迁移：旧版本只有一个管理员，现有邮箱全部归给最早创建的账号。
-// 该账号还需要读取旧版 flat 模式产生的共享文件夹，因此保留一次性的全邮箱读取能力；
-// 后续创建的用户必须使用隔离文件夹，不会获得该能力。
+// 该账号还需要读取旧版 flat 模式产生的未归属文件夹，因此保留兼容标记；读取邮件时
+// 仍会先排除其他用户的隔离目录。后续创建的用户不会获得该兼容能力。
 const firstUser = db.prepare('SELECT id FROM admin_users ORDER BY id LIMIT 1').get();
 if (firstUser) {
   db.prepare("UPDATE admin_users SET role='admin', mail_access_all=1 WHERE id=?").run(firstUser.id);
