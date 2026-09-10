@@ -46,3 +46,10 @@ test('fresh installs bind locally and require an explicit exposure mode', () => 
   const openrc = fs.readFileSync(path.join(root, 'scripts', 'mail-aggregator.openrc'), 'utf8');
   assert.match(openrc, /MAIL_AGG_REQUIRE_HTTPS/);
 });
+
+test('installer exposes an explicit app-only mode and rejects conflicting full modes', () => {
+  const script = fs.readFileSync(path.join(root, 'scripts', 'install.sh'), 'utf8');
+  assert.match(script, /--app-only\) APP_ONLY=1/);
+  assert.match(script, /APP_ONLY[^\n]*FULL[^\n]*INSTALL_DOVECOT/);
+  assert.match(script, /--app-only 不能与/);
+});

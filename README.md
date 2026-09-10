@@ -85,13 +85,13 @@ rc-service mail-aggregator status
 
 ### 已有 Dovecot
 
-不传 `--quick`、`--custom`、`--full` 时，安装器只安装应用，并复用已有 Dovecot：
+已有 Dovecot 时，使用明确的 `--app-only` 模式只安装应用并复用现有配置：
 
 ```sh
-./scripts/install.sh
+./scripts/install.sh --app-only
 ```
 
-先确认本地 IMAP 服务、用户和 Maildir 已配置，再用 `./scripts/doctor.sh` 检查。安装器不会在这种模式下重建现有 Dovecot 配置。
+先确认本地 IMAP 服务、用户和 Maildir 已配置，再用 `./scripts/doctor.sh` 检查。安装器不会在这种模式下重建现有 Dovecot 配置。为保持快速安装的历史行为，无参数运行与 `--quick` 相同，均为完整安装。
 
 ## 添加邮箱
 

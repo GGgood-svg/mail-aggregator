@@ -2,7 +2,8 @@
 # Mail Aggregator installer
 #
 # 用法:
-#   ./scripts/install.sh / --quick                快速安装
+#   ./scripts/install.sh 或 --quick                快速完整安装
+#   ./scripts/install.sh --app-only                仅部署应用，复用已有 Dovecot
 #   ./scripts/install.sh --custom                 自定义交互安装
 #   ./scripts/install.sh --install-dovecot         Dovecot缺失时装一个全新的,但不自动配置
 #   ./scripts/install.sh --full                    全新机器一步到位:Dovecot+mailuser+Maildir+
@@ -36,6 +37,7 @@ INSTALL_DOVECOT=0
 FULL=0
 QUICK=0
 CUSTOM=0
+APP_ONLY=0
 SHOW_CONFIG=0
 CLEANUP_SOURCE=0
 CLEANUP_ARCHIVE=""
@@ -43,7 +45,7 @@ FORCE_DOVECOT_INIT=0
 DEFAULT_DOVECOT_PASSWORD=""
 
 usage() {
-  echo "Usage: $0 [--quick|--custom|--full] [--lan-http|--https-proxy] [--dovecot-user USER] [--default-dovecot-password PASSWORD] [--dovecot-host HOST] [--dovecot-port PORT] [--web-port PORT] [--language LOCALE] [--show-config] [--cleanup-source --cleanup-archive FILE]"
+  echo "Usage: $0 [--quick|--custom|--full|--app-only] [--lan-http|--https-proxy] [--dovecot-user USER] [--default-dovecot-password PASSWORD] [--dovecot-host HOST] [--dovecot-port PORT] [--web-port PORT] [--language LOCALE] [--show-config] [--cleanup-source --cleanup-archive FILE]"
 }
 valid_user() { echo "$1" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' && ! echo " root daemon bin nobody " | grep -q " $1 "; }
 valid_port() { case "$1" in ''|*[!0-9]*) return 1;; esac; [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null; }
@@ -131,6 +133,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --quick) QUICK=1; FULL=1; INSTALL_DOVECOT=1 ;;
     --custom) CUSTOM=1; FULL=1; INSTALL_DOVECOT=1 ;;
+    --app-only) APP_ONLY=1 ;;
     --install-dovecot) INSTALL_DOVECOT=1 ;;
     --full) FULL=1; INSTALL_DOVECOT=1 ;;
     --lan-http)
@@ -160,6 +163,9 @@ while [ $# -gt 0 ]; do
   shift
 done
 if [ "$ARG_COUNT" = "0" ]; then QUICK=1; FULL=1; INSTALL_DOVECOT=1; fi
+if [ "$APP_ONLY" = "1" ] && { [ "$FULL" = "1" ] || [ "$INSTALL_DOVECOT" = "1" ]; }; then
+  fail_step "参数校验" "--app-only 不能与 --quick、--custom、--full 或 --install-dovecot 同时使用" "请选择仅部署应用或完整安装其中一种模式。"
+fi
 if [ "$CUSTOM" = "1" ]; then
   printf '本地 Dovecot 用户名 [%s]: ' "$DOVECOT_USER"; read -r input; [ -n "$input" ] && DOVECOT_USER="$input"
   printf '本地 Dovecot 初始密码 [留空自动生成]: '; stty -echo; read -r input; stty echo; echo; [ -n "$input" ] && DEFAULT_DOVECOT_PASSWORD="$input"

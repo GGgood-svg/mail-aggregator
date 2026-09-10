@@ -71,7 +71,7 @@ The first account is the primary administrator. Administrators create standard u
 
 Users choose a display name for each mailbox, while the server assigns an unforgeable Dovecot storage root from the user and account IDs. Existing accounts are assigned to the first administrator without moving existing mail. Because legacy `flat` mode already merged messages into shared root folders, only the first administrator retains access to those legacy folders; other users can read only their server-assigned isolated roots.
 
-If Dovecot is already configured, run `./scripts/install.sh` without `--quick`, `--custom`, or `--full`. This installs the application without rebuilding the existing Dovecot configuration.
+If Dovecot is already configured, run `./scripts/install.sh --app-only`. This installs the application without rebuilding the existing Dovecot configuration. For backward compatibility, running the installer without arguments remains equivalent to `--quick` and performs a full installation.
 
 ## Account authentication
 
