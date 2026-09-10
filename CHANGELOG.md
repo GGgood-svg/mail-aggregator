@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Persist Maildir root ownership independently from sync-account records, so deleting an account while retaining its mail cannot expose that orphaned mailbox to the legacy administrator scope; restores now reject ownership conflicts and unknown generated tenant roots fail closed.
+- Harden full installations by setting the managed mailbox home and Maildir directories to `0700` and message files to `0600`, and report unsafe filesystem permissions in `doctor.sh`.
 - Add administrator-managed multi-user login with server-side role checks, account/job/log ownership filtering, per-user mailbox scopes, forced isolated destinations for new accounts, unforgeable Dovecot storage roots, session invalidation on user changes, personal password updates, and server-side page redirects. Existing accounts migrate to the first administrator without moving legacy mail.
 - Restrict the legacy administrator compatibility scope to old unassigned folders and its own accounts; administrators can no longer read another user's isolated mailbox root.
 - Clearly report HTTP as unencrypted instead of presenting application-layer password wrapping as a replacement for HTTPS.

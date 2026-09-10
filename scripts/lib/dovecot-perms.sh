@@ -46,3 +46,23 @@ fix_users_permissions() {
     echo "  已设置 $TARGET_FILE 权限: root:root 600(未能确定 Dovecot 内部账号所在的组,保留最保守权限)"
   fi
 }
+
+# 收紧本项目管理的本地邮箱存储。Dovecot 以邮箱用户身份访问 Maildir，Web 服务
+# 通过 IMAP 读取，因此没有理由允许同机其他系统用户遍历或读取邮件文件。
+# 用法: secure_maildir_permissions <邮箱用户>
+secure_maildir_permissions() {
+  MAIL_OWNER="$1"
+  [ -n "$MAIL_OWNER" ] || return 1
+  id "$MAIL_OWNER" >/dev/null 2>&1 || return 1
+
+  MAIL_HOME="/home/$MAIL_OWNER"
+  MAIL_ROOT="$MAIL_HOME/Maildir"
+  [ -d "$MAIL_ROOT" ] || return 1
+
+  chown -R "$MAIL_OWNER:$MAIL_OWNER" "$MAIL_ROOT"
+  chown "$MAIL_OWNER:$MAIL_OWNER" "$MAIL_HOME"
+  chmod 700 "$MAIL_HOME" "$MAIL_ROOT"
+  find "$MAIL_ROOT" -type d -exec chmod 700 {} \;
+  find "$MAIL_ROOT" -type f -exec chmod 600 {} \;
+  echo "  已收紧 $MAIL_ROOT 权限: 目录 700，邮件文件 600"
+}

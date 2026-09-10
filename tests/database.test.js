@@ -43,11 +43,21 @@ function loadDatabase(dataDir) {
 
 function withTempDatabase(run) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mail-aggregator-db-test-'));
+  let runError = null;
   try {
     return run(dataDir);
+  } catch (error) {
+    runError = error;
+    throw error;
   } finally {
     delete require.cache[dbModulePath];
-    fs.rmSync(dataDir, { recursive: true, force: true });
+    try {
+      fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+    } catch (cleanupError) {
+      // Preserve the real database/migration error if a failed module load left a
+      // Windows SQLite handle alive; otherwise surface the cleanup regression.
+      if (!runError) throw cleanupError;
+    }
   }
 }
 
@@ -77,7 +87,7 @@ integrationTest('database initialization enables WAL, foreign keys, and current 
         .prepare("SELECT name FROM sqlite_master WHERE type='table'")
         .all()
         .map((row) => row.name);
-      for (const name of ['accounts', 'sync_jobs', 'settings', 'sessions', 'login_attempts']) {
+      for (const name of ['accounts', 'mailbox_ownership', 'sync_jobs', 'settings', 'sessions', 'login_attempts']) {
         assert.ok(tables.includes(name), `missing table: ${name}`);
       }
       const accountId = insertAccount(db, 'flat-default');
@@ -116,6 +126,66 @@ integrationTest('startup assigns legacy accounts to the first administrator with
       assert.equal(user.mail_access_all, 1);
       assert.equal(account.owner_user_id, userId);
       assert.equal(account.mailbox_folder, 'Old Mail');
+      const ownership = loaded.db.prepare(`SELECT owner_user_id, former_account_id
+        FROM mailbox_ownership WHERE local_user='mailuser' AND mailbox_folder='old mail' COLLATE NOCASE`).get();
+      assert.equal(ownership.owner_user_id, userId);
+      assert.equal(ownership.former_account_id, accountId);
+    } finally { loaded.db.close(); }
+  });
+});
+
+integrationTest('mailbox ownership survives account deletion and cannot be reassigned', () => {
+  withTempDatabase((dataDir) => {
+    const { db } = loadDatabase(dataDir);
+    try {
+      const firstOwner = db.prepare("INSERT INTO admin_users(username,password_hash) VALUES('first-owner','x')").run().lastInsertRowid;
+      const secondOwner = db.prepare("INSERT INTO admin_users(username,password_hash) VALUES('second-owner','x')").run().lastInsertRowid;
+      const accountId = db.prepare(`INSERT INTO accounts
+        (name,provider,host,username,local_user,destination_mode,destination_folder,mailbox_folder,owner_user_id)
+        VALUES('owned','custom','imap.example.test','a@example.test','mailuser','subfolder','Owned','U1-A99',?)`)
+        .run(firstOwner).lastInsertRowid;
+      const { registerMailboxOwnership } = require('../server/mailbox-ownership');
+      registerMailboxOwnership(db, {
+        localUser: 'mailuser', mailboxFolder: 'U1-A99', ownerUserId: firstOwner, accountId,
+      });
+      db.prepare('DELETE FROM accounts WHERE id=?').run(accountId);
+      assert.equal(db.prepare(`SELECT owner_user_id FROM mailbox_ownership
+        WHERE local_user='mailuser' AND mailbox_folder='U1-A99'`).get().owner_user_id, firstOwner);
+      db.prepare('DELETE FROM admin_users WHERE id=?').run(firstOwner);
+      assert.equal(db.prepare(`SELECT owner_user_id FROM mailbox_ownership
+        WHERE local_user='mailuser' AND mailbox_folder='U1-A99'`).get().owner_user_id, firstOwner);
+      assert.throws(() => registerMailboxOwnership(db, {
+        localUser: 'mailuser', mailboxFolder: 'u1-a99', ownerUserId: secondOwner,
+      }), /已归属于其他用户/);
+    } finally { db.close(); }
+  });
+});
+
+integrationTest('startup removes the transient cascading ownership foreign key without losing roots', () => {
+  withTempDatabase((dataDir) => {
+    let loaded = loadDatabase(dataDir);
+    const owner = loaded.db.prepare("INSERT INTO admin_users(username,password_hash) VALUES('migration-owner','x')").run().lastInsertRowid;
+    loaded.db.exec(`
+      DROP TABLE mailbox_ownership;
+      CREATE TABLE mailbox_ownership (
+        local_user TEXT NOT NULL,
+        mailbox_folder TEXT NOT NULL COLLATE NOCASE,
+        owner_user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+        former_account_id INTEGER,
+        created_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (local_user, mailbox_folder)
+      );
+    `);
+    loaded.db.prepare(`INSERT INTO mailbox_ownership(local_user,mailbox_folder,owner_user_id)
+      VALUES('mailuser','U9-A9',?)`).run(owner);
+    loaded.db.close();
+    delete require.cache[dbModulePath];
+
+    loaded = loadDatabase(dataDir);
+    try {
+      assert.equal(loaded.db.prepare('PRAGMA foreign_key_list(mailbox_ownership)').all().length, 0);
+      assert.equal(loaded.db.prepare(`SELECT owner_user_id FROM mailbox_ownership
+        WHERE local_user='mailuser' AND mailbox_folder='U9-A9'`).get().owner_user_id, owner);
     } finally { loaded.db.close(); }
   });
 });

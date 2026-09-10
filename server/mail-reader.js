@@ -237,9 +237,17 @@ function mailAccessForRequest(req, dependencies = {}) {
   // Pure router tests mount this module without the application's auth middleware.
   if (!req.user) return { all: true, roots: [] };
   const { db } = require('./db');
-  const rows = db.prepare(`SELECT owner_user_id,COALESCE(mailbox_folder,destination_folder) AS mailbox_folder
-    FROM accounts
-    WHERE destination_mode='subfolder' AND COALESCE(mailbox_folder,destination_folder) IS NOT NULL`).all();
+  const { localDovecot } = require('./config');
+  // 永久归属表是权威来源，同时合并仍在 accounts 中的活动目录，兼容测试夹具、
+  // 升级中的短暂状态以及第三方导入代码。
+  const rows = db.prepare(`SELECT owner_user_id, mailbox_folder
+      FROM mailbox_ownership WHERE local_user=?
+    UNION
+    SELECT owner_user_id, COALESCE(mailbox_folder,destination_folder) AS mailbox_folder
+      FROM accounts WHERE local_user=? AND destination_mode='subfolder'
+        AND owner_user_id IS NOT NULL
+        AND COALESCE(mailbox_folder,destination_folder) IS NOT NULL`)
+    .all(localDovecot().user, localDovecot().user);
   const ownRoots = rows
     .filter((row) => Number(row.owner_user_id) === Number(req.user.id))
     .map((row) => row.mailbox_folder);
@@ -268,6 +276,9 @@ function folderAllowed(folder, access) {
   if (access.all) return true;
   if ((access.deniedRoots || []).some((root) => folderWithinRoot(folder, root))) return false;
   if ((access.roots || []).some((root) => folderWithinRoot(folder, root))) return true;
+  // 防御旧版本留下、尚未登记进 mailbox_ownership 的孤立目录。生成式隔离根
+  // 永远不能落入首位管理员的旧版“未归属目录兼容”权限。
+  if (/^U\d+-A\d+(?:[./]|$)/i.test(String(folder || ''))) return false;
   return Boolean(access.allowUnscoped);
 }
 

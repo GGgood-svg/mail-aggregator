@@ -41,7 +41,8 @@ test('legacy access never crosses into another user isolated root', () => {
   assert.equal(folderAllowed('U1-A9/INBOX', access), true);
   assert.equal(folderAllowed('U2-A7', access), false);
   assert.equal(folderAllowed('U2-A7/INBOX', access), false);
-  assert.equal(folderAllowed('U2-A70', access), true);
+  assert.equal(folderAllowed('U2-A70', access), false);
+  assert.equal(folderAllowed('ordinary-legacy-folder', access), true);
 });
 
 test('mail query numbers are strict and bounded', () => {

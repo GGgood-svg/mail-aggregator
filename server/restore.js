@@ -176,6 +176,7 @@ function prepareRestoredSecrets(backupSecretsDir, currentSecretsDir, preparedDir
 }
 
 function restoreApplicationState({ Database, currentDb, backupDbPath, currentSecretsDir, backupSecretsDir, workDir }) {
+  const { registerMailboxOwnership } = require('./mailbox-ownership');
   const source = new Database(backupDbPath, { readonly: true, fileMustExist: true });
   const preparedSecrets = path.join(workDir, 'prepared-secrets');
   const oldSecrets = path.join(workDir, 'old-secrets');
@@ -209,6 +210,20 @@ function restoreApplicationState({ Database, currentDb, backupDbPath, currentSec
       if (tableColumns(currentDb, 'accounts').includes('mailbox_folder')) {
         currentDb.prepare(`UPDATE accounts SET mailbox_folder=destination_folder
           WHERE mailbox_folder IS NULL AND destination_mode='subfolder'`).run();
+      }
+      const accountColumns = new Set(tableColumns(currentDb, 'accounts'));
+      if (tableExists(currentDb, 'mailbox_ownership')
+          && ['local_user', 'mailbox_folder', 'owner_user_id'].every((name) => accountColumns.has(name))) {
+        for (const account of currentDb.prepare(`SELECT id, local_user, mailbox_folder, owner_user_id
+          FROM accounts WHERE destination_mode='subfolder' AND mailbox_folder IS NOT NULL
+            AND owner_user_id IS NOT NULL`).iterate()) {
+          registerMailboxOwnership(currentDb, {
+            localUser: account.local_user,
+            mailboxFolder: account.mailbox_folder,
+            ownerUserId: account.owner_user_id,
+            accountId: account.id,
+          });
+        }
       }
       const now = new Date().toISOString();
       const jobs = copyTableRows(currentDb, source, 'sync_jobs', {

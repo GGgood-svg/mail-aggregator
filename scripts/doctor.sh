@@ -99,7 +99,26 @@ fi
 echo ""
 echo "=== Maildir ==="
 if [ -d "/home/$DOVECOT_USER/Maildir" ]; then
-  pass "存在: /home/$DOVECOT_USER/Maildir"
+  MAIL_HOME="/home/$DOVECOT_USER"
+  MAILDIR="$MAIL_HOME/Maildir"
+  pass "存在: $MAILDIR"
+  HOME_MODE=$(stat -c '%a' "$MAIL_HOME" 2>/dev/null || echo unknown)
+  MAILDIR_MODE=$(stat -c '%a' "$MAILDIR" 2>/dev/null || echo unknown)
+  if [ "$HOME_MODE" = "700" ] && [ "$MAILDIR_MODE" = "700" ]; then
+    pass "邮箱主目录和 Maildir 权限为 700"
+  else
+    fail "邮箱目录权限过宽(home=$HOME_MODE, Maildir=$MAILDIR_MODE；应为700)"
+  fi
+  if find "$MAILDIR" -type f -perm /077 -print -quit 2>/dev/null | grep -q .; then
+    fail "发现同机其他用户可读取或修改的邮件文件(应为600)"
+  else
+    pass "邮件文件未向同机其他用户开放"
+  fi
+  if find "$MAILDIR" -mindepth 1 -type d -perm /077 -print -quit 2>/dev/null | grep -q .; then
+    fail "发现同机其他用户可遍历的 Maildir 子目录(应为700)"
+  else
+    pass "Maildir 子目录未向同机其他用户开放"
+  fi
 else
   fail "/home/$DOVECOT_USER/Maildir 不存在"
 fi

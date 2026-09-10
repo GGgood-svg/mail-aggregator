@@ -6,6 +6,7 @@ const { ownerId, ownedAccount } = require('./access-control');
 const { sendJobLog } = require('./log-reader');
 const { getProvider, loadProviders } = require('./providers');
 const { validateAccountPayload } = require('./account-validation');
+const { registerMailboxOwnership } = require('./mailbox-ownership');
 const {
   saveSourceSecret,
   deleteSourceSecret,
@@ -122,8 +123,8 @@ router.post('/', (req, res) => {
     return res.status(409).json({ error: '你已有账号使用同名隔离文件夹，请换一个名称' });
   }
 
-  const info = db
-    .prepare(
+  const createAccount = db.transaction(() => {
+    const info = db.prepare(
       `INSERT INTO accounts
         (name, provider, host, port, ssl, username, auth_type, enabled, sync_interval,
          local_user, sync_mode, destination_mode, destination_folder,
@@ -131,13 +132,20 @@ router.post('/', (req, res) => {
        VALUES (@name, @provider, @host, @port, @ssl, @username, @auth_type, @enabled,
          @sync_interval, @local_user, @sync_mode, @destination_mode, @destination_folder,
          @folder_includes, @folder_excludes, @max_age_days, @max_size_mb, @deletion_mode, @owner_user_id)`
-    )
-    .run({ ...normalized, owner_user_id: ownerId(req) });
-
-  const accountId = info.lastInsertRowid;
-  // 实际Dovecot根目录不可由用户控制，避免用户把目录名伪造成INBOX或别人的根目录。
-  const mailboxFolder = `U${ownerId(req)}-A${accountId}`;
-  db.prepare('UPDATE accounts SET mailbox_folder=? WHERE id=?').run(mailboxFolder, accountId);
+    ).run({ ...normalized, owner_user_id: ownerId(req) });
+    const accountId = Number(info.lastInsertRowid);
+    // 实际Dovecot根目录不可由用户控制，避免用户把目录名伪造成INBOX或别人的根目录。
+    const mailboxFolder = `U${ownerId(req)}-A${accountId}`;
+    db.prepare('UPDATE accounts SET mailbox_folder=? WHERE id=?').run(mailboxFolder, accountId);
+    registerMailboxOwnership(db, {
+      localUser: normalized.local_user,
+      mailboxFolder,
+      ownerUserId: ownerId(req),
+      accountId,
+    });
+    return accountId;
+  });
+  const accountId = createAccount();
   if (normalized.auth_type === 'password') saveSourceSecret(accountId, req.body.secret);
   if (req.body.local_secret) {
     saveTargetSecret(accountId, req.body.local_secret);
@@ -204,8 +212,18 @@ router.put('/:id', (req, res) => {
      WHERE id=@id`
   ).run({ ...normalized, id: req.params.id });
   if (normalized.destination_mode === 'subfolder' && !existing.mailbox_folder) {
-    db.prepare('UPDATE accounts SET mailbox_folder=? WHERE id=?')
-      .run(`U${ownerId(req)}-A${existing.id}`, existing.id);
+    const mailboxFolder = `U${ownerId(req)}-A${existing.id}`;
+    const assignMailbox = db.transaction(() => {
+      db.prepare('UPDATE accounts SET mailbox_folder=? WHERE id=?')
+        .run(mailboxFolder, existing.id);
+      registerMailboxOwnership(db, {
+        localUser: normalized.local_user,
+        mailboxFolder,
+        ownerUserId: ownerId(req),
+        accountId: existing.id,
+      });
+    });
+    assignMailbox();
   }
 
   if (destinationChanged) {
@@ -250,7 +268,8 @@ router.delete('/:id', (req, res) => {
     const cacheDir = path.join(DIRS.cache, String(req.params.id));
     fs.rmSync(cacheDir, { recursive: true, force: true });
   }
-  // 注意:默认不删除本地已同步的邮件(Maildir内容),只删除账号配置/密码/cache
+  // 注意:默认不删除本地已同步的邮件，也不删除 mailbox_ownership。
+  // 永久保留目录归属，避免账号配置删除后遗留邮件被管理员兼容权限接管。
 
   res.json({ ok: true });
 });

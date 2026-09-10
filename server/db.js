@@ -73,6 +73,18 @@ CREATE TABLE IF NOT EXISTS accounts (
   owner_user_id INTEGER REFERENCES admin_users(id) ON DELETE RESTRICT
 );
 
+-- 邮箱落盘目录的归属必须独立于账号配置长期保存。删除同步账号时会保留邮件，
+-- 因此不能只靠 accounts 表判断某个 Maildir 根目录属于谁。
+CREATE TABLE IF NOT EXISTS mailbox_ownership (
+  local_user TEXT NOT NULL,
+  mailbox_folder TEXT NOT NULL COLLATE NOCASE,
+  -- 故意不设外键：Web用户删除后仍要保留原owner id作为不可复用的归属墓碑。
+  owner_user_id INTEGER NOT NULL,
+  former_account_id INTEGER,
+  created_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (local_user, mailbox_folder)
+);
+
 CREATE TABLE IF NOT EXISTS sync_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -155,6 +167,34 @@ addColumnIfMissing('admin_users', 'session_version', 'session_version INTEGER NO
 addColumnIfMissing('admin_users', 'mail_access_all', 'mail_access_all INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('accounts', 'owner_user_id', 'owner_user_id INTEGER REFERENCES admin_users(id) ON DELETE RESTRICT');
 
+// 一个未发布的开发版本曾给 mailbox_ownership 加过 ON DELETE CASCADE。若该版本
+// 已在测试机启动过，立刻重建表移除外键，防止删除Web用户时连归属墓碑一起丢失。
+if (db.prepare('PRAGMA foreign_key_list(mailbox_ownership)').all().length) {
+  try {
+    db.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE mailbox_ownership RENAME TO mailbox_ownership_with_fk;
+      CREATE TABLE mailbox_ownership (
+        local_user TEXT NOT NULL,
+        mailbox_folder TEXT NOT NULL COLLATE NOCASE,
+        owner_user_id INTEGER NOT NULL,
+        former_account_id INTEGER,
+        created_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (local_user, mailbox_folder)
+      );
+      INSERT INTO mailbox_ownership
+        (local_user, mailbox_folder, owner_user_id, former_account_id, created_at)
+      SELECT local_user, mailbox_folder, owner_user_id, former_account_id, created_at
+      FROM mailbox_ownership_with_fk;
+      DROP TABLE mailbox_ownership_with_fk;
+      COMMIT;
+    `);
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch (_) {}
+    throw error;
+  }
+}
+
 // v0.2.0 多用户迁移：旧版本只有一个管理员，现有邮箱全部归给最早创建的账号。
 // 该账号还需要读取旧版 flat 模式产生的未归属文件夹，因此保留兼容标记；读取邮件时
 // 仍会先排除其他用户的隔离目录。后续创建的用户不会获得该兼容能力。
@@ -172,6 +212,20 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_account_mailbox_folder
   ON accounts(local_user, mailbox_folder COLLATE NOCASE)
   WHERE mailbox_folder IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_mailbox_ownership_owner
+  ON mailbox_ownership(local_user, owner_user_id);
+`);
+
+// 为旧版本已有的隔离目录登记永久归属。INSERT OR IGNORE 很重要：账号被删除后
+// 保留下来的历史归属不能被恢复包或后来创建的同名目录悄悄改给另一个用户。
+db.exec(`
+  INSERT OR IGNORE INTO mailbox_ownership
+    (local_user, mailbox_folder, owner_user_id, former_account_id)
+  SELECT local_user, mailbox_folder, owner_user_id, id
+  FROM accounts
+  WHERE destination_mode='subfolder'
+    AND mailbox_folder IS NOT NULL
+    AND owner_user_id IS NOT NULL;
 `);
 
 // 显示名称只需在同一Web用户内唯一；实际落盘目录由mailbox_folder唯一约束。

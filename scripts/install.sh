@@ -480,6 +480,12 @@ cp -r "$PROJECT_ROOT"/server "$PROJECT_ROOT"/web "$PROJECT_ROOT"/config \
 # shellcheck source=lib/dovecot-perms.sh
 . "$PROJECT_ROOT/scripts/lib/dovecot-perms.sh"
 
+if [ "$FULL" = "1" ] && [ -d "/home/$DOVECOT_USER/Maildir" ]; then
+  secure_maildir_permissions "$DOVECOT_USER" \
+    || fail_step "6/9" "无法收紧 Maildir 权限" \
+       "请检查 /home/$DOVECOT_USER 的所有者和文件系统状态后重试。"
+fi
+
 mkdir -p "$DATA_DIR"
 chown -R "$APP_USER":"$APP_USER" "$APP_DIR" "$DATA_DIR"
 # Preserve v0.1.3 installations: if no v0.1.4 config exists but Dovecot was
