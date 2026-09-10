@@ -14,7 +14,7 @@
   </div>
   <main class="content">
     <h1>用户管理</h1>
-    <p class="hint">不开放公开注册。管理员在这里创建用户，每个用户只能管理自己的邮箱账号、同步任务和邮件文件夹。</p>
+    <p class="hint">不开放公开注册。管理员在这里创建用户，每个用户只能管理自己的邮箱账号、同步任务和邮件文件夹。用户首次登录后应立即到“个人安全”修改初始密码；管理员不能代为重置。</p>
     <div class="panel" style="max-width:720px;margin-top:18px;">
       <h2>创建用户</h2>
       <div class="grid-2">
@@ -27,7 +27,7 @@
     </div>
     <div class="panel" style="margin-top:18px;">
       <h2>现有用户</h2>
-      <div style="overflow-x:auto"><table><thead><tr><th>用户名</th><th>角色</th><th>邮箱数</th><th>状态</th><th>重置密码</th><th>操作</th></tr></thead><tbody id="user-list"></tbody></table></div>
+      <div style="overflow-x:auto"><table><thead><tr><th>用户名</th><th>角色</th><th>邮箱数</th><th>状态</th><th>操作</th></tr></thead><tbody id="user-list"></tbody></table></div>
     </div>
   </main>
 </div>
@@ -39,15 +39,13 @@ async function loadUsers() {
     <td>${escapeHtml(u.username)}${u.id === currentUser.id ? '（当前）' : ''}</td>
     <td><select data-role="${u.id}" ${u.id === currentUser.id ? 'disabled' : ''}><option value="user" ${u.role === 'user' ? 'selected' : ''}>普通用户</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>管理员</option></select></td>
     <td>${u.account_count}</td><td><select data-enabled="${u.id}" ${u.id === currentUser.id ? 'disabled' : ''}><option value="1" ${u.enabled ? 'selected' : ''}>启用</option><option value="0" ${!u.enabled ? 'selected' : ''}>停用</option></select></td>
-    <td><input type="password" data-password="${u.id}" placeholder="留空则不修改" autocomplete="new-password" style="min-width:160px" ${u.id === currentUser.id ? 'disabled' : ''}></td>
     <td><button class="btn secondary" onclick="saveUser(${u.id})" ${u.id === currentUser.id ? 'disabled' : ''}>保存</button> <button class="btn danger" onclick="deleteUser(${u.id})" ${u.id === currentUser.id ? 'disabled' : ''}>删除</button></td>
   </tr>`).join('');
 }
 async function saveUser(id) {
   const role = document.querySelector(`[data-role="${id}"]`).value;
-  const password = document.querySelector(`[data-password="${id}"]`).value;
   const enabled = document.querySelector(`[data-enabled="${id}"]`).value === '1';
-  try { await Api.put(`/api/users/${id}`, { role, enabled, ...(password ? { password } : {}) }); toast('用户已更新'); await loadUsers(); }
+  try { await Api.put(`/api/users/${id}`, { role, enabled }); toast('用户已更新'); await loadUsers(); }
   catch (e) { toast(e.message, 'error'); }
 }
 async function deleteUser(id) {

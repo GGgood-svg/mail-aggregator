@@ -18,9 +18,10 @@ function BetterSqliteShim(filename) {
 const dbPath = require.resolve('../server/db');
 const authPath = require.resolve('../server/auth');
 const accessPath = require.resolve('../server/access-control');
+const usersPath = require.resolve('../server/users');
 
 function unload() {
-  for (const item of [accessPath, authPath, dbPath]) delete require.cache[item];
+  for (const item of [usersPath, accessPath, authPath, dbPath]) delete require.cache[item];
 }
 
 function loadDatabase(root) {
@@ -90,5 +91,32 @@ integrationTest('legacy administrator access excludes every other user mailbox r
     assert.equal(folderAllowed('U1-A1/INBOX', access), true);
     assert.equal(folderAllowed('U2-A2', access), false);
     assert.equal(folderAllowed('U2-A2/INBOX', access), false);
+  });
+});
+
+integrationTest('administrator cannot reset another user password', () => {
+  withDatabase((db) => {
+    const adminId = db.prepare(`INSERT INTO admin_users(username,password_hash,role)
+      VALUES('admin-reset-test','admin-hash','admin')`).run().lastInsertRowid;
+    const userId = db.prepare(`INSERT INTO admin_users(username,password_hash,role)
+      VALUES('member-reset-test','original-hash','user')`).run().lastInsertRowid;
+    const router = require('../server/users');
+    const layer = router.stack.find((item) => item.route?.path === '/:id' && item.route.methods.put);
+    const response = {
+      statusCode: 200,
+      body: null,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; return this; },
+    };
+    layer.route.stack[0].handle({
+      params: { id: String(userId) },
+      body: { password: 'attacker-selected-password', role: 'admin', enabled: false },
+      user: { id: Number(adminId), role: 'admin' },
+    }, response);
+    assert.equal(response.statusCode, 403);
+    const unchanged = db.prepare('SELECT password_hash,role,enabled FROM admin_users WHERE id=?').get(userId);
+    assert.equal(unchanged.password_hash, 'original-hash');
+    assert.equal(unchanged.role, 'user');
+    assert.equal(unchanged.enabled, 1);
   });
 });

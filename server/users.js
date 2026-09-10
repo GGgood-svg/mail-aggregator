@@ -38,22 +38,15 @@ router.put('/:id', (req, res) => {
   if (id === Number(req.user.id) && (!enabled || role !== 'admin')) {
     return res.status(400).json({ error: '不能停用自己或取消自己的管理员权限' });
   }
-  const password = req.body?.password === undefined ? null : String(req.body.password);
-  if (password !== null && (password.length < 10 || password.length > 256)) return res.status(400).json({ error: '新密码需为10-256位' });
-  if (id === Number(req.user.id) && password !== null) {
-    return res.status(400).json({ error: '修改自己的密码必须验证当前密码，请使用个人密码修改区' });
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'password')) {
+    return res.status(403).json({ error: '管理员不能重置其他用户的密码；密码只能由用户本人验证当前密码后修改' });
   }
   const adminCount = db.prepare("SELECT COUNT(*) c FROM admin_users WHERE role='admin' AND enabled=1").get().c;
   if (user.role === 'admin' && user.enabled && (role !== 'admin' || !enabled) && adminCount <= 1) {
     return res.status(400).json({ error: '系统至少需要一个启用的管理员' });
   }
-  if (password !== null) {
-    db.prepare(`UPDATE admin_users SET role=?,enabled=?,password_hash=?,session_version=session_version+1 WHERE id=?`)
-      .run(role, enabled, bcrypt.hashSync(password, 12), id);
-  } else {
-    db.prepare('UPDATE admin_users SET role=?,enabled=?,session_version=session_version+1 WHERE id=?')
-      .run(role, enabled, id);
-  }
+  db.prepare('UPDATE admin_users SET role=?,enabled=?,session_version=session_version+1 WHERE id=?')
+    .run(role, enabled, id);
   res.json({ ok: true });
 });
 
