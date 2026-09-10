@@ -26,7 +26,7 @@ directory="${APP_DIR}"
 [ -r /etc/mail-aggregator/config ] && . /etc/mail-aggregator/config
 if [ -n "$WEB_PORT" ]; then export PORT="$WEB_PORT"; fi
 export DOVECOT_USER DOVECOT_HOST DOVECOT_PORT WEB_LANGUAGE
-export MAIL_AGG_BIND_HOST MAIL_AGG_TRUST_PROXY MAIL_AGG_COOKIE_SECURE
+export MAIL_AGG_BIND_HOST MAIL_AGG_TRUST_PROXY MAIL_AGG_COOKIE_SECURE MAIL_AGG_REQUIRE_HTTPS
 export MAIL_AGG_SERVICE_MANAGER=openrc
 export MAIL_AGG_DATA_DIR="/var/lib/mail-aggregator"
 

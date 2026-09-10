@@ -5,8 +5,12 @@ const {
   CSP,
   parseTrustProxy,
   parseCookieSecure,
+  parseBoolean,
   isLoopbackAddress,
+  isLoopbackBindHost,
   resolveBindHost,
+  validateHttpSecurityConfig,
+  requireHttpsMiddleware,
   securityHeaders,
 } = require('../server/http-security');
 
@@ -43,11 +47,38 @@ test('secure cookie mode defaults to auto and supports explicit enforcement', ()
 });
 
 test('bind host accepts valid local addresses and falls back safely', () => {
-  assert.equal(resolveBindHost(undefined), '0.0.0.0');
+  assert.equal(resolveBindHost(undefined), '127.0.0.1');
   assert.equal(resolveBindHost(' 127.0.0.1 '), '127.0.0.1');
   assert.equal(resolveBindHost('::1'), '::1');
   assert.equal(resolveBindHost('localhost'), 'localhost');
-  assert.equal(resolveBindHost('https://example.com'), '0.0.0.0');
+  assert.equal(resolveBindHost('https://example.com'), '127.0.0.1');
+});
+
+test('HTTPS deployment settings reject spoofable or incomplete proxy configurations', () => {
+  assert.equal(parseBoolean('yes'), true);
+  assert.equal(parseBoolean('off'), false);
+  assert.equal(isLoopbackBindHost('localhost'), true);
+  assert.equal(isLoopbackBindHost('0.0.0.0'), false);
+  assert.deepEqual(validateHttpSecurityConfig({ bindHost: '127.0.0.1', trustProxy: 'loopback', cookieSecure: true, requireHttps: true }), []);
+  assert.equal(validateHttpSecurityConfig({ bindHost: '0.0.0.0', trustProxy: 1, cookieSecure: true, requireHttps: true }).length, 1);
+  assert.equal(validateHttpSecurityConfig({ bindHost: '127.0.0.1', trustProxy: false, cookieSecure: 'auto', requireHttps: true }).length, 2);
+});
+
+test('HTTPS middleware blocks plain requests without redirecting to an attacker-controlled host', () => {
+  let nextCalled = false;
+  const output = {};
+  const res = {
+    status(code) { output.status = code; return this; },
+    json(body) { output.body = body; return this; },
+    type(value) { output.type = value; return this; },
+    send(body) { output.body = body; return this; },
+  };
+  requireHttpsMiddleware(true)({ secure: false, path: '/api/auth/me' }, res, () => { nextCalled = true; });
+  assert.equal(nextCalled, false);
+  assert.equal(output.status, 426);
+  assert.match(output.body.error, /HTTPS/);
+  requireHttpsMiddleware(true)({ secure: true, path: '/' }, res, () => { nextCalled = true; });
+  assert.equal(nextCalled, true);
 });
 
 function invokeHeaders({ secure, path }) {

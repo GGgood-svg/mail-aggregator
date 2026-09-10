@@ -36,7 +36,7 @@ npm audit --omit=dev --audit-level=high
 在一次性 Alpine 测试机上执行，不能拿保存重要邮件的生产机做破坏性安装测试。
 
 ```sh
-./scripts/install.sh --quick
+./scripts/install.sh --quick --lan-http
 ./scripts/doctor.sh
 rc-service dovecot status
 rc-service mail-aggregator status

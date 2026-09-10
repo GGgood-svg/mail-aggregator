@@ -5,6 +5,7 @@
 ISSUES=0
 CONFIG_FILE="/etc/mail-aggregator/config"
 DOVECOT_USER="mailuser"; DOVECOT_HOST="127.0.0.1"; DOVECOT_PORT="143"; WEB_PORT="8080"; WEB_LANGUAGE="zh-CN"
+MAIL_AGG_BIND_HOST="127.0.0.1"; MAIL_AGG_TRUST_PROXY="false"; MAIL_AGG_COOKIE_SECURE="auto"; MAIL_AGG_REQUIRE_HTTPS="false"
 if [ -r "$CONFIG_FILE" ]; then . "$CONFIG_FILE"; fi
 
 pass() { echo "  ✅ $1"; }
@@ -128,6 +129,21 @@ pass "Dovecot 用户: $DOVECOT_USER"
 pass "Dovecot 地址: $DOVECOT_HOST:$DOVECOT_PORT"
 pass "Web 端口: $WEB_PORT"
 pass "语言: $WEB_LANGUAGE"
+case "$MAIL_AGG_BIND_HOST" in
+  localhost|127.*|::1)
+    if [ "$MAIL_AGG_REQUIRE_HTTPS" = "true" ]; then pass "Web 仅回环监听，并强制通过 HTTPS 反向代理访问"; else pass "Web 仅本机监听"; fi
+    ;;
+  *)
+    if [ "$MAIL_AGG_TRUST_PROXY" != "false" ]; then
+      fail "Web 对外监听时启用了可信代理，客户端可能伪造转发协议头；请改为回环监听"
+    else
+      info "Web 对外提供 HTTP，仅适合可信局域网；公网请改用 HTTPS 反向代理"
+    fi
+    ;;
+esac
+if [ "$MAIL_AGG_REQUIRE_HTTPS" = "true" ] && { [ "$MAIL_AGG_TRUST_PROXY" = "false" ] || [ "$MAIL_AGG_COOKIE_SECURE" != "true" ]; }; then
+  fail "强制 HTTPS 需要 MAIL_AGG_TRUST_PROXY 非 false 且 MAIL_AGG_COOKIE_SECURE=true"
+fi
 
 echo ""
 echo "=== Web root helper 可见性 ==="

@@ -23,9 +23,10 @@ DOVECOT_HOST="127.0.0.1"
 DOVECOT_PORT="143"
 WEB_PORT="8080"
 WEB_LANGUAGE="zh-CN"
-MAIL_AGG_BIND_HOST="0.0.0.0"
+MAIL_AGG_BIND_HOST="127.0.0.1"
 MAIL_AGG_TRUST_PROXY="false"
 MAIL_AGG_COOKIE_SECURE="auto"
+MAIL_AGG_REQUIRE_HTTPS="false"
 CONFIG_DIR="/etc/mail-aggregator"
 CONFIG_FILE="$CONFIG_DIR/config"
 HELPER_INSTALL_PATH="/usr/local/sbin/mail-aggregator-dovecot-helper"
@@ -42,7 +43,7 @@ FORCE_DOVECOT_INIT=0
 DEFAULT_DOVECOT_PASSWORD=""
 
 usage() {
-  echo "Usage: $0 [--quick|--custom|--full] [--dovecot-user USER] [--default-dovecot-password PASSWORD] [--dovecot-host HOST] [--dovecot-port PORT] [--web-port PORT] [--language LOCALE] [--show-config] [--cleanup-source --cleanup-archive FILE]"
+  echo "Usage: $0 [--quick|--custom|--full] [--lan-http|--https-proxy] [--dovecot-user USER] [--default-dovecot-password PASSWORD] [--dovecot-host HOST] [--dovecot-port PORT] [--web-port PORT] [--language LOCALE] [--show-config] [--cleanup-source --cleanup-archive FILE]"
 }
 valid_user() { echo "$1" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' && ! echo " root daemon bin nobody " | grep -q " $1 "; }
 valid_port() { case "$1" in ''|*[!0-9]*) return 1;; esac; [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null; }
@@ -53,6 +54,19 @@ generate_initial_password() {
   # POSIX/BusyBox-compatible: 16 random bytes rendered as 32 lowercase hex
   # characters. The result is printed once at the end of a fresh full install.
   od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n'
+}
+
+fail_step() {
+  STEP="$1"; REASON="$2"; HINT="$3"
+  echo "" >&2
+  echo "[ERROR] 安装在 ${STEP} 失败:" >&2
+  echo "  ${REASON}" >&2
+  if [ -n "$HINT" ]; then
+    echo "" >&2
+    echo "  ${HINT}" >&2
+  fi
+  echo "" >&2
+  exit 1
 }
 
 load_existing_config() {
@@ -75,6 +89,7 @@ WEB_LANGUAGE=$WEB_LANGUAGE
 MAIL_AGG_BIND_HOST=$MAIL_AGG_BIND_HOST
 MAIL_AGG_TRUST_PROXY=$MAIL_AGG_TRUST_PROXY
 MAIL_AGG_COOKIE_SECURE=$MAIL_AGG_COOKIE_SECURE
+MAIL_AGG_REQUIRE_HTTPS=$MAIL_AGG_REQUIRE_HTTPS
 EOF
   chmod 600 "$CONFIG_FILE"
 }
@@ -118,6 +133,14 @@ while [ $# -gt 0 ]; do
     --custom) CUSTOM=1; FULL=1; INSTALL_DOVECOT=1 ;;
     --install-dovecot) INSTALL_DOVECOT=1 ;;
     --full) FULL=1; INSTALL_DOVECOT=1 ;;
+    --lan-http)
+      MAIL_AGG_BIND_HOST="0.0.0.0"; MAIL_AGG_TRUST_PROXY="false"
+      MAIL_AGG_COOKIE_SECURE="auto"; MAIL_AGG_REQUIRE_HTTPS="false"
+      ;;
+    --https-proxy)
+      MAIL_AGG_BIND_HOST="127.0.0.1"; MAIL_AGG_TRUST_PROXY="loopback"
+      MAIL_AGG_COOKIE_SECURE="true"; MAIL_AGG_REQUIRE_HTTPS="true"
+      ;;
     --force-dovecot-init) FORCE_DOVECOT_INIT=1 ;;
     --default-dovecot-password)
       shift
@@ -144,6 +167,14 @@ if [ "$CUSTOM" = "1" ]; then
   printf 'Dovecot IMAP 端口 [%s]: ' "$DOVECOT_PORT"; read -r input; [ -n "$input" ] && DOVECOT_PORT="$input"
   printf 'Web 管理端口 [%s]: ' "$WEB_PORT"; read -r input; [ -n "$input" ] && WEB_PORT="$input"
   printf 'Web 语言 (zh-CN/en-US/ja-JP/ko-KR/es-ES/fr-FR/de-DE) [%s]: ' "$WEB_LANGUAGE"; read -r input; [ -n "$input" ] && WEB_LANGUAGE="$input"
+  case "$MAIL_AGG_REQUIRE_HTTPS:$MAIL_AGG_BIND_HOST" in true:*) exposure_default=proxy;; *:127.*|*:localhost|*:::1) exposure_default=local;; *) exposure_default=lan;; esac
+  printf 'Web 访问模式 local/lan/proxy [%s]: ' "$exposure_default"; read -r input; exposure="${input:-$exposure_default}"
+  case "$exposure" in
+    local) MAIL_AGG_BIND_HOST="127.0.0.1"; MAIL_AGG_TRUST_PROXY="false"; MAIL_AGG_COOKIE_SECURE="auto"; MAIL_AGG_REQUIRE_HTTPS="false" ;;
+    lan) MAIL_AGG_BIND_HOST="0.0.0.0"; MAIL_AGG_TRUST_PROXY="false"; MAIL_AGG_COOKIE_SECURE="auto"; MAIL_AGG_REQUIRE_HTTPS="false" ;;
+    proxy) MAIL_AGG_BIND_HOST="127.0.0.1"; MAIL_AGG_TRUST_PROXY="loopback"; MAIL_AGG_COOKIE_SECURE="true"; MAIL_AGG_REQUIRE_HTTPS="true" ;;
+    *) fail_step "参数校验" "未知 Web 访问模式: $exposure" "请选择 local、lan 或 proxy。" ;;
+  esac
   echo "Dovecot: $DOVECOT_USER @ $DOVECOT_HOST:$DOVECOT_PORT; Web: $WEB_PORT; Language: $WEB_LANGUAGE"
   printf '确认安装？ [Y/n]: '; read -r input; [ "$input" = "n" ] || [ "$input" = "N" ] && exit 0
 fi
@@ -152,25 +183,9 @@ valid_port "$DOVECOT_PORT" || fail_step "参数校验" "Dovecot 端口不合法:
 valid_port "$WEB_PORT" || fail_step "参数校验" "Web 端口不合法: $WEB_PORT" "端口必须在 1-65535。"
 valid_language "$WEB_LANGUAGE" || fail_step "参数校验" "语言不支持: $WEB_LANGUAGE" "支持 zh-CN、en-US、ja-JP、ko-KR、es-ES、fr-FR、de-DE。"
 if [ "$SHOW_CONFIG" = "1" ]; then
-  echo "Dovecot user: $DOVECOT_USER"; echo "Dovecot host: $DOVECOT_HOST"; echo "Dovecot port: $DOVECOT_PORT"; echo "Web port: $WEB_PORT"; echo "Language: $WEB_LANGUAGE"; exit 0
+  echo "Dovecot user: $DOVECOT_USER"; echo "Dovecot host: $DOVECOT_HOST"; echo "Dovecot port: $DOVECOT_PORT"; echo "Web port: $WEB_PORT"; echo "Web bind: $MAIL_AGG_BIND_HOST"; echo "Require HTTPS: $MAIL_AGG_REQUIRE_HTTPS"; echo "Language: $WEB_LANGUAGE"; exit 0
 fi
 detect_platform
-
-# 任何一步失败都要:打印明确原因、给出恢复建议、返回非0、并且绝不能
-# 继续走到最后打印"安装完成"。所有关键的、set -e本身报错信息不够
-# 说明问题的步骤,都显式调用这个函数。
-fail_step() {
-  STEP="$1"; REASON="$2"; HINT="$3"
-  echo "" >&2
-  echo "[ERROR] 安装在 ${STEP} 失败:" >&2
-  echo "  ${REASON}" >&2
-  if [ -n "$HINT" ]; then
-    echo "" >&2
-    echo "  ${HINT}" >&2
-  fi
-  echo "" >&2
-  exit 1
-}
 
 echo "==> 1/9 更新软件包索引"
 if [ "$PLATFORM_ID" = "alpine" ] && ! grep -q "^[^#].*community" /etc/apk/repositories; then
@@ -832,7 +847,14 @@ fi
 echo " Mail Aggregator 安装完成"
 echo ""
 echo " Dovecot: $DOVECOT_HOST:$DOVECOT_PORT"
-echo " Web: http://<这台机器的IP>:$WEB_PORT"
+case "$MAIL_AGG_REQUIRE_HTTPS:$MAIL_AGG_BIND_HOST" in
+  true:*) echo " Web: 请通过已配置 HTTPS 的反向代理访问" ;;
+  *:127.*|*:localhost|*:::1)
+    echo " Web: http://127.0.0.1:$WEB_PORT（仅本机）"
+    echo " 远程临时访问: ssh -L $WEB_PORT:127.0.0.1:$WEB_PORT root@<服务器IP>"
+    ;;
+  *) echo " Web: http://<这台机器的IP>:$WEB_PORT（仅限可信局域网）" ;;
+esac
 echo " Language: $WEB_LANGUAGE"
 echo ""
 if [ "$DOVECOT_FRESH_INIT_DONE" = "1" ]; then

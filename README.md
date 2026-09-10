@@ -75,7 +75,7 @@ rc-service dovecot status
 rc-service mail-aggregator status
 ```
 
-首次可通过 `http://服务器地址:8080` 完成管理员创建。该地址只适合可信内网或临时验收；公网部署必须使用 HTTPS 反向代理。
+新安装默认只监听本机，可先执行 `ssh -L 8080:127.0.0.1:8080 root@服务器地址`，再通过 `http://127.0.0.1:8080` 创建管理员。明确仅在可信局域网验收时可给安装命令增加 `--lan-http`，随后访问 `http://服务器地址:8080`；公网部署必须使用 HTTPS 反向代理。
 
 ## 多用户与权限
 
@@ -127,6 +127,13 @@ https://mail.example.com/api/oauth/callback/microsoft
 MAIL_AGG_BIND_HOST=127.0.0.1
 MAIL_AGG_TRUST_PROXY=loopback
 MAIL_AGG_COOKIE_SECURE=true
+MAIL_AGG_REQUIRE_HTTPS=true
+```
+
+新安装默认只监听 `127.0.0.1`。明确只在可信局域网使用时可运行 `./scripts/install.sh --full --lan-http`；已有 HTTPS 反向代理时使用 `./scripts/install.sh --full --https-proxy`。默认本机模式可通过 SSH 端口转发临时访问：
+
+```sh
+ssh -L 8080:127.0.0.1:8080 root@服务器IP
 ```
 
 反向代理应转发 `Host`、`X-Forwarded-Proto` 和客户端地址。修改配置后重启服务：

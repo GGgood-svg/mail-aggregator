@@ -36,3 +36,13 @@ test('full installer generates a unique password instead of shipping a shared de
   assert.match(script, /od -An -N16 -tx1 \/dev\/urandom/);
   assert.match(script, /\$\{#INITIAL_DOVECOT_PASSWORD\}[^\n]*-eq 32/);
 });
+
+test('fresh installs bind locally and require an explicit exposure mode', () => {
+  const script = fs.readFileSync(path.join(root, 'scripts', 'install.sh'), 'utf8');
+  assert.match(script, /MAIL_AGG_BIND_HOST="127\.0\.0\.1"/);
+  assert.match(script, /--lan-http/);
+  assert.match(script, /--https-proxy/);
+  assert.match(script, /MAIL_AGG_REQUIRE_HTTPS="true"/);
+  const openrc = fs.readFileSync(path.join(root, 'scripts', 'mail-aggregator.openrc'), 'utf8');
+  assert.match(openrc, /MAIL_AGG_REQUIRE_HTTPS/);
+});

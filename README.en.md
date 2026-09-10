@@ -63,7 +63,7 @@ rc-service dovecot status
 rc-service mail-aggregator status
 ```
 
-Open `http://server-address:8080` to create the first administrator. Plain HTTP is suitable only for temporary testing on a trusted LAN. Put the application behind an HTTPS reverse proxy before exposing it to the Internet.
+Fresh installations listen on loopback by default. Run `ssh -L 8080:127.0.0.1:8080 root@server-address`, then open `http://127.0.0.1:8080` to create the first administrator. Add `--lan-http` to the install command only for temporary testing on a trusted LAN. Put the application behind an HTTPS reverse proxy before exposing it to the Internet.
 
 ## Users and isolation
 
@@ -107,7 +107,10 @@ Bind the application to loopback and terminate TLS at Caddy, Nginx, or another r
 MAIL_AGG_BIND_HOST=127.0.0.1
 MAIL_AGG_TRUST_PROXY=loopback
 MAIL_AGG_COOKIE_SECURE=true
+MAIL_AGG_REQUIRE_HTTPS=true
 ```
+
+Use `./scripts/install.sh --full --https-proxy` when an HTTPS reverse proxy is already available. Use `--lan-http` only to opt into plain HTTP access from a trusted LAN; without either flag, new installs remain reachable only from the local machine or an SSH tunnel.
 
 Forward the original `Host`, `X-Forwarded-Proto`, and client address, then restart Mail Aggregator.
 

@@ -42,8 +42,11 @@ const {
 const {
   parseTrustProxy,
   parseCookieSecure,
+  parseBoolean,
   isLoopbackAddress,
   resolveBindHost,
+  validateHttpSecurityConfig,
+  requireHttpsMiddleware,
   securityHeaders,
 } = require('./http-security');
 
@@ -60,12 +63,22 @@ const PORT = resolvePort();
 const REQUESTED_BIND_HOST = String(process.env.MAIL_AGG_BIND_HOST || '').trim();
 const BIND_HOST = REQUESTED_BIND_HOST
   ? resolveBindHost(REQUESTED_BIND_HOST, '127.0.0.1')
-  : '0.0.0.0';
+  : '127.0.0.1';
 if (REQUESTED_BIND_HOST && BIND_HOST !== REQUESTED_BIND_HOST) {
   console.warn(`MAIL_AGG_BIND_HOST=${REQUESTED_BIND_HOST} 不合法，安全回退到 ${BIND_HOST}`);
 }
 const TRUST_PROXY = parseTrustProxy(process.env.MAIL_AGG_TRUST_PROXY);
 const COOKIE_SECURE = parseCookieSecure(process.env.MAIL_AGG_COOKIE_SECURE);
+const REQUIRE_HTTPS = parseBoolean(process.env.MAIL_AGG_REQUIRE_HTTPS, false);
+const HTTP_SECURITY_ERRORS = validateHttpSecurityConfig({
+  bindHost: BIND_HOST,
+  trustProxy: TRUST_PROXY,
+  cookieSecure: COOKIE_SECURE,
+  requireHttps: REQUIRE_HTTPS,
+});
+if (HTTP_SECURITY_ERRORS.length) {
+  throw new Error(`Web 安全配置无效：${HTTP_SECURITY_ERRORS.join('；')}`);
+}
 
 // session密钥持久化到数据目录,避免每次重启服务都把所有人踢下线
 function loadOrCreateSessionSecret() {
@@ -91,6 +104,7 @@ cleanupOldRestorePoints(DIRS.restorePoints);
 const app = express();
 if (TRUST_PROXY !== false) app.set('trust proxy', TRUST_PROXY);
 app.use(securityHeaders);
+app.use(requireHttpsMiddleware(REQUIRE_HTTPS));
 app.use(express.json());
 app.use(cookieParser());
 app.use(
