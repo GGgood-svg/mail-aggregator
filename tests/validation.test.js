@@ -138,6 +138,25 @@ test('provider presets fill connection defaults on the backend', () => {
   assert.deepEqual(gmail.errors, []);
   assert.equal(gmail.normalized.host, 'imap.gmail.com');
   assert.equal(gmail.normalized.auth_type, 'password');
+
+  const forged = validate({
+    name: 'Forged QQ', provider: 'qq', host: 'attacker.example', port: 143,
+    ssl: false, auth_type: 'oauth2', username: '12345@qq.com', secret: 'authorization-code',
+  });
+  assert.deepEqual(forged.errors, []);
+  assert.equal(forged.normalized.host, 'imap.qq.com');
+  assert.equal(forged.normalized.port, 993);
+  assert.equal(forged.normalized.ssl, 1);
+  assert.equal(forged.normalized.auth_type, 'password');
+});
+
+test('custom IMAP rejects plaintext and literal private or reserved destinations', () => {
+  const base = { name: 'Private', provider: 'custom', port: 993, ssl: true,
+    username: 'user@example.com', secret: 'secret' };
+  for (const host of ['127.0.0.1', '10.0.0.1', '169.254.169.254', '192.168.1.1', '::1', 'fc00::1']) {
+    assert.match(validate({ ...base, host }).errors.join('; '), /不能指向/);
+  }
+  assert.match(validate({ ...base, host: 'imap.example.com', ssl: false }).errors.join('; '), /必须使用SSL\/TLS/);
 });
 
 test('account validation rejects malformed ranges, types, enums, and secrets', () => {

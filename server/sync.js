@@ -12,9 +12,12 @@ const { parseSummary, categorizeTestError } = require('./sync-output');
 const { createProcessTerminator } = require('./process-terminator');
 const { applyDestinationStrategy } = require('./folder-strategy');
 const { applySourceAuthentication } = require('./imapsync-auth');
+const { applySourceTransport } = require('./source-transport');
 const { applySyncPolicy } = require('./sync-policy');
 const jobStore = require('./job-store');
 const maintenanceLock = require('./maintenance-lock');
+const { assertPublicImapHost, assertSecureAccountEndpoint } = require('./network-policy');
+const { getProvider } = require('./providers');
 
 // account_id -> true,表示该账号当前正在同步中(内存锁,和DB的status='running'保持一致,
 // 用于同一进程内的快速判断;真正防重复排队的兜底保证来自DB的部分唯一索引)
@@ -68,9 +71,7 @@ function buildArgs(account, { justFolders = false } = {}) {
 
   applySourceAuthentication(args, account);
 
-  if (account.ssl) {
-    args.push('--ssl1');
-  }
+  applySourceTransport(args, account);
 
   applyDestinationStrategy(args, account);
   applySyncPolicy(args, account, { justFolders });
@@ -126,7 +127,7 @@ function drainQueue() {
   }
 }
 
-function runJob(job) {
+async function runJob(job) {
   const account = getAccount(job.account_id);
   if (!account) {
     db.prepare(
@@ -138,7 +139,6 @@ function runJob(job) {
   runningLocks.set(account.id, true);
   db.prepare(`UPDATE sync_jobs SET status='running' WHERE id=?`).run(job.id);
 
-  const args = buildArgs(account, { justFolders: false });
   const logFile = path.join(DIRS.logs, `job-${job.id}.log`);
   const logStream = fs.createWriteStream(logFile, { flags: 'a' });
   const startedAt = Date.now();
@@ -171,6 +171,23 @@ function runJob(job) {
     console.error(`[sync] 任务 ${job.id} 日志写入失败: ${err.message}`);
   });
 
+  try {
+    assertSecureAccountEndpoint(account, getProvider(account.provider));
+    await assertPublicImapHost(account.host);
+  } catch (error) {
+    const message = `安全策略拒绝连接: ${error.message}`;
+    logStream.write(`${message}\n`);
+    completeOnce({
+      exitCode: -1,
+      durationMs: Date.now() - startedAt,
+      status: 'failed',
+      message,
+      logFile,
+    });
+    return;
+  }
+
+  const args = buildArgs(account, { justFolders: false });
   const child = spawn('imapsync', args, { env: { PATH: process.env.PATH } });
   terminator = createProcessTerminator({ child, jobId: job.id });
   const requestTermination = (status, message) => terminator.request(status, message);
@@ -391,25 +408,26 @@ function cancelAllQueued(ownerUserId = null) {
 }
 
 // ---- 连接测试:60秒后请求终止,错误分类,不做正式同步 ----
-function testConnection(accountId) {
+async function testConnection(accountId) {
+  if (maintenanceLock.current() === 'restore') {
+    return { ok: false, category: 'maintenance', message: '系统正在恢复，请稍后再测试连接' };
+  }
+  const account = getAccount(accountId);
+  if (!account) return { ok: false, category: 'not_found', message: '账号不存在' };
+  if (!accountHasCredential(account)) {
+    return {
+      ok: false,
+      category: 'auth_failed',
+      message: account.auth_type === 'oauth2' ? 'OAuth2账号尚未授权' : '账号密码/授权码尚未保存',
+    };
+  }
+  try {
+    assertSecureAccountEndpoint(account, getProvider(account.provider));
+    await assertPublicImapHost(account.host);
+  } catch (error) {
+    return { ok: false, category: 'blocked_host', message: `安全策略拒绝连接: ${error.message}` };
+  }
   return new Promise((resolve) => {
-    if (maintenanceLock.current() === 'restore') {
-      resolve({ ok: false, category: 'maintenance', message: '系统正在恢复，请稍后再测试连接' });
-      return;
-    }
-    const account = getAccount(accountId);
-    if (!account) {
-      resolve({ ok: false, category: 'not_found', message: '账号不存在' });
-      return;
-    }
-    if (!accountHasCredential(account)) {
-      resolve({
-        ok: false,
-        category: 'auth_failed',
-        message: account.auth_type === 'oauth2' ? 'OAuth2账号尚未授权' : '账号密码/授权码尚未保存',
-      });
-      return;
-    }
     const args = buildArgs(account, { justFolders: true });
     const testToken = Symbol(`connection-test-${account.id}`);
     connectionTests.add(testToken);

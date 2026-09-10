@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Block custom IMAP connections to loopback, private, link-local, metadata, documentation, multicast, and other reserved networks at validation and again after DNS resolution before every test or sync. Provider presets can no longer be redirected, remote plaintext IMAP is rejected, and imapsync must verify the source server's TLS certificate.
 - Remove administrator password resets for other Web users. After account creation, sign-in passwords can only be changed by the user after verifying the current password, preventing application administrators from silently taking over a tenant session.
 - Persist Maildir root ownership independently from sync-account records, so deleting an account while retaining its mail cannot expose that orphaned mailbox to the legacy administrator scope; restores now reject ownership conflicts and unknown generated tenant roots fail closed.
 - Harden full installations by setting the managed mailbox home and Maildir directories to `0700` and message files to `0600`, and report unsafe filesystem permissions in `doctor.sh`.

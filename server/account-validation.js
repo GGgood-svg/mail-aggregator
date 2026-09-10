@@ -12,6 +12,7 @@ const {
   isValidDestinationFolder,
 } = require('./folder-strategy');
 const { normalizeSyncPolicy } = require('./sync-policy');
+const { isBlockedAddress, isLocalHostname } = require('./network-policy');
 
 function validateAccountPayload(body, {
   requireSecret,
@@ -41,21 +42,28 @@ function validateAccountPayload(body, {
   if (!preset) {
     errors.push('未知的provider预设');
   } else if (provider !== 'custom') {
-    host = host || preset.host;
-    port = port === undefined || port === null || port === '' ? preset.port : port;
-    ssl = ssl === undefined ? preset.ssl : ssl;
-    authType = input.auth_type || preset.auth_type;
+    // 预设的连接端点属于安全边界，不能让手工API请求借用“Gmail/QQ”等
+    // provider 名称却把凭据发往攻击者指定的主机。
+    host = preset.host;
+    port = preset.port;
+    ssl = preset.ssl;
+    authType = preset.auth_type;
   }
 
   const rawHost = host;
   host = normalizeHost(host);
   if (typeof rawHost !== 'string' || !isValidHost(host)) errors.push('IMAP服务器地址格式不合法');
+  const literalFamily = require('node:net').isIP(host);
+  if (isLocalHostname(host) || (literalFamily && isBlockedAddress(host, literalFamily))) {
+    errors.push('IMAP服务器不能指向本机、局域网或保留地址');
+  }
 
   const normalizedPort = parseIntegerInRange(port === undefined ? 993 : port, 1, 65535);
   if (normalizedPort === null) errors.push('IMAP端口必须是1-65535之间的整数');
 
   if (ssl === undefined) ssl = true;
   if (typeof ssl !== 'boolean') errors.push('SSL设置必须是布尔值');
+  else if (ssl !== true) errors.push('远程IMAP必须使用SSL/TLS，不能发送明文密码');
 
   if (!['password', 'oauth2'].includes(authType)) {
     errors.push('认证方式无效');
