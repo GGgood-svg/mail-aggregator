@@ -8,6 +8,7 @@
 - Make mailbox access fail closed without an authenticated identity, create service logs as `0600`, and report unsafe service-log permissions in `doctor.sh`.
 - Deploy upgrades through a fully prepared staging tree so deleted release files cannot survive and a failed dependency install cannot damage the live application.
 - Make app-only upgrades install the exact lockfile dependency tree and restart the Web service; startup failures now stop the installer instead of ending with a false success message.
+- Preserve executable bits for command-line shell scripts and force OpenRC service files to LF endings so GitHub archives install correctly on Linux even when created from Windows.
 - Roll back account database rows, mailbox ownership, and credential files when account creation or editing fails partway through.
 - Enforce a private runtime umask and repair existing data/database/session/log permissions; quote installer IMAP login credentials correctly when passwords contain spaces or punctuation.
 - Fix privileged Dovecot helper paths so an unprivileged sudo caller cannot redirect password operations through environment variables.
