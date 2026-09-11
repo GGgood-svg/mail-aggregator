@@ -126,6 +126,24 @@ function deleteAccountSecrets(accountId) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+function snapshotAccountSecrets(accountId) {
+  const files = ['source.pass', 'target.pass', 'oauth-token.json', 'oauth-access.token'];
+  const dir = path.join(DIRS.secrets, String(accountId));
+  return files.map((name) => {
+    const filePath = path.join(dir, name);
+    return { name, content: fs.existsSync(filePath) ? fs.readFileSync(filePath) : null };
+  });
+}
+
+function restoreAccountSecrets(accountId, snapshot) {
+  const dir = path.join(DIRS.secrets, String(accountId));
+  fs.rmSync(dir, { recursive: true, force: true });
+  const existing = (snapshot || []).filter((entry) => entry.content !== null);
+  if (!existing.length) return;
+  fs.mkdirSync(dir, { recursive: true });
+  for (const entry of existing) writeSecret(path.join(dir, entry.name), entry.content);
+}
+
 module.exports = {
   writeSecret,
   sourcePassPath,
@@ -145,5 +163,7 @@ module.exports = {
   hasGlobalLocalSecret,
   readGlobalLocalSecret,
   deleteAccountSecrets,
+  snapshotAccountSecrets,
+  restoreAccountSecrets,
   LOCAL_SECRET_PATH,
 };

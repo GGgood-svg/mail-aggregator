@@ -8,7 +8,10 @@ const { hasGlobalLocalSecret, readGlobalLocalSecret } = require('./credentials')
 
 function commandExists(command) {
   return new Promise((resolve) => {
-    execFile('sh', ['-c', `command -v ${command}`], { timeout: 3000 }, (error) => resolve(!error));
+    // Keep the health check shell-free.  Today callers are fixed constants, but
+    // using argv also prevents a future caller from turning a probe into shell
+    // execution accidentally.
+    execFile('which', [command], { timeout: 3000 }, (error) => resolve(!error));
   });
 }
 

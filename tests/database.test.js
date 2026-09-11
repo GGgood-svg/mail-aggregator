@@ -83,6 +83,12 @@ integrationTest('database initialization enables WAL, foreign keys, and current 
         db.prepare("SELECT value FROM settings WHERE key='log_retention_days'").get().value,
         '90'
       );
+      assert.equal(
+        db.prepare("SELECT value FROM settings WHERE key='max_job_log_mb'").get().value,
+        '16'
+      );
+      assert.equal(db.prepare("SELECT value FROM settings WHERE key='max_accounts_per_user'").get().value, '20');
+      assert.equal(db.prepare("SELECT value FROM settings WHERE key='min_free_disk_mb'").get().value, '512');
       const tables = db
         .prepare("SELECT name FROM sqlite_master WHERE type='table'")
         .all()

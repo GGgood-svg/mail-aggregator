@@ -33,12 +33,12 @@ function isLocalHostname(host) {
   return normalized === 'localhost' || normalized.endsWith('.localhost') || normalized.endsWith('.local');
 }
 
-async function assertPublicImapHost(host, lookup = dns.lookup) {
+async function assertPublicHost(host, lookup = dns.lookup, label = '远程服务器') {
   const normalized = String(host || '').trim();
-  if (isLocalHostname(normalized)) throw new Error('IMAP服务器不能指向本机或局域网地址');
+  if (isLocalHostname(normalized)) throw new Error(`${label}不能指向本机或局域网地址`);
   const literalFamily = net.isIP(normalized);
   if (literalFamily) {
-    if (isBlockedAddress(normalized, literalFamily)) throw new Error('IMAP服务器不能指向本机、局域网或保留地址');
+    if (isBlockedAddress(normalized, literalFamily)) throw new Error(`${label}不能指向本机、局域网或保留地址`);
     return [{ address: normalized, family: literalFamily }];
   }
 
@@ -46,13 +46,32 @@ async function assertPublicImapHost(host, lookup = dns.lookup) {
   try {
     addresses = await lookup(normalized, { all: true, verbatim: true });
   } catch (_) {
-    throw new Error('无法解析 IMAP 服务器地址');
+    throw new Error(`无法解析${label}地址`);
   }
-  if (!Array.isArray(addresses) || !addresses.length) throw new Error('IMAP服务器没有可用地址');
+  if (!Array.isArray(addresses) || !addresses.length) throw new Error(`${label}没有可用地址`);
   if (addresses.some((item) => isBlockedAddress(item.address, item.family))) {
-    throw new Error('IMAP服务器解析到了本机、局域网或保留地址，已拒绝连接');
+    throw new Error(`${label}解析到了本机、局域网或保留地址，已拒绝连接`);
   }
   return addresses;
+}
+
+async function assertPublicImapHost(host, lookup = dns.lookup) {
+  return assertPublicHost(host, lookup, 'IMAP服务器');
+}
+
+// Supply this directly to https.request(). The request uses the exact address
+// returned here, so a second DNS lookup cannot swap a validated public result
+// for a private address between validation and connection.
+function createPublicLookup(lookup = dns.lookup, label = '远程服务器') {
+  return (hostname, options, callback) => {
+    assertPublicHost(hostname, lookup, label).then((addresses) => {
+      const requestedFamily = Number(options && options.family || 0);
+      const matching = requestedFamily ? addresses.filter((item) => Number(item.family) === requestedFamily) : addresses;
+      if (!matching.length) return callback(new Error(`${label}没有匹配的网络地址`));
+      if (options && options.all) return callback(null, matching);
+      return callback(null, matching[0].address, Number(matching[0].family));
+    }, callback);
+  };
 }
 
 function assertSecureAccountEndpoint(account, preset = null) {
@@ -68,4 +87,11 @@ function assertSecureAccountEndpoint(account, preset = null) {
   }
 }
 
-module.exports = { isBlockedAddress, isLocalHostname, assertPublicImapHost, assertSecureAccountEndpoint };
+module.exports = {
+  isBlockedAddress,
+  isLocalHostname,
+  assertPublicHost,
+  assertPublicImapHost,
+  createPublicLookup,
+  assertSecureAccountEndpoint,
+};

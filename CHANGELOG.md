@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Scope login throttling by normalized client address and username, enforce a real failure window, and reject reverse-proxy login traffic that omits the configured forwarded client address.
+- Bound imapsync output retained in memory and cap each task log (configurable, 16 MB by default) while preserving its beginning, diagnostic tail, and complete streamed counters.
+- Add configurable per-user account quotas and a fail-closed free-disk reserve that blocks new sync work and terminates running jobs if the server filesystem approaches exhaustion.
+- Make mailbox access fail closed without an authenticated identity, create service logs as `0600`, and report unsafe service-log permissions in `doctor.sh`.
+- Deploy upgrades through a fully prepared staging tree so deleted release files cannot survive and a failed dependency install cannot damage the live application.
+- Make app-only upgrades install the exact lockfile dependency tree and restart the Web service; startup failures now stop the installer instead of ending with a false success message.
+- Roll back account database rows, mailbox ownership, and credential files when account creation or editing fails partway through.
+- Enforce a private runtime umask and repair existing data/database/session/log permissions; quote installer IMAP login credentials correctly when passwords contain spaces or punctuation.
+- Fix privileged Dovecot helper paths so an unprivileged sudo caller cannot redirect password operations through environment variables.
+- Validate notification Webhook URLs and pin HTTPS connections to DNS answers that pass the public-address policy, preventing private-network and metadata-service requests.
+- Update Express within the supported major line and pin mailparser at the last Node.js 18-compatible build so Debian 12 installations are not silently upgraded to an incompatible runtime requirement.
+- Reject unsupported pre-18 Node.js installations before deployment instead of relying on an npm engine warning and producing a service that cannot start.
+- Use an equal-cost bcrypt check for unknown usernames to reduce login account-enumeration timing differences.
+- Make the security-reporting instructions accurate before the repository's private vulnerability reporting feature is enabled and before the first tagged release exists.
+- Separate operational administrators from the original primary administrator: only the primary administrator can export/restore all credentials, uninstall the service, create, promote, demote, modify, or delete administrator accounts.
 - Block custom IMAP connections to loopback, private, link-local, metadata, documentation, multicast, and other reserved networks at validation and again after DNS resolution before every test or sync. Provider presets can no longer be redirected, remote plaintext IMAP is rejected, and imapsync must verify the source server's TLS certificate.
 - Remove administrator password resets for other Web users. After account creation, sign-in passwords can only be changed by the user after verifying the current password, preventing application administrators from silently taking over a tenant session.
 - Persist Maildir root ownership independently from sync-account records, so deleting an account while retaining its mail cannot expose that orphaned mailbox to the legacy administrator scope; restores now reject ownership conflicts and unknown generated tenant roots fail closed.

@@ -8,7 +8,8 @@ const {
   hasOAuthTokens,
 } = require('./credentials');
 const { notifySyncFailure } = require('./notifications');
-const { parseSummary, categorizeTestError } = require('./sync-output');
+const { createOutputCollector, categorizeTestError } = require('./sync-output');
+const { createCappedLog } = require('./capped-log');
 const { createProcessTerminator } = require('./process-terminator');
 const { applyDestinationStrategy } = require('./folder-strategy');
 const { applySourceAuthentication } = require('./imapsync-auth');
@@ -18,6 +19,7 @@ const jobStore = require('./job-store');
 const maintenanceLock = require('./maintenance-lock');
 const { assertPublicImapHost, assertSecureAccountEndpoint } = require('./network-policy');
 const { getProvider } = require('./providers');
+const { diskCapacity } = require('./resource-limits');
 
 // account_id -> true,表示该账号当前正在同步中(内存锁,和DB的status='running'保持一致,
 // 用于同一进程内的快速判断;真正防重复排队的兜底保证来自DB的部分唯一索引)
@@ -93,6 +95,12 @@ function syncTimeoutMinutes() {
   return Number.isInteger(value) && value >= 5 && value <= 1440 ? value : 120;
 }
 
+function maxJobLogBytes() {
+  const value = parseInt(getSetting('max_job_log_mb', '16'), 10);
+  const megabytes = Number.isInteger(value) && value >= 1 && value <= 256 ? value : 16;
+  return megabytes * 1024 * 1024;
+}
+
 function currentRunningCount() {
   return runningLocks.size;
 }
@@ -111,6 +119,12 @@ function accountHasCredential(account) {
   return account.auth_type === 'oauth2'
     ? hasOAuthTokens(account.id)
     : hasSourceSecret(account.id);
+}
+
+function syncCapacityReason() {
+  const capacity = diskCapacity(db, DIRS.root);
+  if (capacity.ok) return null;
+  return capacity.availableMb === null ? 'disk_check_failed' : 'low_disk';
 }
 
 // ---- 排队/启动 ----
@@ -135,15 +149,28 @@ async function runJob(job) {
     ).run(job.id);
     return;
   }
+  const capacity = diskCapacity(db, DIRS.root);
+  if (!capacity.ok) {
+    const detail = capacity.availableMb === null
+      ? '无法检查服务器剩余磁盘空间'
+      : `服务器仅剩 ${capacity.availableMb} MB 可用空间（安全下限 ${capacity.minimumMb} MB）`;
+    db.prepare(`UPDATE sync_jobs SET status='failed',finished_at=datetime('now'),
+      exit_code=-1,duration_ms=0 WHERE id=?`).run(job.id);
+    db.prepare(`UPDATE accounts SET last_sync_at=datetime('now'),last_sync_status='failed',
+      last_sync_message=? WHERE id=?`).run(detail, account.id);
+    setImmediate(drainQueue);
+    return;
+  }
 
   runningLocks.set(account.id, true);
   db.prepare(`UPDATE sync_jobs SET status='running' WHERE id=?`).run(job.id);
 
   const logFile = path.join(DIRS.logs, `job-${job.id}.log`);
-  const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+  const logStream = createCappedLog(logFile, { maxBytes: maxJobLogBytes() });
   const startedAt = Date.now();
   let completed = false;
   let timeoutTimer = null;
+  let diskTimer = null;
   let terminator = null;
 
   // ChildProcess 在启动失败时可能先触发 error，随后仍触发 close。任务完成必须
@@ -153,6 +180,7 @@ async function runJob(job) {
     if (completed) return;
     completed = true;
     if (timeoutTimer) clearTimeout(timeoutTimer);
+    if (diskTimer) clearInterval(diskTimer);
     if (terminator) terminator.complete();
 
     const commit = () => finishJob(job.id, account.id, result);
@@ -213,14 +241,24 @@ async function runJob(job) {
   }, timeoutMinutes * 60 * 1000);
   timeoutTimer.unref();
 
-  let stdoutBuf = '';
-  let stderrBuf = '';
+  diskTimer = setInterval(() => {
+    const currentCapacity = diskCapacity(db, DIRS.root);
+    if (currentCapacity.ok) return;
+    const reason = currentCapacity.availableMb === null
+      ? '运行中无法确认剩余磁盘空间，正在安全终止同步'
+      : `可用磁盘空间降至 ${currentCapacity.availableMb} MB（安全下限 ${currentCapacity.minimumMb} MB），正在终止同步`;
+    logStream.write(`\n${reason}\n`);
+    requestTermination('failed', reason);
+  }, 5000);
+  diskTimer.unref();
+
+  const output = createOutputCollector();
   child.stdout.on('data', (chunk) => {
-    stdoutBuf += chunk.toString();
+    output.push(chunk, 'stdout');
     logStream.write(chunk);
   });
   child.stderr.on('data', (chunk) => {
-    stderrBuf += chunk.toString();
+    output.push(chunk, 'stderr');
     logStream.write(chunk);
   });
 
@@ -238,8 +276,7 @@ async function runJob(job) {
     // imapsync的统计摘要行不一定只出现在stdout里,不同版本/不同触发路径下
     // 可能会写到stderr,所以解析前把两路输出合并再喂给parseSummary,
     // 而不是只看stdout。原始日志文件本来就已经完整包含stdout+stderr,不受影响。
-    const combinedOutput = `${stdoutBuf}\n${stderrBuf}`;
-    const summary = parseSummary(combinedOutput);
+    const { summary } = output.finish();
     const termination = terminator.getTermination();
     const status = termination ? termination.status : code === 0 ? 'success' : 'failed';
     const message =
@@ -335,6 +372,8 @@ function triggerSync(accountId) {
   const account = getAccount(accountId);
   if (!account) return { ok: false, reason: 'not_found' };
   if (!accountHasCredential(account)) return { ok: false, reason: 'missing_credentials' };
+  const capacityReason = syncCapacityReason();
+  if (capacityReason) return { ok: false, reason: capacityReason };
 
   const result = jobStore.enqueueJob(db, accountId);
   if (result.ok) {
@@ -380,6 +419,8 @@ function retryJob(jobId, ownerUserId = null) {
   if (!account || !accountHasCredential(account)) {
     return { ok: false, reason: 'missing_credentials' };
   }
+  const capacityReason = syncCapacityReason();
+  if (capacityReason) return { ok: false, reason: capacityReason };
   const result = jobStore.retryJob(db, jobId);
   if (result.ok) {
     drainQueue();
@@ -431,8 +472,7 @@ async function testConnection(accountId) {
     const args = buildArgs(account, { justFolders: true });
     const testToken = Symbol(`connection-test-${account.id}`);
     connectionTests.add(testToken);
-    let stdoutBuf = '';
-    let stderrBuf = '';
+    const output = createOutputCollector();
     let completed = false;
     const child = spawn('imapsync', args, { env: { PATH: process.env.PATH } });
     const terminator = createProcessTerminator({ child, jobId: `test-${accountId}` });
@@ -451,8 +491,8 @@ async function testConnection(accountId) {
     }, 60000);
     timeout.unref();
 
-    child.stdout.on('data', (c) => (stdoutBuf += c.toString()));
-    child.stderr.on('data', (c) => (stderrBuf += c.toString()));
+    child.stdout.on('data', (c) => output.push(c, 'stdout'));
+    child.stderr.on('data', (c) => output.push(c, 'stderr'));
 
     child.on('error', (err) => {
       completeOnce({
@@ -463,8 +503,7 @@ async function testConnection(accountId) {
     });
 
     child.on('close', (code) => {
-      const combinedOutput = `${stdoutBuf}\n${stderrBuf}`;
-      const summary = parseSummary(combinedOutput);
+      const { summary, tail } = output.finish();
       const termination = terminator.getTermination();
       const timedOut = termination && termination.status === 'timed_out';
       if (code === 0 && !timedOut) {
@@ -475,7 +514,7 @@ async function testConnection(accountId) {
           messages: summary.host1Messages,
         });
       } else {
-        const { category, message } = categorizeTestError(combinedOutput, timedOut);
+        const { category, message } = categorizeTestError(tail, timedOut);
         completeOnce({ ok: false, category, message });
       }
     });
@@ -538,6 +577,7 @@ module.exports = {
   currentConnectionTestCount,
   maxConcurrent,
   syncTimeoutMinutes,
+  maxJobLogBytes,
   reconcileAfterRestart,
   shutdownGracefully,
 };

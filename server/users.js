@@ -6,11 +6,19 @@ const router = express.Router();
 const USERNAME_RE = /^[\p{L}\p{N}_.@-]{2,64}$/u;
 
 router.get('/', (req, res) => {
-  const users = db.prepare(`SELECT u.id,u.username,u.role,u.enabled,u.created_at,
+  const users = db.prepare(`SELECT u.id,u.username,u.role,u.enabled,u.mail_access_all,u.created_at,
     COUNT(a.id) AS account_count FROM admin_users u
     LEFT JOIN accounts a ON a.owner_user_id=u.id
     GROUP BY u.id ORDER BY u.id`).all();
-  res.json(users.map((u) => ({ ...u, enabled: !!u.enabled })));
+  res.json(users.map((u) => ({
+    id: u.id,
+    username: u.username,
+    role: u.role,
+    enabled: !!u.enabled,
+    created_at: u.created_at,
+    account_count: u.account_count,
+    primaryAdmin: Boolean(u.role === 'admin' && u.mail_access_all),
+  })));
 });
 
 router.post('/', (req, res) => {
@@ -19,6 +27,9 @@ router.post('/', (req, res) => {
   const role = req.body?.role === 'admin' ? 'admin' : 'user';
   if (!USERNAME_RE.test(username)) return res.status(400).json({ error: '用户名需为2-64位字母、数字、中文或 _ . @ -' });
   if (password.length < 10 || password.length > 256) return res.status(400).json({ error: '密码需为10-256位' });
+  if (role === 'admin' && !req.user.mail_access_all) {
+    return res.status(403).json({ error: '仅主管理员可以创建其他管理员' });
+  }
   try {
     const info = db.prepare('INSERT INTO admin_users(username,password_hash,role) VALUES(?,?,?)')
       .run(username, bcrypt.hashSync(password, 12), role);
@@ -33,8 +44,14 @@ router.put('/:id', (req, res) => {
   const id = Number(req.params.id);
   const user = db.prepare('SELECT * FROM admin_users WHERE id=?').get(id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
+  if (user.mail_access_all && id !== Number(req.user.id)) {
+    return res.status(403).json({ error: '不能修改主管理员账号' });
+  }
   const role = req.body?.role === undefined ? user.role : (req.body.role === 'admin' ? 'admin' : 'user');
   const enabled = req.body?.enabled === undefined ? user.enabled : (req.body.enabled ? 1 : 0);
+  if (!req.user.mail_access_all && (user.role === 'admin' || role === 'admin')) {
+    return res.status(403).json({ error: '仅主管理员可以授予、取消或管理管理员权限' });
+  }
   if (id === Number(req.user.id) && (!enabled || role !== 'admin')) {
     return res.status(400).json({ error: '不能停用自己或取消自己的管理员权限' });
   }
@@ -55,6 +72,10 @@ router.delete('/:id', (req, res) => {
   if (id === Number(req.user.id)) return res.status(400).json({ error: '不能删除当前登录用户' });
   const user = db.prepare('SELECT * FROM admin_users WHERE id=?').get(id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
+  if (user.mail_access_all) return res.status(403).json({ error: '不能删除主管理员账号' });
+  if (user.role === 'admin' && !req.user.mail_access_all) {
+    return res.status(403).json({ error: '仅主管理员可以删除其他管理员' });
+  }
   const count = db.prepare('SELECT COUNT(*) c FROM accounts WHERE owner_user_id=?').get(id).c;
   if (count) return res.status(409).json({ error: '该用户仍有邮箱账号，请先删除或迁移这些账号' });
   db.prepare('DELETE FROM admin_users WHERE id=?').run(id);

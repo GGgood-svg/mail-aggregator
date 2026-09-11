@@ -162,6 +162,32 @@ for HELPER in /usr/local/sbin/mail-aggregator-dovecot-helper /usr/local/sbin/mai
 done
 
 echo ""
+echo "=== 服务日志权限 ==="
+for LOG_FILE in /var/log/mail-aggregator.log /var/log/mail-aggregator.err.log; do
+  if [ ! -e "$LOG_FILE" ]; then
+    info "$LOG_FILE 尚未创建"
+  elif [ "$(stat -c '%a' "$LOG_FILE" 2>/dev/null)" = "600" ]; then
+    pass "$LOG_FILE 权限为 600"
+  else
+    fail "$LOG_FILE 应仅允许服务用户读取（修复: chmod 600 '$LOG_FILE'）"
+  fi
+done
+
+echo ""
+echo "=== 应用数据目录权限 ==="
+for DATA_PATH in /var/lib/mail-aggregator /var/lib/mail-aggregator/db /var/lib/mail-aggregator/secrets /var/lib/mail-aggregator/logs; do
+  if [ ! -d "$DATA_PATH" ]; then
+    info "$DATA_PATH 尚未创建"
+    continue
+  fi
+  DATA_MODE="$(stat -c '%a' "$DATA_PATH" 2>/dev/null)"
+  case "$DATA_MODE" in
+    700|1700|2700|3700|4700|5700|6700|7700) pass "$DATA_PATH 未向同机其他用户开放" ;;
+    *) fail "$DATA_PATH 权限过宽（当前 $DATA_MODE，应为 700）" ;;
+  esac
+done
+
+echo ""
 echo "============================================================"
 if [ "$ISSUES" -eq 0 ]; then
   echo "系统可以运行 Mail Aggregator"

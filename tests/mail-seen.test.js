@@ -13,7 +13,10 @@ test('bulk seen covers every page, validates scope before writes and reports par
     async search(query, options) { assert.equal(query.seen, false); assert.equal(options.uid, true); return Array.from({length: 550}, (_, i) => i + 1); },
     async messageFlagsAdd(uids, flags, options) { writes.push({ folder: opened, uids }); assert.deepEqual(flags, ['\\Seen']); assert.equal(options.uid, true); return true; },
   };
-  const app = express(); app.use(express.json()); app.use(createMailRouter({ createClient: () => client }));
+  const app = express(); app.use(express.json()); app.use(createMailRouter({
+    createClient: () => client,
+    mailAccessForRequest: () => ({ all: true, roots: [] }),
+  }));
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -45,7 +48,10 @@ test('seen writes persist, preserve other flags, reject invalid input and report
   };
   const app = express();
   app.use(express.json());
-  app.use(createMailRouter({ createClient: () => client }));
+  app.use(createMailRouter({
+    createClient: () => client,
+    mailAccessForRequest: () => ({ all: true, roots: [] }),
+  }));
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));

@@ -2,11 +2,13 @@
 
 ## Supported version
 
-Security fixes are applied to the latest release in this repository.
+Until the first tagged release, security fixes are applied to the latest commit on the default branch. After releases begin, only the newest release line will receive security fixes unless stated otherwise.
 
 ## Reporting a vulnerability
 
-Please use GitHub's private vulnerability reporting feature for this repository. Do not open a public issue containing mailbox credentials, OAuth tokens, backup archives, session cookies, server addresses, or exploit details that would put an active installation at risk.
+If the repository Security page offers **Report a vulnerability**, use that private form. If private reporting is unavailable, open a minimal public issue asking the maintainer to provide a private contact channel, but include no exploit details or sensitive environment information in that issue.
+
+Do not put mailbox credentials, OAuth tokens, backup archives, session cookies, real server addresses, unsanitized logs, or working exploit details in a public issue.
 
 Include the affected version, deployment platform, reproduction steps, impact, and any relevant sanitized logs. You should receive an acknowledgement through GitHub; please allow time for a fix before public disclosure.
 

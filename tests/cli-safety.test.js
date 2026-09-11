@@ -53,3 +53,35 @@ test('installer exposes an explicit app-only mode and rejects conflicting full m
   assert.match(script, /APP_ONLY[^\n]*FULL[^\n]*INSTALL_DOVECOT/);
   assert.match(script, /--app-only 不能与/);
 });
+
+test('installer stages a complete app tree and service logs are owner-only', () => {
+  const script = fs.readFileSync(path.join(root, 'scripts', 'install.sh'), 'utf8');
+  assert.match(script, /APP_STAGE="\$\{APP_DIR\}\.deploy"/);
+  assert.match(script, /! -d "\$APP_DIR"[^\n]*-d "\$APP_PREVIOUS"/);
+  assert.match(script, /npm install --omit=dev --no-audit --no-fund/);
+  assert.ok(script.indexOf('npm install --omit=dev') < script.indexOf('mv "$APP_STAGE" "$APP_DIR"'));
+  const openrc = fs.readFileSync(path.join(root, 'scripts', 'mail-aggregator.openrc'), 'utf8');
+  assert.match(openrc, /checkpath -f -m 0600/);
+  assert.match(script, /chmod 700 "\$DATA_DIR"/);
+});
+
+test('app-only deployment installs locked dependencies and must restart the service', () => {
+  const source = fs.readFileSync(path.join(root, 'scripts', 'install.sh'), 'utf8');
+  assert.match(source, /npm ci --omit=dev --no-audit --no-fund/);
+  assert.match(source, /service_restart mail-aggregator \\\n\s*\|\| fail_step "9\/9"/);
+  assert.doesNotMatch(source, /if \[ "\$FULL" = "1" \]; then\s*\n\s*if service_status mail-aggregator/);
+});
+
+test('installer rejects a Node.js runtime older than the package engine', () => {
+  const script = fs.readFileSync(path.join(root, 'scripts', 'install.sh'), 'utf8');
+  assert.match(script, /process\.versions\.node\.split/);
+  assert.match(script, /NODE_MAJOR[^\n]*-ge 18/);
+  assert.match(script, /Node\.js 18\/20\/22/);
+});
+
+test('privileged Dovecot helper uses fixed root-owned target paths', () => {
+  const source = fs.readFileSync(path.join(root, 'scripts', 'dovecot-helper.sh'), 'utf8');
+  assert.match(source, /USERS_FILE="\/etc\/dovecot\/users"/);
+  assert.match(source, /PERMS_LIB="\/usr\/local\/sbin\/mail-aggregator-dovecot-perms\.sh"/);
+  assert.doesNotMatch(source, /MAIL_AGG_DOVECOT_(?:USERS_FILE|BACKUP_FILE|PERMS_LIB)/);
+});

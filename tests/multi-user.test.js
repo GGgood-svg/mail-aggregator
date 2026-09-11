@@ -59,6 +59,8 @@ integrationTest('account access always includes the authenticated owner', () => 
     const { ownedAccount } = require('../server/access-control');
     assert.equal(ownedAccount({ user: { id: first } }, account).name, 'private');
     assert.equal(ownedAccount({ user: { id: second } }, account), undefined);
+    assert.deepEqual(Object.keys(ownedAccount({ user: { id: first } }, account, 'id')), ['id']);
+    assert.equal(ownedAccount({ user: { id: first } }, account, 'id, password_hash').name, 'private');
   });
 });
 
@@ -118,5 +120,86 @@ integrationTest('administrator cannot reset another user password', () => {
     assert.equal(unchanged.password_hash, 'original-hash');
     assert.equal(unchanged.role, 'user');
     assert.equal(unchanged.enabled, 1);
+  });
+});
+
+integrationTest('operational administrators cannot modify the primary administrator', () => {
+  withDatabase((db) => {
+    const primaryId = db.prepare(`INSERT INTO admin_users(username,password_hash,role,mail_access_all)
+      VALUES('primary-admin','x','admin',1)`).run().lastInsertRowid;
+    const operatorId = db.prepare(`INSERT INTO admin_users(username,password_hash,role)
+      VALUES('operator-admin','x','admin')`).run().lastInsertRowid;
+    const router = require('../server/users');
+    const update = router.stack.find((item) => item.route?.path === '/:id' && item.route.methods.put);
+    const response = {
+      statusCode: 200,
+      body: null,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; return this; },
+    };
+    update.route.stack[0].handle({
+      params: { id: String(primaryId) },
+      body: { enabled: false },
+      user: { id: Number(operatorId), role: 'admin', mail_access_all: 0 },
+    }, response);
+    assert.equal(response.statusCode, 403);
+    assert.equal(db.prepare('SELECT enabled FROM admin_users WHERE id=?').get(primaryId).enabled, 1);
+  });
+});
+
+integrationTest('only the primary administrator can create another administrator', () => {
+  withDatabase((db) => {
+    const operatorId = db.prepare(`INSERT INTO admin_users(username,password_hash,role)
+      VALUES('operator-create-test','x','admin')`).run().lastInsertRowid;
+    const router = require('../server/users');
+    const create = router.stack.find((item) => item.route?.path === '/' && item.route.methods.post);
+    const response = {
+      statusCode: 200,
+      body: null,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; return this; },
+    };
+    create.route.stack[0].handle({
+      body: { username: 'new-admin', password: 'long-enough-password', role: 'admin' },
+      user: { id: Number(operatorId), role: 'admin', mail_access_all: 0 },
+    }, response);
+    assert.equal(response.statusCode, 403);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM admin_users WHERE username='new-admin'").get().count, 0);
+  });
+});
+
+integrationTest('operational administrators cannot promote users or manage peer administrators', () => {
+  withDatabase((db) => {
+    const operatorId = db.prepare(`INSERT INTO admin_users(username,password_hash,role)
+      VALUES('operator-boundary','x','admin')`).run().lastInsertRowid;
+    const peerId = db.prepare(`INSERT INTO admin_users(username,password_hash,role)
+      VALUES('peer-admin','x','admin')`).run().lastInsertRowid;
+    const memberId = db.prepare(`INSERT INTO admin_users(username,password_hash,role)
+      VALUES('promotion-target','x','user')`).run().lastInsertRowid;
+    const router = require('../server/users');
+    const update = router.stack.find((item) => item.route?.path === '/:id' && item.route.methods.put);
+    const remove = router.stack.find((item) => item.route?.path === '/:id' && item.route.methods.delete);
+    const response = () => ({
+      statusCode: 200,
+      body: null,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; return this; },
+    });
+    const actor = { id: Number(operatorId), role: 'admin', mail_access_all: 0 };
+
+    const promotion = response();
+    update.route.stack[0].handle({ params: { id: String(memberId) }, body: { role: 'admin' }, user: actor }, promotion);
+    assert.equal(promotion.statusCode, 403);
+    assert.equal(db.prepare('SELECT role FROM admin_users WHERE id=?').get(memberId).role, 'user');
+
+    const peerUpdate = response();
+    update.route.stack[0].handle({ params: { id: String(peerId) }, body: { enabled: false }, user: actor }, peerUpdate);
+    assert.equal(peerUpdate.statusCode, 403);
+    assert.equal(db.prepare('SELECT enabled FROM admin_users WHERE id=?').get(peerId).enabled, 1);
+
+    const peerDelete = response();
+    remove.route.stack[0].handle({ params: { id: String(peerId) }, user: actor }, peerDelete);
+    assert.equal(peerDelete.statusCode, 403);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM admin_users WHERE id=?').get(peerId).count, 1);
   });
 });

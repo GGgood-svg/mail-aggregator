@@ -5,7 +5,8 @@ function ownerId(req) {
 }
 
 function ownedAccount(req, accountId, fields = '*') {
-  return db.prepare(`SELECT ${fields} FROM accounts WHERE id=? AND owner_user_id=?`)
+  const projection = fields === 'id' ? 'id' : '*';
+  return db.prepare(`SELECT ${projection} FROM accounts WHERE id=? AND owner_user_id=?`)
     .get(accountId, ownerId(req));
 }
 

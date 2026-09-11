@@ -32,6 +32,78 @@ function parseSummary(output) {
   };
 }
 
+// imapsync can be very verbose. Keep only a bounded diagnostic tail while
+// extracting counters incrementally, so a long-running job cannot retain its
+// complete stdout/stderr in the Node.js heap.
+function createOutputCollector({ tailChars = 1024 * 1024, maxFolders = 100000 } = {}) {
+  const pending = { stdout: '', stderr: '' };
+  const explicit = Object.create(null);
+  const folders = { 1: new Map(), 2: new Map() };
+  let tail = '';
+
+  const keepTail = (text) => {
+    tail += text;
+    if (tail.length > tailChars) tail = tail.slice(-tailChars);
+  };
+
+  const consumeLine = (line) => {
+    const counters = [
+      ['host1Messages', /Host1\s+Nb\s+messages\s*:\s*(\d+)/i],
+      ['host2Messages', /Host2\s+Nb\s+messages\s*:\s*(\d+)/i],
+      ['host1Folders', /Host1\s+Nb\s+folders\s*:\s*(\d+)/i],
+      ['host2Folders', /Host2\s+Nb\s+folders\s*:\s*(\d+)/i],
+      ['messagesTransferred', /Messages\s+transferred\s*:\s*(\d+)/i],
+      ['messagesSkipped', /Messages\s+skipped\s*:\s*(\d+)/i],
+      ['errors', /Detected\s+(\d+)\s+errors?/i],
+    ];
+    for (const [name, pattern] of counters) {
+      const match = line.match(pattern);
+      if (match) explicit[name] = parseInt(match[1], 10);
+    }
+    const folder = line.match(/Host([12]):\s+folder\s+\[(.*)\]\s+has\s+(\d+)\s+messages\s+in\s+total/i);
+    if (folder && (folders[folder[1]].has(folder[2]) || folders[folder[1]].size < maxFolders)) {
+      folders[folder[1]].set(folder[2], parseInt(folder[3], 10));
+    }
+  };
+
+  const push = (chunk, channel = 'stdout') => {
+    const key = channel === 'stderr' ? 'stderr' : 'stdout';
+    const text = String(chunk || '');
+    keepTail(text);
+    const combined = pending[key] + text;
+    const lines = combined.split(/\r?\n/);
+    pending[key] = lines.pop().slice(-16384);
+    for (const line of lines) consumeLine(line.slice(0, 65536));
+  };
+
+  const finish = () => {
+    consumeLine(pending.stdout);
+    consumeLine(pending.stderr);
+    const fallback = (host) => folders[host].size
+      ? {
+          messages: [...folders[host].values()].reduce((sum, value) => sum + value, 0),
+          folders: folders[host].size,
+        }
+      : null;
+    const host1 = fallback(1);
+    const host2 = fallback(2);
+    return {
+      tail,
+      summary: {
+        host1Messages: explicit.host1Messages ?? host1?.messages ?? null,
+        host2Messages: explicit.host2Messages ?? host2?.messages ?? null,
+        host1Folders: explicit.host1Folders ?? host1?.folders ?? null,
+        host2Folders: explicit.host2Folders ?? host2?.folders ?? null,
+        messagesTransferred: explicit.messagesTransferred ?? null,
+        messagesSkipped: explicit.messagesSkipped ?? null,
+        errors: explicit.errors ?? null,
+      },
+    };
+  };
+
+  return { push, finish };
+}
+
 function categorizeTestError(combinedOutput, timedOut) {
   if (timedOut) {
     return { category: 'timeout', message: '连接超时(60秒内未完成)' };
@@ -52,4 +124,4 @@ function categorizeTestError(combinedOutput, timedOut) {
   return { category: 'unknown', message: '连接失败,请查看详细日志' };
 }
 
-module.exports = { parseSummary, categorizeTestError };
+module.exports = { parseSummary, createOutputCollector, categorizeTestError };

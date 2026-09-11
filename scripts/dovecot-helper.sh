@@ -16,8 +16,10 @@
 
 set -e
 
-USERS_FILE="${MAIL_AGG_DOVECOT_USERS_FILE:-/etc/dovecot/users}"
-BACKUP_FILE="${MAIL_AGG_DOVECOT_BACKUP_FILE:-/etc/dovecot/users.mail-aggregator-backup}"
+# These paths are part of the root privilege boundary.  Do not allow the
+# unprivileged caller to redirect a sudo-launched helper toward arbitrary files.
+USERS_FILE="/etc/dovecot/users"
+BACKUP_FILE="/etc/dovecot/users.mail-aggregator-backup"
 
 # fix_users_permissions() 的唯一定义在这份文件里(install.sh --full 部署时
 # 会把它和这个 helper 一起复制到 /usr/local/sbin),set-password/
@@ -26,7 +28,7 @@ BACKUP_FILE="${MAIL_AGG_DOVECOT_BACKUP_FILE:-/etc/dovecot/users.mail-aggregator-
 # 的权限逻辑(无条件 root:root 600),把 install.sh 装机时设好的
 # root:<Dovecot内部组> 640 又改了回去,导致Web改密码之后 Dovecot 认证读不到
 # 这个文件。
-PERMS_LIB="${MAIL_AGG_DOVECOT_PERMS_LIB:-/usr/local/sbin/mail-aggregator-dovecot-perms.sh}"
+PERMS_LIB="/usr/local/sbin/mail-aggregator-dovecot-perms.sh"
 if [ ! -f "$PERMS_LIB" ]; then
   echo "ERROR: 找不到 $PERMS_LIB(fix_users_permissions 的定义),helper 和 install.sh 版本可能不匹配,请重新运行 ./scripts/install.sh --full 来修复" >&2
   exit 1

@@ -7,6 +7,7 @@ const { sendJobLog } = require('./log-reader');
 const { getProvider, loadProviders } = require('./providers');
 const { validateAccountPayload } = require('./account-validation');
 const { registerMailboxOwnership } = require('./mailbox-ownership');
+const { accountLimit } = require('./resource-limits');
 const {
   saveSourceSecret,
   deleteSourceSecret,
@@ -15,6 +16,8 @@ const {
   hasOAuthTokens,
   deleteOAuthTokens,
   deleteAccountSecrets,
+  snapshotAccountSecrets,
+  restoreAccountSecrets,
 } = require('./credentials');
 const {
   triggerSync,
@@ -108,6 +111,18 @@ function destinationFolderInUse(account, accountOwnerId, excludeId = null) {
   return !!db.prepare(sql).get(...params);
 }
 
+function restoreAccountConfiguration(account) {
+  db.prepare(`UPDATE accounts SET
+      name=@name, provider=@provider, host=@host, port=@port, ssl=@ssl,
+      username=@username, auth_type=@auth_type, enabled=@enabled,
+      sync_interval=@sync_interval, local_user=@local_user, sync_mode=@sync_mode,
+      destination_mode=@destination_mode, destination_folder=@destination_folder,
+      mailbox_folder=@mailbox_folder, folder_includes=@folder_includes,
+      folder_excludes=@folder_excludes, max_age_days=@max_age_days,
+      max_size_mb=@max_size_mb, deletion_mode=@deletion_mode, updated_at=@updated_at
+    WHERE id=@id`).run(account);
+}
+
 router.post('/', (req, res) => {
   const { errors, normalized } = validatePayload(req.body || {}, { requireSecret: true });
   // 多用户共享同一个本地Dovecot时，flat会把不同用户的邮件混进公共根目录。
@@ -121,6 +136,10 @@ router.post('/', (req, res) => {
   if (errors.length) return res.status(400).json({ error: errors.join('; ') });
   if (destinationFolderInUse(normalized, ownerId(req))) {
     return res.status(409).json({ error: '你已有账号使用同名隔离文件夹，请换一个名称' });
+  }
+  const quota = accountLimit(db, ownerId(req));
+  if (quota.count >= quota.maximum) {
+    return res.status(409).json({ error: `每位用户最多可添加 ${quota.maximum} 个邮箱账号` });
   }
 
   const createAccount = db.transaction(() => {
@@ -145,10 +164,25 @@ router.post('/', (req, res) => {
     });
     return accountId;
   });
-  const accountId = createAccount();
-  if (normalized.auth_type === 'password') saveSourceSecret(accountId, req.body.secret);
-  if (req.body.local_secret) {
-    saveTargetSecret(accountId, req.body.local_secret);
+  let accountId = null;
+  try {
+    accountId = createAccount();
+    if (normalized.auth_type === 'password') saveSourceSecret(accountId, req.body.secret);
+    if (req.body.local_secret) saveTargetSecret(accountId, req.body.local_secret);
+  } catch (error) {
+    if (accountId !== null) {
+      try { deleteAccountSecrets(accountId); } catch (_) {}
+      try {
+        db.transaction(() => {
+          db.prepare('DELETE FROM mailbox_ownership WHERE former_account_id=?').run(accountId);
+          db.prepare('DELETE FROM accounts WHERE id=?').run(accountId);
+        })();
+      } catch (rollbackError) {
+        console.error(`[accounts] 创建账号回滚失败: ${rollbackError.message}`);
+      }
+    }
+    console.error(`[accounts] 创建账号失败: ${error.message}`);
+    return res.status(500).json({ error: '保存账号或凭据失败，未创建账号，请检查磁盘和目录权限' });
   }
 
   res.status(201).json(
@@ -200,49 +234,70 @@ router.put('/:id', (req, res) => {
     return res.status(409).json({ error: '账号正在同步或排队中，结束任务后才能修改高级同步规则' });
   }
 
-  db.prepare(
-    `UPDATE accounts SET
-      name=@name, provider=@provider, host=@host, port=@port, ssl=@ssl,
-      username=@username, auth_type=@auth_type, enabled=@enabled,
-      sync_interval=@sync_interval, local_user=@local_user, sync_mode=@sync_mode,
-      destination_mode=@destination_mode, destination_folder=@destination_folder,
-      folder_includes=@folder_includes, folder_excludes=@folder_excludes,
-      max_age_days=@max_age_days, max_size_mb=@max_size_mb, deletion_mode=@deletion_mode,
-      updated_at = datetime('now')
-     WHERE id=@id`
-  ).run({ ...normalized, id: req.params.id });
-  if (normalized.destination_mode === 'subfolder' && !existing.mailbox_folder) {
-    const mailboxFolder = `U${ownerId(req)}-A${existing.id}`;
-    const assignMailbox = db.transaction(() => {
-      db.prepare('UPDATE accounts SET mailbox_folder=? WHERE id=?')
-        .run(mailboxFolder, existing.id);
-      registerMailboxOwnership(db, {
-        localUser: normalized.local_user,
-        mailboxFolder,
-        ownerUserId: ownerId(req),
-        accountId: existing.id,
+  let credentialSnapshot;
+  try {
+    credentialSnapshot = snapshotAccountSecrets(existing.id);
+  } catch (error) {
+    console.error(`[accounts] 无法读取账号 ${existing.id} 的凭据快照: ${error.message}`);
+    return res.status(500).json({ error: '无法安全准备账号更新，请检查凭据目录权限' });
+  }
+  let ownershipCreated = false;
+
+  try {
+    db.prepare(
+      `UPDATE accounts SET
+        name=@name, provider=@provider, host=@host, port=@port, ssl=@ssl,
+        username=@username, auth_type=@auth_type, enabled=@enabled,
+        sync_interval=@sync_interval, local_user=@local_user, sync_mode=@sync_mode,
+        destination_mode=@destination_mode, destination_folder=@destination_folder,
+        folder_includes=@folder_includes, folder_excludes=@folder_excludes,
+        max_age_days=@max_age_days, max_size_mb=@max_size_mb, deletion_mode=@deletion_mode,
+        updated_at = datetime('now')
+       WHERE id=@id`
+    ).run({ ...normalized, id: req.params.id });
+    if (normalized.destination_mode === 'subfolder' && !existing.mailbox_folder) {
+      const mailboxFolder = `U${ownerId(req)}-A${existing.id}`;
+      const assignMailbox = db.transaction(() => {
+        db.prepare('UPDATE accounts SET mailbox_folder=? WHERE id=?')
+          .run(mailboxFolder, existing.id);
+        registerMailboxOwnership(db, {
+          localUser: normalized.local_user,
+          mailboxFolder,
+          ownerUserId: ownerId(req),
+          accountId: existing.id,
+        });
       });
-    });
-    assignMailbox();
-  }
+      assignMailbox();
+      ownershipCreated = true;
+    }
 
-  if (destinationChanged) {
-    // --useuid缓存与目标文件夹映射相关；切换落盘策略后必须重新建立映射。
-    // 这里只删除可重建的cache，不碰已经同步到Maildir中的邮件。
-    fs.rmSync(path.join(DIRS.cache, String(existing.id)), { recursive: true, force: true });
-  }
+    if (destinationChanged) {
+      // --useuid缓存与目标文件夹映射相关；切换落盘策略后必须重新建立映射。
+      // 这里只删除可重建的cache，不碰已经同步到Maildir中的邮件。
+      fs.rmSync(path.join(DIRS.cache, String(existing.id)), { recursive: true, force: true });
+    }
 
-  if (normalized.auth_type === 'password' && req.body.secret) {
-    saveSourceSecret(req.params.id, req.body.secret);
-  }
-  if (normalized.auth_type === 'oauth2') {
-    deleteSourceSecret(req.params.id);
-    if (oauthIdentityChanged) deleteOAuthTokens(req.params.id);
-  } else {
-    deleteOAuthTokens(req.params.id);
-  }
-  if (req.body.local_secret) {
-    saveTargetSecret(req.params.id, req.body.local_secret);
+    if (normalized.auth_type === 'password' && req.body.secret) saveSourceSecret(req.params.id, req.body.secret);
+    if (normalized.auth_type === 'oauth2') {
+      deleteSourceSecret(req.params.id);
+      if (oauthIdentityChanged) deleteOAuthTokens(req.params.id);
+    } else {
+      deleteOAuthTokens(req.params.id);
+    }
+    if (req.body.local_secret) saveTargetSecret(req.params.id, req.body.local_secret);
+  } catch (error) {
+    try {
+      db.transaction(() => {
+        if (ownershipCreated) db.prepare('DELETE FROM mailbox_ownership WHERE former_account_id=?').run(existing.id);
+        restoreAccountConfiguration(existing);
+      })();
+      restoreAccountSecrets(existing.id, credentialSnapshot);
+    } catch (rollbackError) {
+      console.error(`[accounts] 更新账号 ${existing.id} 回滚失败: ${rollbackError.message}`);
+      return res.status(500).json({ error: '账号更新失败且自动回滚未完整完成，请立即检查系统日志' });
+    }
+    console.error(`[accounts] 更新账号 ${existing.id} 失败并已回滚: ${error.message}`);
+    return res.status(500).json({ error: '保存账号或凭据失败，原配置已恢复' });
   }
 
   res.json(
@@ -293,6 +348,12 @@ router.post('/:id/sync', (req, res) => {
   }
   if (!result.ok && result.reason === 'maintenance') {
     return res.status(409).json({ error: '系统正在恢复，请稍后再启动同步' });
+  }
+  if (!result.ok && result.reason === 'low_disk') {
+    return res.status(507).json({ error: '服务器可用磁盘空间不足，已停止启动新同步任务' });
+  }
+  if (!result.ok && result.reason === 'disk_check_failed') {
+    return res.status(503).json({ error: '无法确认服务器剩余磁盘空间，已安全停止启动同步' });
   }
   res.json(result);
 });

@@ -36,7 +36,8 @@ depend() {
 }
 
 start_pre() {
-    checkpath -f -o "${APP_USER}:${APP_USER}" "${output_log}" "${error_log}"
+    umask 077
+    checkpath -f -m 0600 -o "${APP_USER}:${APP_USER}" "${output_log}" "${error_log}"
 }
 
 # openrc-run 默认 stop 动作会向主进程发 SIGTERM,

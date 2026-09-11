@@ -35,12 +35,16 @@
 <script>
 async function loadUsers() {
   const users = await Api.get('/api/users');
-  document.getElementById('user-list').innerHTML = users.map((u) => `<tr>
+  document.getElementById('user-list').innerHTML = users.map((u) => {
+    const protectedAdmin = u.role === 'admin' && !currentUser.primaryAdmin;
+    const self = u.id === currentUser.id;
+    return `<tr>
     <td>${escapeHtml(u.username)}${u.id === currentUser.id ? '（当前）' : ''}</td>
-    <td><select data-role="${u.id}" ${u.id === currentUser.id ? 'disabled' : ''}><option value="user" ${u.role === 'user' ? 'selected' : ''}>普通用户</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>管理员</option></select></td>
-    <td>${u.account_count}</td><td><select data-enabled="${u.id}" ${u.id === currentUser.id ? 'disabled' : ''}><option value="1" ${u.enabled ? 'selected' : ''}>启用</option><option value="0" ${!u.enabled ? 'selected' : ''}>停用</option></select></td>
-    <td><button class="btn secondary" onclick="saveUser(${u.id})" ${u.id === currentUser.id ? 'disabled' : ''}>保存</button> <button class="btn danger" onclick="deleteUser(${u.id})" ${u.id === currentUser.id ? 'disabled' : ''}>删除</button></td>
-  </tr>`).join('');
+    <td><select data-role="${u.id}" ${self || !currentUser.primaryAdmin ? 'disabled' : ''}><option value="user" ${u.role === 'user' ? 'selected' : ''}>普通用户</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>管理员</option></select></td>
+    <td>${u.account_count}</td><td><select data-enabled="${u.id}" ${self || protectedAdmin ? 'disabled' : ''}><option value="1" ${u.enabled ? 'selected' : ''}>启用</option><option value="0" ${!u.enabled ? 'selected' : ''}>停用</option></select></td>
+    <td><button class="btn secondary" onclick="saveUser(${u.id})" ${self || protectedAdmin ? 'disabled' : ''}>保存</button> <button class="btn danger" onclick="deleteUser(${u.id})" ${self || protectedAdmin ? 'disabled' : ''}>删除</button></td>
+  </tr>`;
+  }).join('');
 }
 async function saveUser(id) {
   const role = document.querySelector(`[data-role="${id}"]`).value;
@@ -59,6 +63,13 @@ document.getElementById('create-btn').onclick = async () => {
     document.getElementById('new-username').value = ''; document.getElementById('new-password').value = ''; message.textContent = '创建成功'; await loadUsers();
   } catch (e) { message.textContent = e.message; }
 };
-(async () => { applyBranding(); const me = await requireLogin(); if (!me || me.role !== 'admin') { location.href='/index.html'; return; } renderNav('users'); await loadUsers(); })();
+(async () => {
+  applyBranding();
+  const me = await requireLogin();
+  if (!me || me.role !== 'admin') { location.href='/index.html'; return; }
+  if (!me.primaryAdmin) document.querySelector('#new-role option[value="admin"]').disabled = true;
+  renderNav('users');
+  await loadUsers();
+})();
 </script>
 </body></html>

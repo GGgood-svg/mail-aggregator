@@ -71,6 +71,20 @@
         <div class="hint">默认 90 天；服务启动时及之后每 24 小时自动清理已结束任务和对应日志，不会清理排队或运行中的任务</div>
       </div>
       <div class="form-group">
+        <label>单个同步日志上限（MB）</label>
+        <input type="number" id="max_job_log_mb" min="1" max="256">
+        <div class="hint">默认 16 MB；超出后保留日志开头和最后 1 MB，避免异常账号耗尽磁盘</div>
+      </div>
+      <div class="form-group">
+        <label>每位用户最多邮箱账号数</label>
+        <input type="number" id="max_accounts_per_user" min="1" max="1000">
+      </div>
+      <div class="form-group">
+        <label>磁盘安全余量（MB）</label>
+        <input type="number" id="min_free_disk_mb" min="64" max="1048576">
+        <div class="hint">默认 512 MB；低于此值时不再启动新同步，避免系统盘被写满</div>
+      </div>
+      <div class="form-group">
         <label>默认同步间隔(新建账号时的初始值)</label>
         <select id="default_sync_interval">
           <option value="300">每 5 分钟</option>
@@ -272,6 +286,9 @@ async function load() {
     document.getElementById('max_concurrent_syncs').value = s.max_concurrent_syncs || 1;
     document.getElementById('sync_timeout_minutes').value = s.sync_timeout_minutes || 120;
     document.getElementById('log_retention_days').value = s.log_retention_days || 90;
+    document.getElementById('max_job_log_mb').value = s.max_job_log_mb || 16;
+    document.getElementById('max_accounts_per_user').value = s.max_accounts_per_user || 20;
+    document.getElementById('min_free_disk_mb').value = s.min_free_disk_mb || 512;
     document.getElementById('default_sync_interval').value = s.default_sync_interval || 600;
     document.getElementById('web_port').value = s.web_port || 8080;
     document.getElementById('web_language').value = s.web_language || 'zh-CN';
@@ -406,6 +423,9 @@ document.getElementById('save-btn').addEventListener('click', async () => {
       max_concurrent_syncs: document.getElementById('max_concurrent_syncs').value,
       sync_timeout_minutes: document.getElementById('sync_timeout_minutes').value,
       log_retention_days: document.getElementById('log_retention_days').value,
+      max_job_log_mb: document.getElementById('max_job_log_mb').value,
+      max_accounts_per_user: document.getElementById('max_accounts_per_user').value,
+      min_free_disk_mb: document.getElementById('min_free_disk_mb').value,
       default_sync_interval: document.getElementById('default_sync_interval').value,
       web_port: document.getElementById('web_port').value,
       web_language: document.getElementById('web_language').value,

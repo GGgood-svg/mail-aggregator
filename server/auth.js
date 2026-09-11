@@ -2,46 +2,19 @@ const express = require('express');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { db } = require('./db');
+const { LoginRateLimiter, normalizedClientIp } = require('./login-rate-limit');
 
 const router = express.Router();
 
-const MAX_FAILS = 5;
-const LOCK_MS = 5 * 60 * 1000; // 5分钟
 const USERNAME_RE = /^[\p{L}\p{N}_.@-]{2,64}$/u;
+// Run the same bcrypt cost for an unknown username so response timing does not
+// become a reliable account-enumeration signal.
+const DUMMY_PASSWORD_HASH = '$2a$12$gZSyu4KDMYsuziMP/Fyqu.o3b82jWsYs7hZjMD3f8O1KXckvzqjji';
+const loginLimiter = new LoginRateLimiter(db);
 
 function hasAdmin() {
   const row = db.prepare('SELECT COUNT(*) c FROM admin_users').get();
   return row.c > 0;
-}
-
-function clientIp(req) {
-  // 只信任直接连接的socket地址,不信任X-Forwarded-For(避免被伪造绕过限速),
-  // 如果部署在反向代理后面,请在反代层面做好真实IP透传并自行调整这里
-  return req.socket.remoteAddress || 'unknown';
-}
-
-function getAttempt(ip) {
-  return db.prepare('SELECT * FROM login_attempts WHERE ip = ?').get(ip);
-}
-
-function isLocked(ip) {
-  const row = getAttempt(ip);
-  if (!row || !row.locked_until) return false;
-  return row.locked_until > Date.now();
-}
-
-function registerFailure(ip) {
-  const row = getAttempt(ip);
-  const failCount = (row ? row.fail_count : 0) + 1;
-  const lockedUntil = failCount >= MAX_FAILS ? Date.now() + LOCK_MS : row ? row.locked_until : null;
-  db.prepare(
-    `INSERT INTO login_attempts (ip, fail_count, locked_until) VALUES (?, ?, ?)
-     ON CONFLICT(ip) DO UPDATE SET fail_count=excluded.fail_count, locked_until=excluded.locked_until`
-  ).run(ip, failCount, lockedUntil);
-}
-
-function clearFailures(ip) {
-  db.prepare('DELETE FROM login_attempts WHERE ip = ?').run(ip);
 }
 
 function issueSession(req, user, callback) {
@@ -82,27 +55,33 @@ router.get('/setup-status', (req, res) => {
 });
 
 router.post('/login', (req, res) => {
-  const ip = clientIp(req);
+  const username = String(req.body?.username || '').normalize('NFKC').trim();
+  const ip = normalizedClientIp(req);
+  if (!ip) {
+    return res.status(503).json({ error: 'HTTPS反向代理未传递客户端地址，请配置 X-Forwarded-For' });
+  }
 
-  if (isLocked(ip)) {
-    const row = getAttempt(ip);
-    const remainingSec = Math.ceil((row.locked_until - Date.now()) / 1000);
+  const lockedUntil = loginLimiter.check(ip, username);
+  if (lockedUntil) {
+    const remainingSec = Math.ceil((lockedUntil - Date.now()) / 1000);
     return res.status(429).json({
       error: `登录失败次数过多,请在 ${remainingSec} 秒后重试`,
     });
   }
 
-  const username = String(req.body?.username || '').normalize('NFKC').trim();
   const password = String(req.body?.password || '');
   const user = db.prepare('SELECT * FROM admin_users WHERE username = ? AND enabled = 1').get(username);
-  const ok = password.length <= 256 && user && bcrypt.compareSync(password, user.password_hash);
+  const passwordMatches = password.length <= 256
+    ? bcrypt.compareSync(password, user ? user.password_hash : DUMMY_PASSWORD_HASH)
+    : false;
+  const ok = Boolean(user && passwordMatches);
 
   if (!ok) {
-    registerFailure(ip);
+    loginLimiter.failure(ip, username);
     return res.status(401).json({ error: '用户名或密码错误' });
   }
 
-  clearFailures(ip);
+  loginLimiter.success(ip, username);
   issueSession(req, user, (error, csrfToken) => {
     if (error) return res.status(500).json({ error: '创建登录会话失败，请重试' });
     res.json({ ok: true, csrfToken });
@@ -141,6 +120,7 @@ router.get('/me', (req, res) => {
       id: user.id,
       username: user.username,
       role: user.role,
+      primaryAdmin: Boolean(user.role === 'admin' && user.mail_access_all),
       csrfToken: req.session.csrfToken,
       secureTransport: Boolean(req.secure),
     });
@@ -179,6 +159,11 @@ function requireAdmin(req, res, next) {
   res.status(403).json({ error: '仅管理员可以执行此操作' });
 }
 
+function requirePrimaryAdmin(req, res, next) {
+  if (req.user && req.user.role === 'admin' && req.user.mail_access_all) return next();
+  res.status(403).json({ error: '仅主管理员可以执行此操作' });
+}
+
 // CSRF校验:所有状态变更请求(POST/PUT/DELETE/PATCH)必须带上和session里
 // 一致的 X-CSRF-Token,仅依赖SameSite Cookie是不够的(旧浏览器/特殊场景下
 // SameSite不一定生效,这里做双重保险)。GET/HEAD/OPTIONS不需要校验。
@@ -199,4 +184,14 @@ function verifyAdminPassword(username, password) {
   return !!user && bcrypt.compareSync(String(password || ''), user.password_hash);
 }
 
-module.exports = { router, requireAuth, requireAdmin, requireCsrf, hasAdmin, verifyAdminPassword, issueSession, sessionUser };
+module.exports = {
+  router,
+  requireAuth,
+  requireAdmin,
+  requirePrimaryAdmin,
+  requireCsrf,
+  hasAdmin,
+  verifyAdminPassword,
+  issueSession,
+  sessionUser,
+};

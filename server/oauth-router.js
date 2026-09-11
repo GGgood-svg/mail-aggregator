@@ -31,13 +31,13 @@ function callbackUri(baseUrl, oauthProvider) {
 }
 
 router.get('/config', (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: '仅管理员可以查看OAuth2系统配置' });
+  if (req.user.role !== 'admin' || !req.user.mail_access_all) return res.status(403).json({ error: '仅主管理员可以查看OAuth2系统配置' });
   try { res.json(publicOAuthConfig()); }
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 router.put('/config', (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: '仅管理员可以修改OAuth2系统配置' });
+  if (req.user.role !== 'admin' || !req.user.mail_access_all) return res.status(403).json({ error: '仅主管理员可以修改OAuth2系统配置' });
   try { res.json({ ok: true, ...saveOAuthConfig(req.body || {}) }); }
   catch (error) { res.status(400).json({ error: error.message }); }
 });

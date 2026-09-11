@@ -177,7 +177,7 @@ function renderNav(active) {
     { href: '/profile.html', label: '个人安全', key: 'profile' },
     ...(currentUser && currentUser.role === 'admin' ? [
       { href: '/users.html', label: '用户管理', key: 'users' },
-      { href: '/settings.html', label: '设置', key: 'settings' },
+      ...(currentUser.primaryAdmin ? [{ href: '/settings.html', label: '设置', key: 'settings' }] : []),
       { href: '/system-info.html', label: '系统信息', key: 'system-info' },
     ] : []),
   ];

@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseSummary, categorizeTestError } = require('../server/sync-output');
+const { parseSummary, createOutputCollector, categorizeTestError } = require('../server/sync-output');
 
 test('parseSummary extracts all supported imapsync counters, including zero', () => {
   const output = `
@@ -57,6 +57,20 @@ Detected 0 errors
     messagesSkipped: 4872,
     errors: 0,
   });
+});
+
+test('streaming collector keeps bounded diagnostics and counters split across chunks', () => {
+  const collector = createOutputCollector({ tailChars: 64 });
+  collector.push(`Host1: folder [INBOX] has 10 messages in total\n${'noise'.repeat(40)}\nMess`, 'stdout');
+  collector.push('ages transferred : 3\n', 'stdout');
+  collector.push('Detected 0 er', 'stderr');
+  collector.push('rors\n', 'stderr');
+  const result = collector.finish();
+  assert.equal(result.summary.host1Messages, 10);
+  assert.equal(result.summary.host1Folders, 1);
+  assert.equal(result.summary.messagesTransferred, 3);
+  assert.equal(result.summary.errors, 0);
+  assert.ok(result.tail.length <= 64);
 });
 
 test('categorizeTestError gives timeout precedence over process output', () => {

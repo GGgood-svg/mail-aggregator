@@ -2,6 +2,11 @@ const path = require('path');
 const fs = require('fs');
 const Database = require('better-sqlite3');
 
+// The database, WAL files, cached provider state, logs, and credentials all
+// contain private mailbox metadata. Keep newly created runtime files private
+// even when the service manager inherits a permissive system umask.
+process.umask(0o077);
+
 const ROOT_DIR = process.env.MAIL_AGG_DATA_DIR || path.join(__dirname, '..', 'data');
 
 // v0.1.1: 按spec建议的目录结构拆分,而不是把所有东西堆在同一层
@@ -17,11 +22,13 @@ const DIRS = {
 
 for (const dir of Object.values(DIRS)) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.chmodSync(dir, 0o700);
 }
 
 const DB_PATH = path.join(DIRS.db, 'mail-aggregator.db');
 
 const db = new Database(DB_PATH);
+fs.chmodSync(DB_PATH, 0o600);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
@@ -118,7 +125,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS login_attempts (
   ip TEXT PRIMARY KEY,
   fail_count INTEGER NOT NULL DEFAULT 0,
-  locked_until INTEGER
+  locked_until INTEGER,
+  window_started INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS notification_events (
@@ -166,6 +174,7 @@ addColumnIfMissing('admin_users', 'enabled', 'enabled INTEGER NOT NULL DEFAULT 1
 addColumnIfMissing('admin_users', 'session_version', 'session_version INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('admin_users', 'mail_access_all', 'mail_access_all INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('accounts', 'owner_user_id', 'owner_user_id INTEGER REFERENCES admin_users(id) ON DELETE RESTRICT');
+addColumnIfMissing('login_attempts', 'window_started', 'window_started INTEGER');
 
 // 一个未发布的开发版本曾给 mailbox_ownership 加过 ON DELETE CASCADE。若该版本
 // 已在测试机启动过，立刻重建表移除外键，防止删除Web用户时连归属墓碑一起丢失。
@@ -277,6 +286,9 @@ const defaultSettings = {
   max_concurrent_syncs: '1',
   sync_timeout_minutes: '120',
   log_retention_days: '90',
+  max_job_log_mb: '16',
+  max_accounts_per_user: '20',
+  min_free_disk_mb: '512',
   // v0.1.4: these are the sole persisted source for all local Dovecot clients.
   dovecot_user: 'mailuser',
   dovecot_host: '127.0.0.1',

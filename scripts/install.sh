@@ -213,7 +213,18 @@ check_and_report() {
   fi
 }
 
-NODE_OK=0; check_and_report node "Node.js" && NODE_OK=1
+NODE_OK=0
+if command -v node >/dev/null 2>&1; then
+  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  if [ "$NODE_MAJOR" -ge 18 ] 2>/dev/null; then
+    echo "  Node.js: ✅ $(node --version)"
+    NODE_OK=1
+  else
+    echo "  Node.js: ❌ $(node --version 2>/dev/null || echo unknown)（需要 18+）"
+  fi
+else
+  echo "  Node.js: ❌"
+fi
 NPM_OK=0; check_and_report npm "npm" && NPM_OK=1
 SQLITE_OK=0; check_and_report sqlite3 "SQLite" && SQLITE_OK=1
 IMAPSYNC_OK=0
@@ -249,6 +260,9 @@ if [ -n "$TO_INSTALL" ]; then
 else
   echo "  Node.js/npm/SQLite/imapsync 都已就绪,跳过"
 fi
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+[ "$NODE_MAJOR" -ge 18 ] 2>/dev/null \
+  || fail_step "3/9" "Node.js 版本低于 18" "请先通过发行版 backports 或 NodeSource 安装 Node.js 18/20/22，再重新运行安装器。"
 
 echo ""
 echo "==> 4/9 Dovecot 软件包"
@@ -489,11 +503,22 @@ if ! id "$APP_USER" >/dev/null 2>&1; then
   fi
 fi
 
-mkdir -p "$APP_DIR"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP_STAGE="${APP_DIR}.deploy"
+APP_PREVIOUS="${APP_DIR}.previous"
+# Recover the last complete tree if the machine lost power between the two
+# rename operations of a previous deployment. If a live tree exists, the old
+# backup is stale and can be removed safely.
+if [ ! -d "$APP_DIR" ] && [ -d "$APP_PREVIOUS" ]; then
+  mv "$APP_PREVIOUS" "$APP_DIR"
+elif [ -d "$APP_DIR" ]; then
+  rm -rf "$APP_PREVIOUS"
+fi
+rm -rf "$APP_STAGE"
+mkdir -p "$APP_STAGE"
 cp -r "$PROJECT_ROOT"/server "$PROJECT_ROOT"/web "$PROJECT_ROOT"/config \
-      "$PROJECT_ROOT"/package.json "$APP_DIR"/
-[ -f "$PROJECT_ROOT/package-lock.json" ] && cp "$PROJECT_ROOT/package-lock.json" "$APP_DIR"/
+      "$PROJECT_ROOT"/package.json "$APP_STAGE"/
+[ -f "$PROJECT_ROOT/package-lock.json" ] && cp "$PROJECT_ROOT/package-lock.json" "$APP_STAGE"/
 
 # fix_users_permissions() 只在这一份文件里定义,install.sh 和 dovecot-helper.sh
 # 都只调用它、不各自维护一份权限逻辑——v0.1.3.2 就是因为两边各写了一份、后写
@@ -508,7 +533,8 @@ if [ "$FULL" = "1" ] && [ -d "/home/$DOVECOT_USER/Maildir" ]; then
 fi
 
 mkdir -p "$DATA_DIR"
-chown -R "$APP_USER":"$APP_USER" "$APP_DIR" "$DATA_DIR"
+chown -R "$APP_USER":"$APP_USER" "$APP_STAGE" "$DATA_DIR"
+chmod 700 "$DATA_DIR"
 # Preserve v0.1.3 installations: if no v0.1.4 config exists but Dovecot was
 # already managed, the Node database remains the source until an explicit
 # migration/custom reconfiguration is performed. Fresh initializations get the
@@ -517,8 +543,24 @@ if [ -f "$CONFIG_FILE" ] || { [ "$FULL" = "1" ] && [ "$NEED_DOVECOT_INIT" = "1" 
   write_config
 fi
 
+cd "$APP_STAGE"
+if [ -f package-lock.json ]; then
+  su -s /bin/sh "$APP_USER" -c "npm ci --omit=dev --no-audit --no-fund"
+else
+  su -s /bin/sh "$APP_USER" -c "npm install --omit=dev --no-audit --no-fund"
+fi
+
+# Build the complete deployment away from the live path, then replace the old
+# tree as one unit. This prevents removed files from older releases surviving a
+# reinstall and keeps a failed copy/npm install from damaging the running app.
+if [ -d "$APP_DIR" ]; then mv "$APP_DIR" "$APP_PREVIOUS"; fi
+if mv "$APP_STAGE" "$APP_DIR"; then
+  rm -rf "$APP_PREVIOUS"
+else
+  [ ! -d "$APP_DIR" ] && [ -d "$APP_PREVIOUS" ] && mv "$APP_PREVIOUS" "$APP_DIR"
+  fail_step "6/9" "无法切换到新部署目录" "旧程序目录已尽量自动恢复，请检查 /opt 所在文件系统。"
+fi
 cd "$APP_DIR"
-su -s /bin/sh "$APP_USER" -c "npm install --omit=dev --no-audit --no-fund"
 
 # --full 的密码哈希生成放到这里(而不是第5步),是因为它现在调用的是
 # server/cli-dovecot-hash.js —— 这个脚本和Web修改密码用的是完全同一份
@@ -720,12 +762,12 @@ fi
 echo ""
 echo "==> 9/9 启动服务 + 自动验证"
 
-if [ "$FULL" = "1" ]; then
-  if service_status mail-aggregator >/dev/null 2>&1; then
-    service_restart mail-aggregator || echo "  ⚠️ mail-aggregator 重启失败"
-  else
-    service_start mail-aggregator || echo "  ⚠️ mail-aggregator 启动失败"
-  fi
+if service_status mail-aggregator >/dev/null 2>&1; then
+  service_restart mail-aggregator \
+    || fail_step "9/9" "mail-aggregator 重启失败" "查看服务日志，修复后重新运行安装器。"
+else
+  service_start mail-aggregator \
+    || fail_step "9/9" "mail-aggregator 启动失败" "查看服务日志，修复后重新运行安装器。"
 fi
 
 echo ""

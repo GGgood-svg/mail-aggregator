@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const { db, DIRS } = require('./db');
+const { createPublicLookup } = require('./network-policy');
 
 const CONFIG_PATH = path.join(DIRS.secrets, 'notification.json');
 
@@ -21,8 +22,14 @@ function saveConfig(input) {
     telegramToken: String(input.telegramToken || existing.telegramToken || '').trim(),
     telegramChatId: String(input.telegramChatId || existing.telegramChatId || '').trim(),
   };
-  if (config.enabled && !(provider === 'webhook' ? /^https:\/\//.test(config.webhookUrl) : (config.telegramToken && config.telegramChatId))) {
-    throw new Error(provider === 'webhook' ? 'Webhook 地址必须是 HTTPS URL' : 'Telegram Bot Token 和 Chat ID 均为必填');
+  if (config.enabled && provider === 'webhook') {
+    let webhook;
+    try { webhook = new URL(config.webhookUrl); } catch (_) { throw new Error('Webhook 地址必须是合法的 HTTPS URL'); }
+    if (webhook.protocol !== 'https:' || webhook.username || webhook.password || config.webhookUrl.length > 2048) {
+      throw new Error('Webhook 地址必须是无内嵌凭据的 HTTPS URL，且不超过 2048 个字符');
+    }
+  } else if (config.enabled && !(config.telegramToken && config.telegramChatId)) {
+    throw new Error('Telegram Bot Token 和 Chat ID 均为必填');
   }
   const temp = `${CONFIG_PATH}.${process.pid}.tmp`;
   fs.writeFileSync(temp, JSON.stringify(config), { mode: 0o600 }); fs.chmodSync(temp, 0o600); fs.renameSync(temp, CONFIG_PATH);
@@ -30,7 +37,12 @@ function saveConfig(input) {
 }
 function postJson(url, payload) {
   return new Promise((resolve, reject) => {
-    const request = https.request(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(JSON.stringify(payload)) }, timeout: 10000 }, (response) => {
+    const request = https.request(url, {
+      method: 'POST',
+      lookup: createPublicLookup(undefined, '通知服务器'),
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(JSON.stringify(payload)) },
+      timeout: 10000,
+    }, (response) => {
       response.resume(); response.statusCode >= 200 && response.statusCode < 300 ? resolve() : reject(new Error(`HTTP ${response.statusCode}`));
     });
     request.on('timeout', () => request.destroy(new Error('timeout'))); request.on('error', reject); request.end(JSON.stringify(payload));

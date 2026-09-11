@@ -14,6 +14,7 @@ Environment=MAIL_AGG_SERVICE_MANAGER=systemd
 ExecStart=/usr/bin/node /opt/mail-aggregator/server/app.js
 Restart=on-failure
 RestartSec=3
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

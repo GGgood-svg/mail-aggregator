@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const { db, DIRS } = require('./db');
-const { router: authRouter, requireAuth, requireAdmin, requireCsrf, verifyAdminPassword, sessionUser } = require('./auth');
+const { router: authRouter, requireAuth, requireAdmin, requirePrimaryAdmin, requireCsrf, verifyAdminPassword, sessionUser } = require('./auth');
 const accountsRouter = require('./accounts');
 const usersRouter = require('./users');
 const oauthRouter = require('./oauth-router');
@@ -85,6 +85,7 @@ function loadOrCreateSessionSecret() {
   if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
   const secretPath = path.join(DIRS.db, 'session.secret');
   if (fs.existsSync(secretPath)) {
+    fs.chmodSync(secretPath, 0o600);
     return fs.readFileSync(secretPath, 'utf8').trim();
   }
   const secret = crypto.randomBytes(32).toString('hex');
@@ -154,7 +155,7 @@ app.use('/api/accounts', requireAuth, requireCsrf, accountsRouter);
 app.use('/api/oauth', requireAuth, requireCsrf, oauthRouter);
 app.use('/api/mail', requireAuth, requireCsrf, createMailRouter());
 app.use('/api/users', requireAuth, requireAdmin, requireCsrf, usersRouter);
-app.use('/api/system/restore', requireAuth, requireAdmin, requireCsrf, createRestoreRouter({
+app.use('/api/system/restore', requireAuth, requirePrimaryAdmin, requireCsrf, createRestoreRouter({
   db,
   dirs: DIRS,
   version: APP_VERSION,
@@ -164,7 +165,7 @@ app.use('/api/system/restore', requireAuth, requireAdmin, requireCsrf, createRes
   isSecureRequest: (req) => req.secure || isLoopbackAddress(req.ip),
 }));
 
-app.get('/api/settings', requireAuth, requireAdmin, (req, res) => {
+app.get('/api/settings', requireAuth, requirePrimaryAdmin, (req, res) => {
   const rows = db.prepare('SELECT key, value FROM settings').all();
   const settings = {};
   for (const r of rows) settings[r.key] = r.value;
@@ -181,16 +182,16 @@ app.get('/api/health', requireAuth, requireAdmin, async (req, res) => {
   catch (error) { res.status(500).json({ error: '健康检查失败' }); }
 });
 
-app.get('/api/notifications/settings', requireAuth, requireAdmin, (req, res) => {
+app.get('/api/notifications/settings', requireAuth, requirePrimaryAdmin, (req, res) => {
   res.json(notifications.publicConfig());
 });
 
-app.put('/api/notifications/settings', requireAuth, requireAdmin, requireCsrf, (req, res) => {
+app.put('/api/notifications/settings', requireAuth, requirePrimaryAdmin, requireCsrf, (req, res) => {
   try { res.json({ ok: true, ...notifications.saveConfig(req.body || {}) }); }
   catch (error) { res.status(400).json({ error: error.message }); }
 });
 
-app.put('/api/settings', requireAuth, requireAdmin, requireCsrf, (req, res) => {
+app.put('/api/settings', requireAuth, requirePrimaryAdmin, requireCsrf, (req, res) => {
   const errors = [];
 
   // branding字段做长度限制,防止极端内容把页面布局撑坏;内容本身允许任意文本,
@@ -242,6 +243,21 @@ app.put('/api/settings', requireAuth, requireAdmin, requireCsrf, (req, res) => {
       errors.push('日志保留天数必须是 1-3650 之间的整数');
     }
   }
+  if (req.body.max_job_log_mb !== undefined) {
+    if (parseIntegerInRange(req.body.max_job_log_mb, 1, 256) === null) {
+      errors.push('单个任务日志上限必须是 1-256 MB 之间的整数');
+    }
+  }
+  if (req.body.max_accounts_per_user !== undefined) {
+    if (parseIntegerInRange(req.body.max_accounts_per_user, 1, 1000) === null) {
+      errors.push('每位用户账号上限必须是 1-1000 之间的整数');
+    }
+  }
+  if (req.body.min_free_disk_mb !== undefined) {
+    if (parseIntegerInRange(req.body.min_free_disk_mb, 64, 1048576) === null) {
+      errors.push('磁盘安全余量必须是 64-1048576 MB 之间的整数');
+    }
+  }
   if (req.body.default_sync_interval !== undefined) {
     if (parseIntegerInRange(req.body.default_sync_interval, 60, 604800) === null) {
       errors.push('默认同步间隔必须是60-604800秒之间的整数');
@@ -256,6 +272,9 @@ app.put('/api/settings', requireAuth, requireAdmin, requireCsrf, (req, res) => {
     'max_concurrent_syncs',
     'sync_timeout_minutes',
     'log_retention_days',
+    'max_job_log_mb',
+    'max_accounts_per_user',
+    'min_free_disk_mb',
     'dovecot_host',
     'dovecot_port',
     'web_port',
@@ -268,7 +287,7 @@ app.put('/api/settings', requireAuth, requireAdmin, requireCsrf, (req, res) => {
   );
   const portChanged = req.body.web_port !== undefined;
   const normalizedInput = { ...req.body };
-  for (const key of ['dovecot_port', 'web_port', 'max_concurrent_syncs', 'sync_timeout_minutes', 'log_retention_days', 'default_sync_interval']) {
+  for (const key of ['dovecot_port', 'web_port', 'max_concurrent_syncs', 'sync_timeout_minutes', 'log_retention_days', 'max_job_log_mb', 'max_accounts_per_user', 'min_free_disk_mb', 'default_sync_interval']) {
     if (normalizedInput[key] !== undefined) normalizedInput[key] = String(Number(normalizedInput[key]));
   }
   if (normalizedInput.dovecot_host !== undefined) normalizedInput.dovecot_host = normalizeHost(normalizedInput.dovecot_host);
@@ -327,6 +346,8 @@ app.post('/api/jobs/:jobId/retry', requireAuth, requireCsrf, (req, res) => {
         already_running: '该账号已有任务在同步或排队中',
         missing_credentials: '账号尚未完成凭据配置或OAuth2授权',
         maintenance: '系统正在恢复，请稍后再重试任务',
+        low_disk: '服务器可用磁盘空间不足，已停止启动新同步任务',
+        disk_check_failed: '无法确认服务器剩余磁盘空间，已安全停止启动同步',
       };
       return res.status(result.reason === 'not_found' ? 404 : 409)
         .json({ error: messages[result.reason] || '任务无法重试' });
@@ -367,7 +388,7 @@ app.get('/api/system-updates', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/system/backup', requireAuth, requireAdmin, requireCsrf, async (req, res) => {
+app.post('/api/system/backup', requireAuth, requirePrimaryAdmin, requireCsrf, async (req, res) => {
   if (!req.secure && !isLoopbackAddress(req.ip)) {
     return res.status(400).json({ error: '远程备份下载必须使用 HTTPS；HTTP 仅允许服务器本机访问' });
   }
@@ -409,7 +430,7 @@ app.post('/api/system/backup', requireAuth, requireAdmin, requireCsrf, async (re
 // (只允许免密执行这一条固定命令,不是 ALL=(ALL) NOPASSWD:ALL)。
 // 如果没有配置这条sudo规则,这个操作会失败,用户需要手动执行
 // `rc-service mail-aggregator restart`。
-app.post('/api/system/restart', requireAuth, requireAdmin, requireCsrf, (req, res) => {
+app.post('/api/system/restart', requireAuth, requirePrimaryAdmin, requireCsrf, (req, res) => {
   res.json({ ok: true, message: '重启已触发,请稍等几秒后刷新页面' });
   setTimeout(() => {
     const restartArgs = process.env.MAIL_AGG_SERVICE_MANAGER === 'systemd'
@@ -426,7 +447,7 @@ app.post('/api/system/restart', requireAuth, requireAdmin, requireCsrf, (req, re
   }, 300);
 });
 
-app.post('/api/system/uninstall', requireAuth, requireAdmin, requireCsrf, (req, res) => {
+app.post('/api/system/uninstall', requireAuth, requirePrimaryAdmin, requireCsrf, (req, res) => {
   const { currentPassword, mode, confirmation } = req.body || {};
   if (!verifyAdminPassword(req.session.userId, currentPassword)) {
     return res.status(401).json({ error: '管理员密码验证失败' });
@@ -451,7 +472,7 @@ app.post('/api/system/uninstall', requireAuth, requireAdmin, requireCsrf, (req, 
 });
 
 // v0.1.3: Dovecot密码管理
-app.get('/api/dovecot/status', requireAuth, requireAdmin, async (req, res) => {
+app.get('/api/dovecot/status', requireAuth, requirePrimaryAdmin, async (req, res) => {
   try {
     const status = await dovecot.getDovecotStatus();
     res.json(status);
@@ -460,7 +481,7 @@ app.get('/api/dovecot/status', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/dovecot/change-password', requireAuth, requireAdmin, requireCsrf, async (req, res) => {
+app.post('/api/dovecot/change-password', requireAuth, requirePrimaryAdmin, requireCsrf, async (req, res) => {
   const { currentPassword, newPassword, confirmPassword } = req.body || {};
   if (!currentPassword || !newPassword || !confirmPassword) {
     return res.status(400).json({ error: '当前密码、新密码、确认密码均为必填' });
@@ -515,7 +536,10 @@ app.use((req, res, next) => {
   const protectedPage = req.path === '/' || req.path.endsWith('.html');
   if (req.method !== 'GET' || !protectedPage || req.path === '/login.html') return next();
   const user = sessionUser(req);
-  if (user && ['/users.html', '/settings.html', '/system-info.html'].includes(req.path) && user.role !== 'admin') {
+  if (user && ['/users.html', '/system-info.html'].includes(req.path) && user.role !== 'admin') {
+    return res.redirect('/index.html');
+  }
+  if (user && req.path === '/settings.html' && !(user.role === 'admin' && user.mail_access_all)) {
     return res.redirect('/index.html');
   }
   if (user) return next();

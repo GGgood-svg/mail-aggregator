@@ -67,7 +67,9 @@ Fresh installations listen on loopback by default. Run `ssh -L 8080:127.0.0.1:80
 
 ## Users and isolation
 
-The first account is the primary administrator. Administrators create standard users or additional administrators from User management; public registration is disabled. Standard users can access only their own mail accounts, sync jobs, logs, and mailbox folders. Global settings, OAuth client credentials, backup/restore, service control, and uninstall remain administrator-only.
+The first account is the primary administrator. It can create standard users or operational administrators; public registration is disabled. Standard users can access only their own mail accounts, sync jobs, logs, and mailbox folders. Operational administrators can manage users and inspect system status, while global settings, OAuth client credentials, full backup/restore, service control, and uninstall remain restricted to the primary administrator.
+
+The primary administrator and server `root` are trusted deployment boundaries. A full backup exported by the primary administrator contains every source-mail credential, and `root` can read the local Maildir directly. Web isolation protects standard users from each other and from operational administrators; it cannot protect data from someone who controls the host.
 
 Users choose a display name for each mailbox, while the server assigns an unforgeable Dovecot storage root from the user and account IDs. Existing accounts are assigned to the first administrator without moving existing mail. Because legacy `flat` mode already merged messages into shared root folders, only the first administrator retains access to those legacy folders; other users can read only their server-assigned isolated roots.
 

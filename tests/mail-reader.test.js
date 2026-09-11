@@ -5,6 +5,7 @@ const express = require('express');
 const { simpleParser } = require('mailparser');
 
 const {
+  MAX_MESSAGE_BYTES,
   parsePositiveInteger,
   validateMailboxPath,
   calculateSequenceRange,
@@ -14,6 +15,7 @@ const {
   sanitizeMessageHtml,
   serializeSummary,
   serializeParsedMessage,
+  mailAccessForRequest,
   folderAllowed,
   createMailRouter,
 } = require('../server/mail-reader');
@@ -27,6 +29,12 @@ test('tenant mail roots do not permit sibling or legacy mailbox access', () => {
   assert.equal(folderAllowed('INBOX', access), false);
   assert.equal(folderAllowed('U3-A7.INBOX', access), false);
   assert.equal(folderAllowed('anything', { all: true, roots: [] }), true);
+});
+
+test('missing authenticated identity has no mailbox access', () => {
+  const access = mailAccessForRequest({});
+  assert.equal(folderAllowed('INBOX', access), false);
+  assert.equal(folderAllowed('U1-A1/INBOX', access), false);
 });
 
 test('legacy access never crosses into another user isolated root', () => {
@@ -198,7 +206,7 @@ test('read-only mail API exposes folders, newest-first list, and sanitized detai
   };
 
   const app = express();
-  app.use('/api/mail', createMailRouter({ createClient }));
+  app.use('/api/mail', createMailRouter({ createClient, mailAccessForRequest: () => ({ all: true, roots: [] }) }));
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -218,4 +226,29 @@ test('read-only mail API exposes folders, newest-first list, and sanitized detai
   assert.equal(detail.message.remoteImageCount, 1);
   assert.ok(clients.every((client) => client.connected && client.usable === false));
   assert.ok(clients.flatMap((client) => client.openedReadOnly).every(Boolean));
+});
+
+test('message detail rejects a body larger than the advertised IMAP size', async (t) => {
+  const client = {
+    usable: true,
+    async connect() {},
+    async logout() { this.usable = false; },
+    async mailboxOpen() { return { exists: 1 }; },
+    async fetchOne(uid, query) {
+      if (query.source) return { uid, source: Buffer.alloc(MAX_MESSAGE_BYTES + 1) };
+      return { uid, envelope: {}, flags: new Set(), size: 10 };
+    },
+  };
+  const app = express();
+  app.use('/api/mail', createMailRouter({
+    createClient: () => client,
+    mailAccessForRequest: () => ({ all: true, roots: [] }),
+  }));
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/mail/messages/1?folder=INBOX`);
+  assert.equal(response.status, 413);
+  assert.match((await response.json()).error, /10 MB/);
 });

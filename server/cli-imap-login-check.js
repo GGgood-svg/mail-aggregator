@@ -16,20 +16,26 @@ const host = process.argv[2];
 const port = parseInt(process.argv[3], 10);
 const username = process.argv[4];
 
-if (!host || !port || !username) {
-  console.error('ERROR: usage: cli-imap-login-check.js <host> <port> <username> (密码从stdin读)');
-  process.exit(1);
-}
+if (require.main === module) {
+  if (!host || !port || !username) {
+    console.error('ERROR: usage: cli-imap-login-check.js <host> <port> <username> (密码从stdin读)');
+    process.exit(1);
+  }
 
-let password = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => {
-  password += chunk;
-});
-process.stdin.on('end', () => {
-  password = password.replace(/\r?\n+$/, '');
-  runCheck(password);
-});
+  let password = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    password += chunk;
+    if (password.length > 4096) {
+      console.error('ERROR: password input is too large');
+      process.exit(1);
+    }
+  });
+  process.stdin.on('end', () => {
+    password = password.replace(/\r?\n+$/, '');
+    runCheck(password);
+  });
+}
 
 function runCheck(password) {
   const socket = net.createConnection({ host, port });
@@ -62,9 +68,9 @@ function runCheck(password) {
     if (stage === 'greeting') {
       stage = 'login';
       buf = '';
-      // scheme=SHA512-CRYPT + disable_plaintext_auth=no 时明文LOGIN应该被接受,
-      // 用户名/密码不做任何转义——本来就只允许 install.sh 自己生成的初始密码。
-      socket.write(`a LOGIN ${username} ${password}\r\n`);
+      // Use IMAP quoted strings because --default-dovecot-password may contain
+      // whitespace, quotes, or backslashes even though generated passwords are hex.
+      socket.write(`a LOGIN ${imapQuote(username)} ${imapQuote(password)}\r\n`);
       return;
     }
 
@@ -84,3 +90,11 @@ function runCheck(password) {
     finish(false, `连接 ${host}:${port} 失败: ${err.message}`);
   });
 }
+
+function imapQuote(value) {
+  const text = String(value);
+  if (/[\r\n\0]/.test(text)) throw new Error('IMAP credential contains a forbidden control character');
+  return `"${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+module.exports = { imapQuote };

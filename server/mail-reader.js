@@ -234,8 +234,9 @@ function publicMailError(error) {
 
 function mailAccessForRequest(req, dependencies = {}) {
   if (dependencies.mailAccessForRequest) return dependencies.mailAccessForRequest(req);
-  // Pure router tests mount this module without the application's auth middleware.
-  if (!req.user) return { all: true, roots: [] };
+  // Fail closed even if a future route is accidentally mounted without the
+  // application's authentication middleware.
+  if (!req.user) return { all: false, roots: [], allowUnscoped: false, deniedRoots: [] };
   const { db } = require('./db');
   const { localDovecot } = require('./config');
   // 永久归属表是权威来源，同时合并仍在 accounts 中的活动目录，兼容测试夹具、
@@ -452,6 +453,14 @@ function createMailRouter(dependencies = {}) {
         if (!full || !full.source) {
           const error = new Error('邮件正文不可用');
           error.statusCode = 404;
+          throw error;
+        }
+        const sourceBytes = Buffer.isBuffer(full.source)
+          ? full.source.length
+          : Buffer.byteLength(String(full.source));
+        if (sourceBytes > MAX_MESSAGE_BYTES) {
+          const error = new Error('这封邮件超过 10 MB，第一阶段暂不在网页中展开');
+          error.statusCode = 413;
           throw error;
         }
         const parsed = await simpleParser(full.source, {
