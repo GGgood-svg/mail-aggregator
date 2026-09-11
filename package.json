@@ -27,7 +27,7 @@
   "homepage": "https://github.com/GGgood-svg/mail-aggregator#readme",
   "dependencies": {
     "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^11.3.0",
+    "better-sqlite3": "^13.0.3",
     "cookie-parser": "^1.4.6",
     "express": "^4.22.2",
     "express-session": "^1.18.0",
