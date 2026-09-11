@@ -11,11 +11,13 @@
 - Make app-only upgrades install the exact lockfile dependency tree and restart the Web service; startup failures now stop the installer instead of ending with a false success message.
 - Preserve executable bits for command-line shell scripts and force OpenRC service files to LF endings so GitHub archives install correctly on Linux even when created from Windows.
 - Roll back account database rows, mailbox ownership, and credential files when account creation or editing fails partway through.
+- Map restored mailbox owners by username instead of coincidental cross-installation numeric IDs; unmatched owners safely fall back to the current primary administrator.
 - Enforce a private runtime umask and repair existing data/database/session/log permissions; quote installer IMAP login credentials correctly when passwords contain spaces or punctuation.
 - Fix privileged Dovecot helper paths so an unprivileged sudo caller cannot redirect password operations through environment variables.
 - Remove the default Express technology banner from HTTP responses.
 - Validate notification Webhook URLs and pin HTTPS connections to DNS answers that pass the public-address policy, preventing private-network and metadata-service requests.
 - Update Express within the supported major line and pin mailparser at the last Node.js 18-compatible build so Debian 12 installations are not silently upgraded to an incompatible runtime requirement.
+- Test Node.js 18 in CI as the declared minimum runtime, alongside Node.js 20 and 22.
 - Reject unsupported pre-18 Node.js installations before deployment instead of relying on an npm engine warning and producing a service that cannot start.
 - Use an equal-cost bcrypt check for unknown usernames to reduce login account-enumeration timing differences.
 - Make the security-reporting instructions accurate before the repository's private vulnerability reporting feature is enabled and before the first tagged release exists.

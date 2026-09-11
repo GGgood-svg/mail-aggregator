@@ -206,6 +206,42 @@ integrationTest('database commit failure rolls back both database rows and swapp
   }
 });
 
+integrationTest('cross-instance restore maps owners by username and never by coincidental numeric id', () => {
+  const env = tempEnvironment();
+  try {
+    env.current.exec(`
+      ALTER TABLE admin_users ADD COLUMN mail_access_all INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE accounts ADD COLUMN owner_user_id INTEGER;
+      INSERT INTO admin_users(id,username,password_hash,mail_access_all) VALUES(1,'current-primary','x',1);
+      INSERT INTO admin_users(id,username,password_hash,mail_access_all) VALUES(2,'shared-user','x',0);
+      INSERT INTO settings VALUES('dovecot_user','mailuser');
+    `);
+    env.source.exec(`
+      ALTER TABLE accounts ADD COLUMN owner_user_id INTEGER;
+      INSERT INTO admin_users VALUES(1,'different-person','x');
+      INSERT INTO admin_users VALUES(9,'shared-user','x');
+      INSERT INTO settings VALUES('app_name','Backup');
+      INSERT INTO accounts(id,name,username,owner_user_id) VALUES(11,'foreign','foreign@test',1);
+      INSERT INTO accounts(id,name,username,owner_user_id) VALUES(12,'matched','matched@test',9);
+    `);
+    fs.writeFileSync(path.join(env.currentSecrets, 'local-target.pass'), 'live-local');
+
+    restoreApplicationState({
+      Database: TestDatabase,
+      currentDb: env.current,
+      backupDbPath: env.sourcePath,
+      currentSecretsDir: env.currentSecrets,
+      backupSecretsDir: env.backupSecrets,
+      workDir: env.workDir,
+    });
+    assert.equal(env.current.prepare('SELECT owner_user_id FROM accounts WHERE id=11').get().owner_user_id, 1);
+    assert.equal(env.current.prepare('SELECT owner_user_id FROM accounts WHERE id=12').get().owner_user_id, 2);
+  } finally {
+    env.current.close(); env.source.close();
+    fs.rmSync(env.root, { recursive: true, force: true });
+  }
+});
+
 test('restore cleanup removes only expired restore artifacts', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mail-aggregator-restore-cleanup-'));
   try {

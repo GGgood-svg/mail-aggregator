@@ -187,8 +187,23 @@ function restoreApplicationState({ Database, currentDb, backupDbPath, currentSec
     const secretResult = prepareRestoredSecrets(backupSecretsDir, currentSecretsDir, preparedSecrets);
     const localUserRow = currentDb.prepare("SELECT value FROM settings WHERE key='dovecot_user'").get();
     const currentLocalUser = localUserRow ? localUserRow.value : 'mailuser';
-    const fallbackOwner = currentDb.prepare('SELECT id FROM admin_users ORDER BY id LIMIT 1').get();
-    const validOwnerIds = new Set(currentDb.prepare('SELECT id FROM admin_users').all().map((row) => Number(row.id)));
+    const currentAdminColumns = new Set(tableColumns(currentDb, 'admin_users'));
+    const fallbackOwner = currentAdminColumns.has('mail_access_all')
+      ? currentDb.prepare('SELECT id FROM admin_users ORDER BY mail_access_all DESC, id LIMIT 1').get()
+      : currentDb.prepare('SELECT id FROM admin_users ORDER BY id LIMIT 1').get();
+    // A backup may come from another installation where numeric user IDs refer
+    // to entirely different people. Map owners only through stable usernames;
+    // unmatched/legacy owners fall back to the current primary administrator.
+    const currentUsersByName = new Map(currentDb.prepare('SELECT id,username FROM admin_users').all()
+      .map((row) => [String(row.username), Number(row.id)]));
+    const restoredOwnerIds = new Map();
+    if (tableExists(source, 'admin_users')
+        && tableColumns(source, 'admin_users').includes('username')) {
+      for (const row of source.prepare('SELECT id,username FROM admin_users').iterate()) {
+        const currentId = currentUsersByName.get(String(row.username));
+        if (currentId !== undefined) restoredOwnerIds.set(Number(row.id), currentId);
+      }
+    }
     const restore = currentDb.transaction(() => {
       currentDb.prepare('DELETE FROM notification_events').run();
       currentDb.prepare('DELETE FROM sync_jobs').run();
@@ -197,9 +212,9 @@ function restoreApplicationState({ Database, currentDb, backupDbPath, currentSec
       const accounts = copyTableRows(currentDb, source, 'accounts', {
         transform(row) {
           if (Object.prototype.hasOwnProperty.call(row, 'local_user')) row.local_user = currentLocalUser;
-          if (Object.prototype.hasOwnProperty.call(row, 'owner_user_id')
-              && !validOwnerIds.has(Number(row.owner_user_id))) {
-            row.owner_user_id = fallbackOwner ? fallbackOwner.id : null;
+          if (Object.prototype.hasOwnProperty.call(row, 'owner_user_id')) {
+            row.owner_user_id = restoredOwnerIds.get(Number(row.owner_user_id))
+              || (fallbackOwner ? fallbackOwner.id : null);
           }
           return row;
         },
