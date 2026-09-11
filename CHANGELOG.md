@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Scope login throttling by normalized client address and username, enforce a real failure window, and reject reverse-proxy login traffic that omits the configured forwarded client address.
+- Apply the same bounded password-attempt policy to authenticated password changes, backup exports, restores, and uninstall confirmations.
 - Bound imapsync output retained in memory and cap each task log (configurable, 16 MB by default) while preserving its beginning, diagnostic tail, and complete streamed counters.
 - Add configurable per-user account quotas and a fail-closed free-disk reserve that blocks new sync work and terminates running jobs if the server filesystem approaches exhaustion.
 - Make mailbox access fail closed without an authenticated identity, create service logs as `0600`, and report unsafe service-log permissions in `doctor.sh`.
@@ -12,6 +13,7 @@
 - Roll back account database rows, mailbox ownership, and credential files when account creation or editing fails partway through.
 - Enforce a private runtime umask and repair existing data/database/session/log permissions; quote installer IMAP login credentials correctly when passwords contain spaces or punctuation.
 - Fix privileged Dovecot helper paths so an unprivileged sudo caller cannot redirect password operations through environment variables.
+- Remove the default Express technology banner from HTTP responses.
 - Validate notification Webhook URLs and pin HTTPS connections to DNS answers that pass the public-address policy, preventing private-network and metadata-service requests.
 - Update Express within the supported major line and pin mailparser at the last Node.js 18-compatible build so Debian 12 installations are not silently upgraded to an incompatible runtime requirement.
 - Reject unsupported pre-18 Node.js installations before deployment instead of relying on an npm engine warning and producing a service that cannot start.

@@ -122,9 +122,8 @@ function createRestoreRouter({
     if (req.body.confirmation !== 'RESTORE') {
       return res.status(400).json({ error: '请输入 RESTORE 确认恢复' });
     }
-    if (!verifyPassword(req.session.userId, req.body.currentPassword)) {
-      return res.status(401).json({ error: '管理员密码验证失败' });
-    }
+    const verification = verifyPassword(req, req.body.currentPassword);
+    if (!verification.ok) return res.status(verification.status).json({ error: verification.error });
     const active = db.prepare(
       "SELECT COUNT(*) AS count FROM sync_jobs WHERE status IN ('queued','running')"
     ).get().count;

@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const { db, DIRS } = require('./db');
-const { router: authRouter, requireAuth, requireAdmin, requirePrimaryAdmin, requireCsrf, verifyAdminPassword, sessionUser } = require('./auth');
+const { router: authRouter, requireAuth, requireAdmin, requirePrimaryAdmin, requireCsrf, verifyCurrentPassword, sessionUser } = require('./auth');
 const accountsRouter = require('./accounts');
 const usersRouter = require('./users');
 const oauthRouter = require('./oauth-router');
@@ -103,6 +103,7 @@ cleanupStaleRestoreWorkdirs(DIRS.tmp);
 cleanupOldRestorePoints(DIRS.restorePoints);
 
 const app = express();
+app.disable('x-powered-by');
 if (TRUST_PROXY !== false) app.set('trust proxy', TRUST_PROXY);
 app.use(securityHeaders);
 app.use(requireHttpsMiddleware(REQUIRE_HTTPS));
@@ -161,7 +162,7 @@ app.use('/api/system/restore', requireAuth, requirePrimaryAdmin, requireCsrf, cr
   version: APP_VERSION,
   scheduler,
   hasRunningSyncs: () => currentRunningCount() > 0 || currentConnectionTestCount() > 0,
-  verifyPassword: verifyAdminPassword,
+  verifyPassword: verifyCurrentPassword,
   isSecureRequest: (req) => req.secure || isLoopbackAddress(req.ip),
 }));
 
@@ -392,9 +393,8 @@ app.post('/api/system/backup', requireAuth, requirePrimaryAdmin, requireCsrf, as
   if (!req.secure && !isLoopbackAddress(req.ip)) {
     return res.status(400).json({ error: '远程备份下载必须使用 HTTPS；HTTP 仅允许服务器本机访问' });
   }
-  if (!verifyAdminPassword(req.session.userId, req.body && req.body.currentPassword)) {
-    return res.status(401).json({ error: '管理员密码验证失败' });
-  }
+  const verification = verifyCurrentPassword(req, req.body && req.body.currentPassword);
+  if (!verification.ok) return res.status(verification.status).json({ error: verification.error });
   if (!maintenanceLock.acquire('backup')) {
     return res.status(409).json({ error: '系统正在执行备份或恢复，请稍后再试' });
   }
@@ -449,9 +449,8 @@ app.post('/api/system/restart', requireAuth, requirePrimaryAdmin, requireCsrf, (
 
 app.post('/api/system/uninstall', requireAuth, requirePrimaryAdmin, requireCsrf, (req, res) => {
   const { currentPassword, mode, confirmation } = req.body || {};
-  if (!verifyAdminPassword(req.session.userId, currentPassword)) {
-    return res.status(401).json({ error: '管理员密码验证失败' });
-  }
+  const verification = verifyCurrentPassword(req, currentPassword);
+  if (!verification.ok) return res.status(verification.status).json({ error: verification.error });
   if (!['remove-app', 'purge'].includes(mode)) {
     return res.status(400).json({ error: '卸载模式无效' });
   }

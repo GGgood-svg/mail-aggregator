@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
+const bcrypt = require('bcryptjs');
 
 let DatabaseSync = null;
 try { ({ DatabaseSync } = require('node:sqlite')); } catch (_) {}
@@ -201,5 +202,25 @@ integrationTest('operational administrators cannot promote users or manage peer 
     remove.route.stack[0].handle({ params: { id: String(peerId) }, user: actor }, peerDelete);
     assert.equal(peerDelete.statusCode, 403);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM admin_users WHERE id=?').get(peerId).count, 1);
+  });
+});
+
+integrationTest('authenticated current-password checks are throttled like login attempts', () => {
+  withDatabase((db) => {
+    const id = db.prepare('INSERT INTO admin_users(username,password_hash,role) VALUES(?,?,?)')
+      .run('password-check-user', bcrypt.hashSync('correct-password', 4), 'user').lastInsertRowid;
+    const { verifyCurrentPassword } = require('../server/auth');
+    const req = {
+      user: { id: Number(id), username: 'password-check-user', role: 'user' },
+      app: { get: () => false },
+      get: () => '',
+      ip: '203.0.113.20',
+    };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      assert.equal(verifyCurrentPassword(req, 'wrong-password').status, 401);
+    }
+    assert.equal(verifyCurrentPassword(req, 'wrong-password').status, 429);
+    db.prepare('DELETE FROM login_attempts').run();
+    assert.equal(verifyCurrentPassword(req, 'correct-password').ok, true);
   });
 });

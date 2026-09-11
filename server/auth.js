@@ -96,10 +96,9 @@ router.post('/change-password', requireAuth, requireCsrf, (req, res) => {
   const currentPassword = String(req.body?.currentPassword || '');
   const newPassword = String(req.body?.newPassword || '');
   if (newPassword.length < 10 || newPassword.length > 256) return res.status(400).json({ error: '新密码需为10-256位' });
+  const verification = verifyCurrentPassword(req, currentPassword);
+  if (!verification.ok) return res.status(verification.status).json({ error: verification.error });
   const full = db.prepare('SELECT * FROM admin_users WHERE id=?').get(req.user.id);
-  if (!full || !bcrypt.compareSync(currentPassword, full.password_hash)) {
-    return res.status(401).json({ error: '当前密码错误' });
-  }
   db.prepare('UPDATE admin_users SET password_hash=?,session_version=session_version+1 WHERE id=?')
     .run(bcrypt.hashSync(newPassword, 12), full.id);
   const updated = db.prepare('SELECT * FROM admin_users WHERE id=?').get(full.id);
@@ -177,11 +176,27 @@ function requireCsrf(req, res, next) {
   next();
 }
 
-function verifyAdminPassword(username, password) {
-  const user = typeof username === 'number'
-    ? db.prepare("SELECT password_hash FROM admin_users WHERE id = ? AND role='admin' AND enabled=1").get(username)
-    : db.prepare("SELECT password_hash FROM admin_users WHERE username = ? AND role='admin' AND enabled=1").get(username);
-  return !!user && bcrypt.compareSync(String(password || ''), user.password_hash);
+function verifyCurrentPassword(req, password) {
+  const user = req.user || sessionUser(req);
+  if (!user) return { ok: false, status: 401, error: '未登录' };
+  const ip = normalizedClientIp(req);
+  if (!ip) {
+    return { ok: false, status: 503, error: 'HTTPS反向代理未传递客户端地址，请配置 X-Forwarded-For' };
+  }
+  const lockedUntil = loginLimiter.check(ip, user.username);
+  if (lockedUntil) {
+    const remainingSec = Math.ceil((lockedUntil - Date.now()) / 1000);
+    return { ok: false, status: 429, error: `密码验证失败次数过多,请在 ${remainingSec} 秒后重试` };
+  }
+  const full = db.prepare('SELECT password_hash FROM admin_users WHERE id=? AND enabled=1').get(user.id);
+  const ok = Boolean(full && String(password || '').length <= 256
+    && bcrypt.compareSync(String(password || ''), full.password_hash));
+  if (!ok) {
+    loginLimiter.failure(ip, user.username);
+    return { ok: false, status: 401, error: '当前密码错误' };
+  }
+  loginLimiter.success(ip, user.username);
+  return { ok: true, status: 200 };
 }
 
 module.exports = {
@@ -191,7 +206,7 @@ module.exports = {
   requirePrimaryAdmin,
   requireCsrf,
   hasAdmin,
-  verifyAdminPassword,
+  verifyCurrentPassword,
   issueSession,
   sessionUser,
 };
