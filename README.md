@@ -185,7 +185,7 @@ sudo ./scripts/uninstall.sh
 
 ## 开发与测试
 
-需要 Node.js 20 或 22：
+需要 Node.js 22.12 或更高版本：
 
 ```sh
 npm ci

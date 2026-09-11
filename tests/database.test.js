@@ -9,8 +9,8 @@ let DatabaseSync = null;
 try {
   ({ DatabaseSync } = require('node:sqlite'));
 } catch (_) {
-  // node:sqlite is unavailable before Node 22.5. These integration tests are
-  // skipped there; the dependency-free unit tests still run on Node 18+.
+  // Keep module loading graceful for tooling that inspects this suite outside
+  // the supported Node.js runtime.
 }
 
 const dbModulePath = require.resolve('../server/db');

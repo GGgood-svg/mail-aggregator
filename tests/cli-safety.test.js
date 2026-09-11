@@ -75,8 +75,8 @@ test('app-only deployment installs locked dependencies and must restart the serv
 test('installer rejects a Node.js runtime older than the package engine', () => {
   const script = fs.readFileSync(path.join(root, 'scripts', 'install.sh'), 'utf8');
   assert.match(script, /process\.versions\.node\.split/);
-  assert.match(script, /NODE_MAJOR[^\n]*-ge 18/);
-  assert.match(script, /Node\.js 18\/20\/22/);
+  assert.match(script, /major > 22 \|\| \(major === 22 && minor >= 12\)/);
+  assert.match(script, /Node\.js 版本低于 22\.12/);
 });
 
 test('privileged Dovecot helper uses fixed root-owned target paths', () => {

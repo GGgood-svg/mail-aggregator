@@ -58,7 +58,9 @@ function isAllowedPath(entryPath, isDirectory) {
 }
 
 async function readTarInventory(archivePath) {
-  const stream = fs.createReadStream(archivePath).pipe(zlib.createGunzip());
+  const source = fs.createReadStream(archivePath);
+  const stream = zlib.createGunzip();
+  source.pipe(stream);
   let buffer = Buffer.alloc(0);
   let current = null;
   let paddingRemaining = 0;
@@ -77,68 +79,78 @@ async function readTarInventory(archivePath) {
     current = null;
   }
 
-  for await (const chunk of stream) {
-    if (ended && chunk.some((byte) => byte !== 0)) throw new Error('tar结束标记后仍有额外数据');
-    if (ended) continue;
-    buffer = buffer.length ? Buffer.concat([buffer, chunk]) : chunk;
-    while (buffer.length) {
-      if (current) {
-        const take = Math.min(current.remaining, buffer.length);
-        const part = buffer.subarray(0, take);
-        current.hash.update(part);
-        if (current.manifestChunks) current.manifestChunks.push(Buffer.from(part));
-        current.remaining -= take;
-        totalBytes += take;
-        buffer = buffer.subarray(take);
-        if (totalBytes > MAX_UNCOMPRESSED_BYTES) throw new Error('备份解压后体积超过安全上限');
-        if (current.remaining === 0) finishCurrent();
-        continue;
+  try {
+    for await (const chunk of stream) {
+      if (ended && chunk.some((byte) => byte !== 0)) throw new Error('tar结束标记后仍有额外数据');
+      if (ended) continue;
+      buffer = buffer.length ? Buffer.concat([buffer, chunk]) : chunk;
+      while (buffer.length) {
+        if (current) {
+          const take = Math.min(current.remaining, buffer.length);
+          const part = buffer.subarray(0, take);
+          current.hash.update(part);
+          if (current.manifestChunks) current.manifestChunks.push(Buffer.from(part));
+          current.remaining -= take;
+          totalBytes += take;
+          buffer = buffer.subarray(take);
+          if (totalBytes > MAX_UNCOMPRESSED_BYTES) throw new Error('备份解压后体积超过安全上限');
+          if (current.remaining === 0) finishCurrent();
+          continue;
+        }
+        if (paddingRemaining) {
+          const take = Math.min(paddingRemaining, buffer.length);
+          paddingRemaining -= take;
+          buffer = buffer.subarray(take);
+          continue;
+        }
+        if (buffer.length < BLOCK_SIZE) break;
+        const header = buffer.subarray(0, BLOCK_SIZE);
+        buffer = buffer.subarray(BLOCK_SIZE);
+        if (header.every((byte) => byte === 0)) {
+          ended = true;
+          if (buffer.some((byte) => byte !== 0)) throw new Error('tar结束标记后仍有额外数据');
+          buffer = Buffer.alloc(0);
+          break;
+        }
+        verifyHeaderChecksum(header);
+        const name = headerString(header, 0, 100);
+        const prefix = headerString(header, 345, 155);
+        const entryPath = normalizeEntryPath(prefix ? `${prefix}/${name}` : name);
+        const type = String.fromCharCode(header[156] || 0);
+        const isDirectory = type === '5';
+        const isRegular = type === '\0' || type === '0';
+        if (!isDirectory && !isRegular) throw new Error(`备份包含不允许的tar条目类型: ${type}`);
+        if (!isAllowedPath(entryPath, isDirectory)) throw new Error(`备份包含非白名单路径: ${entryPath}`);
+        if (seen.has(entryPath)) throw new Error(`备份包含重复条目: ${entryPath || '.'}`);
+        seen.add(entryPath);
+        entryCount++;
+        if (entryCount > MAX_ENTRIES) throw new Error('备份条目数量超过安全上限');
+        const size = parseOctal(header, 124, 12, 'tar条目大小');
+        if (isDirectory) {
+          if (size !== 0) throw new Error('tar目录条目大小不为零');
+          continue;
+        }
+        if (entryPath === 'manifest.json' && size > MAX_MANIFEST_BYTES) {
+          throw new Error('备份清单超过安全上限');
+        }
+        current = {
+          path: entryPath,
+          size,
+          remaining: size,
+          hash: crypto.createHash('sha256'),
+          manifestChunks: entryPath === 'manifest.json' ? [] : null,
+        };
+        if (size === 0) finishCurrent();
       }
-      if (paddingRemaining) {
-        const take = Math.min(paddingRemaining, buffer.length);
-        paddingRemaining -= take;
-        buffer = buffer.subarray(take);
-        continue;
-      }
-      if (buffer.length < BLOCK_SIZE) break;
-      const header = buffer.subarray(0, BLOCK_SIZE);
-      buffer = buffer.subarray(BLOCK_SIZE);
-      if (header.every((byte) => byte === 0)) {
-        ended = true;
-        if (buffer.some((byte) => byte !== 0)) throw new Error('tar结束标记后仍有额外数据');
-        buffer = Buffer.alloc(0);
-        break;
-      }
-      verifyHeaderChecksum(header);
-      const name = headerString(header, 0, 100);
-      const prefix = headerString(header, 345, 155);
-      const entryPath = normalizeEntryPath(prefix ? `${prefix}/${name}` : name);
-      const type = String.fromCharCode(header[156] || 0);
-      const isDirectory = type === '5';
-      const isRegular = type === '\0' || type === '0';
-      if (!isDirectory && !isRegular) throw new Error(`备份包含不允许的tar条目类型: ${type}`);
-      if (!isAllowedPath(entryPath, isDirectory)) throw new Error(`备份包含非白名单路径: ${entryPath}`);
-      if (seen.has(entryPath)) throw new Error(`备份包含重复条目: ${entryPath || '.'}`);
-      seen.add(entryPath);
-      entryCount++;
-      if (entryCount > MAX_ENTRIES) throw new Error('备份条目数量超过安全上限');
-      const size = parseOctal(header, 124, 12, 'tar条目大小');
-      if (isDirectory) {
-        if (size !== 0) throw new Error('tar目录条目大小不为零');
-        continue;
-      }
-      if (entryPath === 'manifest.json' && size > MAX_MANIFEST_BYTES) {
-        throw new Error('备份清单超过安全上限');
-      }
-      current = {
-        path: entryPath,
-        size,
-        remaining: size,
-        hash: crypto.createHash('sha256'),
-        manifestChunks: entryPath === 'manifest.json' ? [] : null,
-      };
-      if (size === 0) finishCurrent();
     }
+  } finally {
+    const closePromises = [source, stream].map((item) => (
+      item.closed ? Promise.resolve() : new Promise((resolve) => item.once('close', resolve))
+    ));
+    source.unpipe(stream);
+    stream.destroy();
+    source.destroy();
+    await Promise.all(closePromises);
   }
 
   if (current || paddingRemaining || buffer.length) throw new Error('tar归档被截断');

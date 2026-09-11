@@ -16,9 +16,10 @@
 - Fix privileged Dovecot helper paths so an unprivileged sudo caller cannot redirect password operations through environment variables.
 - Remove the default Express technology banner from HTTP responses.
 - Validate notification Webhook URLs and pin HTTPS connections to DNS answers that pass the public-address policy, preventing private-network and metadata-service requests.
-- Update Express within the supported major line and pin mailparser at the last Node.js 18-compatible build so Debian 12 installations are not silently upgraded to an incompatible runtime requirement.
-- Test Node.js 18 in CI as the declared minimum runtime, alongside Node.js 20 and 22.
-- Reject unsupported pre-18 Node.js installations before deployment instead of relying on an npm engine warning and producing a service that cannot start.
+- Update Express within the supported major line and pin mailparser to avoid an unreviewed parser upgrade.
+- Raise the minimum runtime to Node.js 22.12 so the mail HTML sanitizer can stay on its patched release; test the minimum and current Node.js lines in CI.
+- Reject unsupported Node.js installations before deployment instead of relying on an npm engine warning and producing a service that cannot start.
+- Close backup archive input and decompression streams before returning a validation error, preventing transient locked files during cleanup on Windows.
 - Use an equal-cost bcrypt check for unknown usernames to reduce login account-enumeration timing differences.
 - Make the security-reporting instructions accurate before the repository's private vulnerability reporting feature is enabled and before the first tagged release exists.
 - Separate operational administrators from the original primary administrator: only the primary administrator can export/restore all credentials, uninstall the service, create, promote, demote, modify, or delete administrator accounts.

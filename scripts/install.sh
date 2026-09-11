@@ -213,14 +213,17 @@ check_and_report() {
   fi
 }
 
+node_version_supported() {
+  node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 12) ? 0 : 1)' >/dev/null 2>&1
+}
+
 NODE_OK=0
 if command -v node >/dev/null 2>&1; then
-  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-  if [ "$NODE_MAJOR" -ge 18 ] 2>/dev/null; then
+  if node_version_supported; then
     echo "  Node.js: ✅ $(node --version)"
     NODE_OK=1
   else
-    echo "  Node.js: ❌ $(node --version 2>/dev/null || echo unknown)（需要 18+）"
+    echo "  Node.js: ❌ $(node --version 2>/dev/null || echo unknown)（需要 22.12+）"
   fi
 else
   echo "  Node.js: ❌"
@@ -260,9 +263,8 @@ if [ -n "$TO_INSTALL" ]; then
 else
   echo "  Node.js/npm/SQLite/imapsync 都已就绪,跳过"
 fi
-NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-[ "$NODE_MAJOR" -ge 18 ] 2>/dev/null \
-  || fail_step "3/9" "Node.js 版本低于 18" "请先通过发行版 backports 或 NodeSource 安装 Node.js 18/20/22，再重新运行安装器。"
+node_version_supported \
+  || fail_step "3/9" "Node.js 版本低于 22.12" "请先通过发行版 backports 或 NodeSource 安装 Node.js 22.12 以上版本，再重新运行安装器。"
 
 echo ""
 echo "==> 4/9 Dovecot 软件包"

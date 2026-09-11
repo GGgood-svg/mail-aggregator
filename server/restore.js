@@ -113,6 +113,10 @@ function quoteIdentifier(value) {
   return `"${value}"`;
 }
 
+function statementRows(statement) {
+  return typeof statement.iterate === 'function' ? statement.iterate() : statement.all();
+}
+
 function copyTableRows(current, source, table, { transform } = {}) {
   if (!tableExists(source, table) || !tableExists(current, table)) return 0;
   const currentColumns = new Set(tableColumns(current, table));
@@ -122,7 +126,7 @@ function copyTableRows(current, source, table, { transform } = {}) {
   const placeholders = columns.map((column) => `@${column}`).join(', ');
   const insert = current.prepare(`INSERT INTO ${quoteIdentifier(table)} (${names}) VALUES (${placeholders})`);
   let count = 0;
-  for (const original of source.prepare(`SELECT ${names} FROM ${quoteIdentifier(table)}`).iterate()) {
+  for (const original of statementRows(source.prepare(`SELECT ${names} FROM ${quoteIdentifier(table)}`))) {
     const row = transform ? transform({ ...original }) : original;
     const values = {};
     for (const column of columns) values[column] = row[column];
@@ -136,7 +140,7 @@ function mergeSettings(current, source) {
   const upsert = current.prepare(`INSERT INTO settings(key, value) VALUES(?, ?)
     ON CONFLICT(key) DO UPDATE SET value=excluded.value`);
   let count = 0;
-  for (const row of source.prepare('SELECT key, value FROM settings').iterate()) {
+  for (const row of statementRows(source.prepare('SELECT key, value FROM settings'))) {
     if (PRESERVED_SETTING_KEYS.has(row.key)) continue;
     upsert.run(row.key, row.value);
     count++;
@@ -199,7 +203,7 @@ function restoreApplicationState({ Database, currentDb, backupDbPath, currentSec
     const restoredOwnerIds = new Map();
     if (tableExists(source, 'admin_users')
         && tableColumns(source, 'admin_users').includes('username')) {
-      for (const row of source.prepare('SELECT id,username FROM admin_users').iterate()) {
+      for (const row of statementRows(source.prepare('SELECT id,username FROM admin_users'))) {
         const currentId = currentUsersByName.get(String(row.username));
         if (currentId !== undefined) restoredOwnerIds.set(Number(row.id), currentId);
       }
@@ -229,9 +233,9 @@ function restoreApplicationState({ Database, currentDb, backupDbPath, currentSec
       const accountColumns = new Set(tableColumns(currentDb, 'accounts'));
       if (tableExists(currentDb, 'mailbox_ownership')
           && ['local_user', 'mailbox_folder', 'owner_user_id'].every((name) => accountColumns.has(name))) {
-        for (const account of currentDb.prepare(`SELECT id, local_user, mailbox_folder, owner_user_id
+        for (const account of statementRows(currentDb.prepare(`SELECT id, local_user, mailbox_folder, owner_user_id
           FROM accounts WHERE destination_mode='subfolder' AND mailbox_folder IS NOT NULL
-            AND owner_user_id IS NOT NULL`).iterate()) {
+            AND owner_user_id IS NOT NULL`))) {
           registerMailboxOwnership(currentDb, {
             localUser: account.local_user,
             mailboxFolder: account.mailbox_folder,
