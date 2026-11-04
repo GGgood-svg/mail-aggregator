@@ -113,8 +113,8 @@ function quoteIdentifier(value) {
   return `"${value}"`;
 }
 
-function statementRows(statement) {
-  return typeof statement.iterate === 'function' ? statement.iterate() : statement.all();
+function statementRows(statement, ...params) {
+  return typeof statement.iterate === 'function' ? statement.iterate(...params) : statement.all(...params);
 }
 
 function copyTableRows(current, source, table, { transform } = {}) {
@@ -166,6 +166,7 @@ function removeTargetPasswordOverrides(directory) {
 }
 
 function prepareRestoredSecrets(backupSecretsDir, currentSecretsDir, preparedDir) {
+  const owner = fs.statSync(currentSecretsDir);
   fs.rmSync(preparedDir, { recursive: true, force: true });
   copySecrets(backupSecretsDir, preparedDir);
   const skippedTargetOverrides = removeTargetPasswordOverrides(preparedDir);
@@ -176,7 +177,20 @@ function prepareRestoredSecrets(backupSecretsDir, currentSecretsDir, preparedDir
     fs.copyFileSync(currentGlobal, restoredGlobal);
     fs.chmodSync(restoredGlobal, 0o600);
   }
+  preserveSecretOwnership(preparedDir, owner);
   return { skippedTargetOverrides };
+}
+
+function preserveSecretOwnership(directory, owner, io = fs, platform = process.platform) {
+  if (platform === 'win32') return;
+  // Use the trusted live directory's owner, never uid/gid from the archive.
+  for (const entry of io.readdirSync(directory, { withFileTypes: true })) {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) preserveSecretOwnership(target, owner, io, platform);
+    else if (entry.isFile()) io.chownSync(target, owner.uid, owner.gid);
+    else throw new Error('恢复凭据目录包含不允许的文件类型');
+  }
+  io.chownSync(directory, owner.uid, owner.gid);
 }
 
 function restoreApplicationState({ Database, currentDb, backupDbPath, currentSecretsDir, backupSecretsDir, workDir }) {
@@ -233,9 +247,33 @@ function restoreApplicationState({ Database, currentDb, backupDbPath, currentSec
       const accountColumns = new Set(tableColumns(currentDb, 'accounts'));
       if (tableExists(currentDb, 'mailbox_ownership')
           && ['local_user', 'mailbox_folder', 'owner_user_id'].every((name) => accountColumns.has(name))) {
-        for (const account of statementRows(currentDb.prepare(`SELECT id, local_user, mailbox_folder, owner_user_id
+        // Restore ownership even when the originating account was deleted.
+        // Unknown/deleted users get negative tombstone IDs, never another
+        // installation's coincidentally equal positive user ID.
+        if (tableExists(source, 'mailbox_ownership')) {
+          const tombstones = new Map();
+          let tombstone = Math.min(0, Number(currentDb.prepare('SELECT MIN(owner_user_id) AS id FROM mailbox_ownership').get().id || 0));
+          const sourceLocal = source.prepare("SELECT value FROM settings WHERE key='dovecot_user'").get()?.value || 'mailuser';
+          for (const row of statementRows(source.prepare('SELECT * FROM mailbox_ownership WHERE local_user=?'), sourceLocal)) {
+            const existing = currentDb.prepare('SELECT owner_user_id FROM mailbox_ownership WHERE local_user=? AND mailbox_folder=? COLLATE NOCASE').get(currentLocalUser, row.mailbox_folder);
+            let owner = restoredOwnerIds.get(Number(row.owner_user_id));
+            const activeOwner = currentDb.prepare("SELECT owner_user_id FROM accounts WHERE local_user=? AND mailbox_folder=? AND destination_mode='subfolder'").get(currentLocalUser, row.mailbox_folder);
+            if (owner === undefined && activeOwner) owner = Number(activeOwner.owner_user_id);
+            if (owner === undefined) {
+              if (existing) continue;
+              if (!tombstones.has(row.owner_user_id)) tombstones.set(row.owner_user_id, --tombstone);
+              owner = tombstones.get(row.owner_user_id);
+            }
+            if (existing && Number(existing.owner_user_id) !== owner) throw new Error('恢复目录与现有归属冲突');
+            currentDb.prepare(`INSERT OR IGNORE INTO mailbox_ownership(local_user,mailbox_folder,owner_user_id,former_account_id)
+              VALUES(?,?,?,?)`).run(currentLocalUser, row.mailbox_folder, owner, row.former_account_id);
+          }
+        }
+        // better-sqlite3 disallows writes while an iterator on this same
+        // connection is active. Materialize this bounded account list first.
+        for (const account of currentDb.prepare(`SELECT id, local_user, mailbox_folder, owner_user_id
           FROM accounts WHERE destination_mode='subfolder' AND mailbox_folder IS NOT NULL
-            AND owner_user_id IS NOT NULL`))) {
+            AND owner_user_id IS NOT NULL`).all()) {
           registerMailboxOwnership(currentDb, {
             localUser: account.local_user,
             mailboxFolder: account.mailbox_folder,
@@ -318,6 +356,7 @@ module.exports = {
   extractVerifiedArchive,
   inspectRestoreDatabase,
   prepareRestoredSecrets,
+  preserveSecretOwnership,
   restoreApplicationState,
   cleanupOldRestorePoints,
   cleanupStaleRestoreWorkdirs,

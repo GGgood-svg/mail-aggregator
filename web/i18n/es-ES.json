@@ -1,1 +1,19 @@
-{"language":"Español","translations":{"登录":"Iniciar sesión","用户名":"Usuario","密码":"Contraseña","邮箱账号":"Cuentas de correo","同步日志":"Registros de sincronización","设置":"Configuración","系统信息":"Información del sistema","退出登录":"Cerrar sesión","系统状态":"Estado del sistema","账号统计":"Estadísticas de cuentas","名称":"Nombre","状态":"Estado","添加账号":"Añadir cuenta","编辑账号":"Editar cuenta","保存":"Guardar","删除":"Eliminar","编辑":"Editar","立即同步":"Sincronizar ahora","测试连接":"Probar conexión","同步中":"Sincronizando","成功":"Correcto","失败":"Fallido","排队中":"En cola","已取消":"Cancelado","高级同步规则":"Reglas avanzadas de sincronización","界面语言":"Idioma de la interfaz","语言":"Idioma","保存设置":"Guardar configuración","安全备份导出":"Exportación segura de copia","Web 恢复中心":"Centro de restauración web","上传并预检":"Subir y verificar","执行安全恢复":"Ejecutar restauración segura","服务控制":"Control del servicio","刷新":"Actualizar"}}
+{"language":"Español","translations":{
+    "搜索范围：当前文件夹；日期按收取日期筛选。": "Buscar en esta carpeta por fecha de recepción.",
+    "邮箱地址或名称": "Dirección de correo o nombre",
+    "主题": "Asunto",
+    "主题关键词": "Palabras del asunto",
+    "开始日期": "Fecha inicial",
+    "结束日期": "Fecha final",
+    "已读状态": "Estado de lectura",
+    "全部": "Todos",
+    "未读": "No leído",
+    "已读": "Leído",
+    "搜索邮件": "Buscar correo",
+    "清除筛选": "Borrar filtros",
+    "导出原始邮件": "Exportar correo original",
+    "下载附件": "Descargar adjunto",
+    "没有符合条件的邮件": "No hay mensajes coincidentes",
+    "正文超过10 MB，暂不预览；可下载附件或导出原始邮件。": "El mensaje supera los 10 MB. Descargue los adjuntos o exporte el correo original.",
+    "单次下载上限100 MB；下载不会修改邮件已读状态。": "Máximo 100 MB por descarga; no cambia el estado de lectura.",
+    "正在下载…": "Descargando…","登录":"Iniciar sesión","用户名":"Usuario","密码":"Contraseña","邮箱账号":"Cuentas de correo","同步日志":"Registros de sincronización","设置":"Configuración","系统信息":"Información del sistema","退出登录":"Cerrar sesión","系统状态":"Estado del sistema","账号统计":"Estadísticas de cuentas","名称":"Nombre","状态":"Estado","添加账号":"Añadir cuenta","编辑账号":"Editar cuenta","保存":"Guardar","删除":"Eliminar","编辑":"Editar","立即同步":"Sincronizar ahora","测试连接":"Probar conexión","同步中":"Sincronizando","成功":"Correcto","失败":"Fallido","排队中":"En cola","已取消":"Cancelado","高级同步规则":"Reglas avanzadas de sincronización","界面语言":"Idioma de la interfaz","语言":"Idioma","保存设置":"Guardar configuración","安全备份导出":"Exportación segura de copia","Web 恢复中心":"Centro de restauración web","上传并预检":"Subir y verificar","执行安全恢复":"Ejecutar restauración segura","服务控制":"Control del servicio","刷新":"Actualizar"}}

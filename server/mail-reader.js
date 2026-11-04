@@ -2,6 +2,8 @@ const express = require('express');
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
 const sanitizeHtml = require('sanitize-html');
+const { pipeline } = require('node:stream/promises');
+const { MAX_DOWNLOAD_BYTES, mailError, searchCriteria, safeFilename, attachmentParts, checkUidValidity, downloadLimiter } = require('./mail-tools');
 
 const DEFAULT_PAGE_SIZE = 30;
 const MAX_PAGE_SIZE = 50;
@@ -55,19 +57,7 @@ function toIsoString(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function imapTransportOptions(local) {
-  const host = String(local && local.host || '').trim().toLowerCase();
-  const port = Number(local && local.port);
-  if (port === 993) return { secure: true };
-  const loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
-  return {
-    secure: false,
-    // The standard local Dovecot install advertises STARTTLS with a self-signed
-    // certificate. Loopback traffic never leaves the host, so keep it plain.
-    // A non-loopback server must successfully upgrade instead of leaking auth.
-    doSTARTTLS: loopback ? false : true,
-  };
-}
+const { imapTransportOptions } = require('./target-transport');
 
 function sanitizeMessageHtml(html, details = {}) {
   if (!html) return '';
@@ -292,6 +282,59 @@ function requireFolderAccess(folder, access) {
 
 function createMailRouter(dependencies = {}) {
   const router = express.Router();
+  const downloads = new Map();
+  let activeDownloads = 0;
+
+  async function downloadMessage(req, res, attachment) {
+    const owner = req.user?.id ?? req.sessionID ?? 'local';
+    let reserved = false;
+    try {
+      const folder = validateMailboxPath(req.query.folder);
+      requireFolderAccess(folder, mailAccessForRequest(req, dependencies));
+      const uid = Number(req.params.uid);
+      if (!/^[1-9]\d*$/.test(req.params.uid) || !Number.isSafeInteger(uid) || uid > 4294967295) throw mailError('邮件编号不合法');
+      if (attachment && !/^[1-9]\d*(?:\.[1-9]\d*)*$/.test(req.params.part)) throw mailError('附件编号不合法');
+      if (activeDownloads >= 4 || (downloads.get(owner) || 0) >= 2) throw mailError('下载任务较多，请稍后重试', 429);
+      activeDownloads++; downloads.set(owner, (downloads.get(owner) || 0) + 1); reserved = true;
+      await withClient(async (client) => {
+        let content;
+        const cancel = () => { if (!res.writableFinished) { content?.destroy(); client.close(); } };
+        res.once('close', cancel);
+        const timeout = setTimeout(() => { content?.destroy(mailError('下载超时', 504)); client.close(); }, 120000);
+        timeout.unref();
+        try {
+          const mailbox = await client.mailboxOpen(folder, { readOnly: true });
+          checkUidValidity(mailbox, req.query.uidValidity, true);
+          const metadata = await client.fetchOne(uid, { uid: true, size: true, envelope: true, bodyStructure: true }, { uid: true });
+          if (!metadata) throw mailError('邮件不存在或已被移除', 404);
+          const file = attachment ? attachmentParts(metadata.bodyStructure).find(item => item.part === req.params.part) : null;
+          if (attachment && !file) throw mailError('附件不存在', 404);
+          if (Number(attachment ? file.size : metadata.size) > MAX_DOWNLOAD_BYTES) throw mailError('下载超过100 MB上限', 413);
+          const download = await client.download(uid, attachment ? file.part : undefined, { uid: true, maxBytes: MAX_DOWNLOAD_BYTES + 1 });
+          if (!download?.content) throw mailError('下载内容不可用', 404);
+          content = download.content;
+          if (res.destroyed) { content.destroy(); return; }
+          const filename = attachment ? file.filename : `${safeFilename(metadata.envelope?.subject, 'message')}-${uid}.eml`;
+          res.attachment(filename);
+          res.set({ 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'" });
+          await pipeline(content, downloadLimiter(), res);
+        } finally { clearTimeout(timeout); res.removeListener('close', cancel); }
+      }, dependencies);
+    } catch (error) {
+      if (res.headersSent || res.destroyed) { if (!res.destroyed) res.destroy(error); }
+      else { const safe = publicMailError(error); res.status(safe.statusCode).json({ error: safe.message }); }
+    } finally {
+      if (reserved) {
+        activeDownloads--;
+        const remaining = downloads.get(owner) - 1;
+        if (remaining) downloads.set(owner, remaining); else downloads.delete(owner);
+      }
+    }
+  }
+
+  router.get('/messages/:uid/export', (req, res) => downloadMessage(req, res, false));
+  router.get('/messages/:uid/attachments/:part/download', (req, res) => downloadMessage(req, res, true));
 
   router.put('/seen-all', async (req, res) => {
     try {
@@ -340,7 +383,8 @@ function createMailRouter(dependencies = {}) {
         return res.status(400).json({ error: 'Invalid UID or seen state' });
       }
       const seen = await withClient(async (client) => {
-        await client.mailboxOpen(folder, { readOnly: false });
+        const mailbox = await client.mailboxOpen(folder, { readOnly: false });
+        checkUidValidity(mailbox, req.query.uidValidity);
         const message = await client.fetchOne(uid, { flags: true }, { uid: true });
         if (!message) { const error = new Error('邮件不存在或已被移除'); error.statusCode = 404; throw error; }
         const method = req.body.seen ? 'messageFlagsAdd' : 'messageFlagsRemove';
@@ -391,26 +435,40 @@ function createMailRouter(dependencies = {}) {
       requireFolderAccess(folder, mailAccessForRequest(req, dependencies));
       const page = parsePositiveInteger(req.query.page, 1);
       const pageSize = parsePositiveInteger(req.query.pageSize, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
+      const beforeUid = req.query.beforeUid === undefined ? null : parsePositiveInteger(req.query.beforeUid, null, 4294967295);
+      if (req.query.beforeUid !== undefined && beforeUid === null) return res.status(400).json({ error: '分页游标不合法' });
+      if (page > 1 && !beforeUid) return res.status(400).json({ error: '请刷新页面以使用稳定的邮件分页' });
+      const criteria = searchCriteria(req.query);
       const result = await withClient(async (client) => {
         const mailbox = await client.mailboxOpen(folder, { readOnly: true });
-        const total = Number(mailbox.exists || 0);
-        const range = calculateSequenceRange(total, page, pageSize);
-        const messages = range
+        const uidValidity = String(mailbox.uidValidity);
+        if (req.query.uidValidity !== undefined && req.query.uidValidity !== uidValidity) {
+          throw Object.assign(new Error('邮箱已重建，请刷新邮件列表'), { statusCode: 409 });
+        }
+        const uids = await client.search({ ...criteria, uid: '1:*' }, { uid: true });
+        const total = (uids || []).length;
+        const selected = (uids || []).filter((uid) => !beforeUid || uid < beforeUid).sort((a, b) => b - a);
+        const range = selected.slice(0, pageSize);
+        const messages = range.length
           ? await client.fetchAll(range, {
               uid: true,
               envelope: true,
               flags: true,
               internalDate: true,
               size: true,
-            })
+            }, { uid: true })
           : [];
         return {
           folder,
           page,
           pageSize,
           total,
+          mailboxTotal: Number(mailbox.exists || 0),
           totalPages: Math.max(1, Math.ceil(total / pageSize)),
-          messages: messages.reverse().map(serializeSummary),
+          uidValidity,
+          hasMore: selected.length > pageSize,
+          nextBeforeUid: range.length ? range[range.length - 1] : null,
+          messages: messages.sort((a, b) => b.uid - a.uid).map(serializeSummary),
         };
       }, dependencies);
       res.json(result);
@@ -431,13 +489,15 @@ function createMailRouter(dependencies = {}) {
         throw error;
       }
       const result = await withClient(async (client) => {
-        await client.mailboxOpen(folder, { readOnly: true });
+        const mailbox = await client.mailboxOpen(folder, { readOnly: true });
+        const uidValidity = checkUidValidity(mailbox, req.query.uidValidity);
         const metadata = await client.fetchOne(uid, {
           uid: true,
           envelope: true,
           flags: true,
           internalDate: true,
           size: true,
+          bodyStructure: true,
         }, { uid: true });
         if (!metadata) {
           const error = new Error('邮件不存在或已被移除');
@@ -445,9 +505,7 @@ function createMailRouter(dependencies = {}) {
           throw error;
         }
         if (Number(metadata.size || 0) > MAX_MESSAGE_BYTES) {
-          const error = new Error('这封邮件超过 10 MB，第一阶段暂不在网页中展开');
-          error.statusCode = 413;
-          throw error;
+          return { ...serializeSummary(metadata), uidValidity, bodyOmitted: true, text: '', html: '', attachments: attachmentParts(metadata.bodyStructure), remoteImageCount: 0 };
         }
         const full = await client.fetchOne(uid, { source: true }, { uid: true });
         if (!full || !full.source) {
@@ -466,7 +524,10 @@ function createMailRouter(dependencies = {}) {
         const parsed = await simpleParser(full.source, {
           maxHtmlLengthToParse: MAX_MESSAGE_BYTES,
         });
-        return serializeParsedMessage(metadata, parsed);
+        const result = serializeParsedMessage(metadata, parsed);
+        result.uidValidity = uidValidity;
+        if (metadata.bodyStructure) result.attachments = attachmentParts(metadata.bodyStructure);
+        return result;
       }, dependencies);
       res.json({ folder, message: result });
     } catch (error) {

@@ -143,11 +143,23 @@ cmd_reload() {
   fi
 }
 
+cmd_storage_status() {
+  validate_username "$1"
+  # Fixed Maildir layout managed by this installer; never accept a path.
+  MAIL_ROOT="/home/$1/Maildir"
+  [ -d "$MAIL_ROOT" ] || { echo 'Maildir not found' >&2; exit 1; }
+  SPACE=$(df -Pk "$MAIL_ROOT") || exit 1
+  INODES=$(df -Pi "$MAIL_ROOT") || exit 1
+  printf '%s\n' "$SPACE" | awk 'END {print $4}'
+  printf '%s\n' "$INODES" | awk 'END {print $4}'
+}
+
 case "$1" in
   get-hash) shift; cmd_get_hash "$1" ;;
   set-password) shift; cmd_set_password "$1" ;;
   restore-backup) cmd_restore_backup ;;
   reload) cmd_reload ;;
+  storage-status) shift; cmd_storage_status "$1" ;;
   *)
     echo "ERROR: unknown subcommand '$1'" >&2
     echo "usage: $0 {get-hash <user>|set-password <user>|restore-backup|reload}" >&2

@@ -1,1 +1,19 @@
-{"language":"Deutsch","translations":{"登录":"Anmelden","用户名":"Benutzername","密码":"Passwort","邮箱账号":"E-Mail-Konten","同步日志":"Synchronisierungsprotokolle","设置":"Einstellungen","系统信息":"Systeminformationen","退出登录":"Abmelden","系统状态":"Systemstatus","账号统计":"Kontostatistik","名称":"Name","状态":"Status","添加账号":"Konto hinzufügen","编辑账号":"Konto bearbeiten","保存":"Speichern","删除":"Löschen","编辑":"Bearbeiten","立即同步":"Jetzt synchronisieren","测试连接":"Verbindung testen","同步中":"Synchronisierung läuft","成功":"Erfolgreich","失败":"Fehlgeschlagen","排队中":"Warteschlange","已取消":"Abgebrochen","高级同步规则":"Erweiterte Synchronisierungsregeln","界面语言":"Oberflächensprache","语言":"Sprache","保存设置":"Einstellungen speichern","安全备份导出":"Sicheres Backup exportieren","Web 恢复中心":"Web-Wiederherstellungszentrum","上传并预检":"Hochladen und prüfen","执行安全恢复":"Sichere Wiederherstellung starten","服务控制":"Dienststeuerung","刷新":"Aktualisieren"}}
+{"language":"Deutsch","translations":{
+    "搜索范围：当前文件夹；日期按收取日期筛选。": "Suche im aktuellen Ordner nach Empfangsdatum.",
+    "邮箱地址或名称": "E-Mail-Adresse oder Name",
+    "主题": "Betreff",
+    "主题关键词": "Suchbegriffe im Betreff",
+    "开始日期": "Von Datum",
+    "结束日期": "Bis Datum",
+    "已读状态": "Lesestatus",
+    "全部": "Alle",
+    "未读": "Ungelesen",
+    "已读": "Gelesen",
+    "搜索邮件": "E-Mails suchen",
+    "清除筛选": "Filter zurücksetzen",
+    "导出原始邮件": "Original-E-Mail exportieren",
+    "下载附件": "Anhang herunterladen",
+    "没有符合条件的邮件": "Keine passenden Nachrichten",
+    "正文超过10 MB，暂不预览；可下载附件或导出原始邮件。": "Diese Nachricht ist größer als 10 MB. Anhänge herunterladen oder die Original-E-Mail exportieren.",
+    "单次下载上限100 MB；下载不会修改邮件已读状态。": "Maximal 100 MB pro Download; der Lesestatus bleibt unverändert.",
+    "正在下载…": "Wird heruntergeladen…","登录":"Anmelden","用户名":"Benutzername","密码":"Passwort","邮箱账号":"E-Mail-Konten","同步日志":"Synchronisierungsprotokolle","设置":"Einstellungen","系统信息":"Systeminformationen","退出登录":"Abmelden","系统状态":"Systemstatus","账号统计":"Kontostatistik","名称":"Name","状态":"Status","添加账号":"Konto hinzufügen","编辑账号":"Konto bearbeiten","保存":"Speichern","删除":"Löschen","编辑":"Bearbeiten","立即同步":"Jetzt synchronisieren","测试连接":"Verbindung testen","同步中":"Synchronisierung läuft","成功":"Erfolgreich","失败":"Fehlgeschlagen","排队中":"Warteschlange","已取消":"Abgebrochen","高级同步规则":"Erweiterte Synchronisierungsregeln","界面语言":"Oberflächensprache","语言":"Sprache","保存设置":"Einstellungen speichern","安全备份导出":"Sicheres Backup exportieren","Web 恢复中心":"Web-Wiederherstellungszentrum","上传并预检":"Hochladen und prüfen","执行安全恢复":"Sichere Wiederherstellung starten","服务控制":"Dienststeuerung","刷新":"Aktualisieren"}}

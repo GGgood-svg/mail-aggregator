@@ -23,6 +23,26 @@ function createDirs() {
   return { root, dirs };
 }
 
+test('backup excludes competing credential writes across its asynchronous snapshot boundary', async () => {
+  const { withStateLock } = require('../server/state-lock');
+  const { root, dirs } = createDirs();
+  let releaseSnapshot, bundle;
+  fs.writeFileSync(path.join(dirs.secrets, 'source.pass'), 'original');
+  try {
+    const pending = createBackupBundle({ db: { backup: destination => new Promise(resolve => {
+      fs.writeFileSync(destination, 'snapshot'); releaseSnapshot = resolve;
+    }) }, dirs, version: 'test', archiveRunner: async (stage, archive) => {
+      assert.equal(fs.readFileSync(path.join(stage, 'data/secrets/source.pass'), 'utf8'), 'original');
+      fs.writeFileSync(archive, 'fixture');
+    } });
+    assert.throws(() => withStateLock(root, () => fs.writeFileSync(path.join(dirs.secrets, 'source.pass'), 'changed')), { statusCode: 409 });
+    releaseSnapshot(); bundle = await pending;
+    withStateLock(root, () => fs.writeFileSync(path.join(dirs.secrets, 'source.pass'), 'after'));
+  } finally {
+    if (bundle) bundle.cleanup(); fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('backup filename is deterministic and filesystem-safe', () => {
   assert.equal(
     backupFilename(new Date('2026-09-02T03:04:05.000Z')),

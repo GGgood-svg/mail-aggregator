@@ -1,4 +1,3 @@
-const net = require('net');
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const { db } = require('./db');
@@ -30,66 +29,8 @@ function clearTargetPasswordOverrides(targetUser) {
   for (const account of accounts) fs.rmSync(targetPassPath(account.id), { force: true });
 }
 
-// IMAP quoted-string转义:反斜杠和双引号需要用反斜杠转义。
-// CR/LF不允许出现在quoted string里,这类输入应该在API层就被拒绝,
-// 这里只做协议层面的转义,不做输入校验。
-function imapQuote(str) {
-  return '"' + String(str).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
-}
-
-// 最小化的IMAP LOGIN探测:连上本地Dovecot,发LOGIN命令,看服务器是否返回OK。
-// 不使用doveadm auth test之类的工具,因为那类命令行工具的密码参数会出现在
-// 进程argv里(ps可见),这里用原始socket实现,密码只经过内存里的一次write()。
-// 这不是要重新实现imapsync/getmail那类完整IMAP客户端,只是本项目自己管理
-// 本地Dovecot账号时需要的一个几十行的"能不能登录"探测,和同步引擎无关。
-function imapLoginTest(host, port, username, password, timeoutMs = 8000) {
-  return new Promise((resolve) => {
-    const socket = new net.Socket();
-    let buffer = '';
-    let stage = 'greeting';
-    let done = false;
-
-    const finish = (ok) => {
-      if (done) return;
-      done = true;
-      try {
-        socket.destroy();
-      } catch (e) {
-        // ignore
-      }
-      resolve(ok);
-    };
-
-    socket.setTimeout(timeoutMs);
-    socket.on('timeout', () => finish(false));
-    socket.on('error', () => finish(false));
-
-    socket.on('data', (chunk) => {
-      buffer += chunk.toString('utf8');
-
-      if (stage === 'greeting') {
-        if (buffer.includes('\r\n')) {
-          stage = 'login';
-          buffer = '';
-          const cmd = `a1 LOGIN ${imapQuote(username)} ${imapQuote(password)}\r\n`;
-          socket.write(cmd);
-        }
-        return;
-      }
-
-      if (stage === 'login') {
-        if (/^a1 OK/im.test(buffer)) {
-          socket.write('a2 LOGOUT\r\n');
-          finish(true);
-        } else if (/^a1 (NO|BAD)/im.test(buffer)) {
-          finish(false);
-        }
-        // 否则可能还有更多untagged响应在路上,继续等
-      }
-    });
-
-    socket.connect(port, host);
-  });
+async function imapLoginTest(host, port, username, password, timeoutMs = 8000) {
+  return require('./target-transport').testTargetLogin({ host, port }, username, password, timeoutMs);
 }
 
 // 密码哈希生成逻辑单独抽到 ./doveadmHash.js,和 install.sh --full 调用的

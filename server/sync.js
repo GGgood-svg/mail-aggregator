@@ -19,7 +19,10 @@ const jobStore = require('./job-store');
 const maintenanceLock = require('./maintenance-lock');
 const { assertPublicImapHost, assertSecureAccountEndpoint } = require('./network-policy');
 const { getProvider } = require('./providers');
-const { diskCapacity } = require('./resource-limits');
+const { syncDiskCapacity } = require('./resource-limits');
+const { childEnvironment } = require('./child-environment');
+const { applyTargetTransport } = require('./target-transport');
+const { stateWritesBlocked } = require('./state-lock');
 
 // account_id -> true,表示该账号当前正在同步中(内存锁,和DB的status='running'保持一致,
 // 用于同一进程内的快速判断;真正防重复排队的兜底保证来自DB的部分唯一索引)
@@ -27,7 +30,9 @@ const runningLocks = new Map();
 // account_id -> { jobId, child, requestTermination }，只保存当前Node进程实际
 // 启动并持有的子进程。取消任务时不根据数据库里的PID盲目终止系统进程。
 const runningChildren = new Map();
-const connectionTests = new Set();
+const connectionTests = new Map();
+const preparingJobs = new Set();
+let queueFailed = false;
 
 function getSetting(key, fallback) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -46,14 +51,19 @@ function getAccount(accountId) {
 
 // 构建imapsync参数数组。密码使用passfile，OAuth访问令牌也只传权限600的
 // 文件路径，任何凭据都不会出现在进程命令行。
-function buildArgs(account, { justFolders = false } = {}) {
+function buildArgs(account, { justFolders = false, sourceAddress } = {}) {
+  if (account.destination_mode === 'flat') {
+    const owner = db.prepare('SELECT mail_access_all FROM admin_users WHERE id=?').get(account.owner_user_id);
+    if (account.mailbox_folder || !owner || !owner.mail_access_all) throw new Error('公共目录仅允许旧版主管理员账号使用');
+  }
+  if (!sourceAddress) throw new Error('缺少已校验的 IMAP 地址');
   const { localDovecot } = require('./config');
   const local = localDovecot();
   const localHost = local.host;
   const localPort = local.port;
 
   const args = [
-    '--host1', account.host,
+    '--host1', sourceAddress,
     '--port1', String(account.port),
     '--user1', account.username,
 
@@ -82,7 +92,7 @@ function buildArgs(account, { justFolders = false } = {}) {
     args.push('--justfolders');
   }
 
-  return args;
+  return applyTargetTransport(args, local);
 }
 
 function maxConcurrent() {
@@ -108,7 +118,7 @@ function currentRunningCount() {
 let shuttingDown = false;
 
 function isAccountLocked(accountId) {
-  return runningLocks.has(accountId);
+  return runningLocks.has(Number(accountId)) || connectionTests.has(Number(accountId));
 }
 
 function hasActiveJob(accountId) {
@@ -121,8 +131,14 @@ function accountHasCredential(account) {
     : hasSourceSecret(account.id);
 }
 
-function syncCapacityReason() {
-  const capacity = diskCapacity(db, DIRS.root);
+function storageCapacity(account = null) {
+  const local = require('./config').localDovecot();
+  if (account) local.user = account.local_user;
+  return syncDiskCapacity(db, DIRS, local);
+}
+
+function syncCapacityReason(account) {
+  const capacity = storageCapacity(account);
   if (capacity.ok) return null;
   return capacity.availableMb === null ? 'disk_check_failed' : 'low_disk';
 }
@@ -131,13 +147,29 @@ function syncCapacityReason() {
 // 循环填充可用并发名额,队首账号如果因为某种原因暂不可运行,跳过它继续检查
 // 下一个,而不是直接return导致整条队列被堵死。
 function drainQueue() {
-  if (shuttingDown || maintenanceLock.current() === 'restore') return;
+  try { drainQueueUnsafe(); }
+  catch (error) {
+    queueFailed = true;
+    console.error('[sync] 队列读取失败，已暂停启动新任务:', error.message);
+  }
+}
+
+function drainQueueUnsafe() {
+  if (shuttingDown || queueFailed || maintenanceLock.current() === 'restore' || stateWritesBlocked(DIRS.root)) return;
   let guard = 0; // 防御性上限,避免任何未预见的逻辑错误导致死循环
-  while (currentRunningCount() < maxConcurrent() && guard < 100) {
+  while (currentRunningCount() + connectionTests.size < maxConcurrent() && guard < 100) {
     guard++;
     const queued = jobStore.findNextQueuedJob(db);
     if (!queued) break;
-    runJob(queued);
+    const preparation = runJob(queued).catch((error) => {
+      queueFailed = true;
+      runningLocks.delete(Number(queued.account_id));
+      console.error('[sync] 队列准备失败，已暂停启动新任务:', error.message);
+      try { db.prepare("UPDATE sync_jobs SET status='failed',finished_at=datetime('now') WHERE id=?").run(queued.id); } catch (_) {}
+    });
+    preparingJobs.add(preparation);
+    preparation.finally(() => preparingJobs.delete(preparation));
+    if (!runningLocks.has(Number(queued.account_id))) break;
   }
 }
 
@@ -149,7 +181,7 @@ async function runJob(job) {
     ).run(job.id);
     return;
   }
-  const capacity = diskCapacity(db, DIRS.root);
+  const capacity = storageCapacity(account);
   if (!capacity.ok) {
     const detail = capacity.availableMb === null
       ? '无法检查服务器剩余磁盘空间'
@@ -201,7 +233,12 @@ async function runJob(job) {
 
   try {
     assertSecureAccountEndpoint(account, getProvider(account.provider));
-    await assertPublicImapHost(account.host);
+    const addresses = await assertPublicImapHost(account.host);
+    account.sourceAddress = addresses.find((item) => Number(item.family) === 4)?.address || addresses[0].address;
+    if (shuttingDown) {
+      completeOnce({ exitCode: -1, durationMs: Date.now() - startedAt, status: 'interrupted', message: '服务正在关闭', logFile });
+      return;
+    }
   } catch (error) {
     const message = `安全策略拒绝连接: ${error.message}`;
     logStream.write(`${message}\n`);
@@ -215,8 +252,9 @@ async function runJob(job) {
     return;
   }
 
-  const args = buildArgs(account, { justFolders: false });
-  const child = spawn('imapsync', args, { env: { PATH: process.env.PATH } });
+  try {
+  const args = buildArgs(account, { justFolders: false, sourceAddress: account.sourceAddress });
+  const child = spawn('imapsync', args, { env: childEnvironment(DIRS.root) });
   terminator = createProcessTerminator({ child, jobId: job.id });
   const requestTermination = (status, message) => terminator.request(status, message);
 
@@ -232,8 +270,7 @@ async function runJob(job) {
   });
   // 任务运行期间日志页也要能读取正在增长的文件，因此日志路径必须在启动时
   // 就持久化，不能等到 finishJob() 才写入。
-  db.prepare(`UPDATE sync_jobs SET pid=?, log_file=? WHERE id=?`)
-    .run(child.pid || null, logFile, job.id);
+  // Persist only after error/close handlers have been installed below.
 
   const timeoutMinutes = syncTimeoutMinutes();
   timeoutTimer = setTimeout(() => {
@@ -242,7 +279,7 @@ async function runJob(job) {
   timeoutTimer.unref();
 
   diskTimer = setInterval(() => {
-    const currentCapacity = diskCapacity(db, DIRS.root);
+    const currentCapacity = storageCapacity(account);
     if (currentCapacity.ok) return;
     const reason = currentCapacity.availableMb === null
       ? '运行中无法确认剩余磁盘空间，正在安全终止同步'
@@ -294,9 +331,34 @@ async function runJob(job) {
       summary,
     });
   });
+  db.prepare('UPDATE sync_jobs SET pid=?, log_file=? WHERE id=?').run(child.pid || null, logFile, job.id);
+  } catch (error) {
+    const control = runningChildren.get(account.id);
+    if (control) {
+      control.requestTermination('failed', '同步准备失败');
+      logStream.write('同步准备失败，请检查服务日志\n');
+      console.error('[sync] 同步准备失败:', error.message);
+    } else {
+      completeOnce({ exitCode: -1, durationMs: Date.now() - startedAt, status: 'failed', message: '同步准备失败，请检查目录权限与配置', logFile });
+    }
+  }
 }
 
-function finishJob(jobId, accountId, { exitCode, durationMs, status, message, logFile, summary }) {
+function finishJob(jobId, accountId, result) {
+  try { commitJob(jobId, accountId, result); }
+  catch (error) {
+    queueFailed = true;
+    console.error('[sync] 任务结果写入失败，已暂停队列:', error.message);
+  } finally {
+    runningLocks.delete(accountId);
+    const control = runningChildren.get(accountId);
+    runningChildren.delete(accountId);
+    if (control) control.resolveCompletion();
+    setImmediate(drainQueue);
+  }
+}
+
+function commitJob(jobId, accountId, { exitCode, durationMs, status, message, logFile, summary }) {
   const s = summary || {};
   db.prepare(
     `UPDATE sync_jobs SET
@@ -352,29 +414,25 @@ function finishJob(jobId, accountId, { exitCode, durationMs, status, message, lo
     accountId
   );
 
-  runningLocks.delete(accountId);
-  const control = runningChildren.get(accountId);
-  runningChildren.delete(accountId);
-  if (control) control.resolveCompletion();
   if (status === 'success') {
     db.prepare('DELETE FROM notification_events WHERE account_id=?').run(accountId);
   } else if (status === 'failed' || status === 'timed_out') {
     const account = getAccount(accountId);
-    if (account) notifySyncFailure(account, message, jobId);
+    if (account) notifySyncFailure(account, message, jobId).catch((error) => console.error('[notifications]', error.message));
   }
-  drainQueue();
 }
 
 // 供API/Scheduler调用:触发一次同步。
 // 如果该账号已经有 queued 或 running 的任务,直接拒绝,不再插入新记录。
 function triggerSync(accountId) {
-  if (maintenanceLock.current() === 'restore') return { ok: false, reason: 'maintenance' };
+  if (shuttingDown || queueFailed || maintenanceLock.current() === 'restore') return { ok: false, reason: 'maintenance' };
   const account = getAccount(accountId);
   if (!account) return { ok: false, reason: 'not_found' };
   if (!accountHasCredential(account)) return { ok: false, reason: 'missing_credentials' };
-  const capacityReason = syncCapacityReason();
+  const capacityReason = syncCapacityReason(account);
   if (capacityReason) return { ok: false, reason: capacityReason };
 
+  if (isAccountLocked(accountId)) return { ok: false, reason: 'already_running' };
   const result = jobStore.enqueueJob(db, accountId);
   if (result.ok) {
     drainQueue();
@@ -409,7 +467,7 @@ function cancelJob(jobId, accountId) {
 // v0.1.6: 对失败/中断/已取消的历史任务创建一个新的同步任务。
 // 不复用旧记录，保留完整审计轨迹；仍然通过账号级唯一索引防止重复排队。
 function retryJob(jobId, ownerUserId = null) {
-  if (maintenanceLock.current() === 'restore') return { ok: false, reason: 'maintenance' };
+  if (shuttingDown || queueFailed || maintenanceLock.current() === 'restore') return { ok: false, reason: 'maintenance' };
   const previous = ownerUserId === null
     ? db.prepare('SELECT account_id FROM sync_jobs WHERE id=?').get(jobId)
     : db.prepare(`SELECT j.account_id FROM sync_jobs j JOIN accounts a ON a.id=j.account_id
@@ -419,8 +477,9 @@ function retryJob(jobId, ownerUserId = null) {
   if (!account || !accountHasCredential(account)) {
     return { ok: false, reason: 'missing_credentials' };
   }
-  const capacityReason = syncCapacityReason();
+  const capacityReason = syncCapacityReason(account);
   if (capacityReason) return { ok: false, reason: capacityReason };
+  if (isAccountLocked(account.id)) return { ok: false, reason: 'already_running' };
   const result = jobStore.retryJob(db, jobId);
   if (result.ok) {
     drainQueue();
@@ -450,75 +509,63 @@ function cancelAllQueued(ownerUserId = null) {
 
 // ---- 连接测试:60秒后请求终止,错误分类,不做正式同步 ----
 async function testConnection(accountId) {
-  if (maintenanceLock.current() === 'restore') {
-    return { ok: false, category: 'maintenance', message: '系统正在恢复，请稍后再测试连接' };
+  accountId = Number(accountId);
+  if (shuttingDown || maintenanceLock.current() === 'restore' || stateWritesBlocked(DIRS.root)) return { ok: false, category: 'maintenance', message: '系统正在维护或关闭' };
+  if (isAccountLocked(accountId) || hasActiveJob(accountId) ||
+      currentRunningCount() + connectionTests.size >= maxConcurrent()) {
+    return { ok: false, category: 'busy', message: '已有同步或连接测试，请稍后再试' };
   }
   const account = getAccount(accountId);
   if (!account) return { ok: false, category: 'not_found', message: '账号不存在' };
-  if (!accountHasCredential(account)) {
-    return {
-      ok: false,
-      category: 'auth_failed',
-      message: account.auth_type === 'oauth2' ? 'OAuth2账号尚未授权' : '账号密码/授权码尚未保存',
-    };
-  }
+  if (!accountHasCredential(account)) return { ok: false, category: 'auth_failed', message: '账号尚未配置密码或完成授权' };
+  let cancelled = false, stopChild = null, resolveCompletion;
+  const completion = new Promise((resolve) => { resolveCompletion = resolve; });
+  connectionTests.set(accountId, {
+    completion,
+    requestTermination(status, message) { cancelled = true; if (stopChild) stopChild(status, message); },
+  });
   try {
     assertSecureAccountEndpoint(account, getProvider(account.provider));
-    await assertPublicImapHost(account.host);
-  } catch (error) {
-    return { ok: false, category: 'blocked_host', message: `安全策略拒绝连接: ${error.message}` };
-  }
-  return new Promise((resolve) => {
-    const args = buildArgs(account, { justFolders: true });
-    const testToken = Symbol(`connection-test-${account.id}`);
-    connectionTests.add(testToken);
-    const output = createOutputCollector();
-    let completed = false;
-    const child = spawn('imapsync', args, { env: { PATH: process.env.PATH } });
-    const terminator = createProcessTerminator({ child, jobId: `test-${accountId}` });
-
-    function completeOnce(result) {
-      if (completed) return;
-      completed = true;
-      connectionTests.delete(testToken);
-      clearTimeout(timeout);
-      terminator.complete();
-      resolve(result);
-    }
-
-    const timeout = setTimeout(() => {
-      terminator.request('timed_out', '连接测试超过60秒，正在终止 imapsync');
-    }, 60000);
-    timeout.unref();
-
-    child.stdout.on('data', (c) => output.push(c, 'stdout'));
-    child.stderr.on('data', (c) => output.push(c, 'stderr'));
-
-    child.on('error', (err) => {
-      completeOnce({
-        ok: false,
-        category: 'spawn_failed',
-        message: `无法启动 imapsync: ${err.message}`,
+    const addresses = await assertPublicImapHost(account.host);
+    if (cancelled || shuttingDown || maintenanceLock.current() === 'restore') return { ok: false, category: 'maintenance', message: '服务正在维护或关闭' };
+    const sourceAddress = addresses.find((item) => Number(item.family) === 4)?.address || addresses[0].address;
+    const args = buildArgs(account, { justFolders: true, sourceAddress });
+    return await new Promise((resolve) => {
+      const output = createOutputCollector();
+      let completed = false;
+      const child = spawn('imapsync', args, { env: childEnvironment(DIRS.root) });
+      const terminator = createProcessTerminator({ child, jobId: 'test-' + accountId });
+      stopChild = (status, message) => terminator.request(status, message);
+      const timeout = setTimeout(() => stopChild('timed_out', '连接测试超过60秒'), 60000);
+      timeout.unref();
+      function complete(result) {
+        if (completed) return;
+        completed = true;
+        clearTimeout(timeout);
+        terminator.complete();
+        resolve(result);
+      }
+      child.stdout.on('data', (c) => output.push(c, 'stdout'));
+      child.stderr.on('data', (c) => output.push(c, 'stderr'));
+      child.once('error', () => complete({ ok: false, category: 'spawn_failed', message: '无法启动 imapsync' }));
+      child.once('close', (code) => {
+        const { summary, tail } = output.finish();
+        const termination = terminator.getTermination();
+        if (code === 0 && !termination) complete({ ok: true, message: '连接成功', folders: summary.host1Folders, messages: summary.host1Messages });
+        else {
+          const failure = termination ? { category: termination.status, message: termination.message } : categorizeTestError(tail, false);
+          complete({ ok: false, ...failure });
+        }
       });
     });
-
-    child.on('close', (code) => {
-      const { summary, tail } = output.finish();
-      const termination = terminator.getTermination();
-      const timedOut = termination && termination.status === 'timed_out';
-      if (code === 0 && !timedOut) {
-        completeOnce({
-          ok: true,
-          message: '连接成功',
-          folders: summary.host1Folders,
-          messages: summary.host1Messages,
-        });
-      } else {
-        const { category, message } = categorizeTestError(tail, timedOut);
-        completeOnce({ ok: false, category, message });
-      }
-    });
-  });
+  } catch (error) {
+    console.error('[sync] 连接测试失败:', error.message);
+    return { ok: false, category: 'test_failed', message: '连接测试失败，请检查连接设置、目录权限与服务日志' };
+  } finally {
+    connectionTests.delete(accountId);
+    resolveCompletion();
+    setImmediate(drainQueue);
+  }
 }
 
 // ---- 应用启动恢复 ----
@@ -550,9 +597,12 @@ function reconcileAfterRestart() {
 }
 
 // 优雅关闭:尽量终止正在跑的子进程,避免留下孤儿进程
-function shutdownGracefully() {
+async function shutdownGracefully() {
   shuttingDown = true;
-  const controls = [...runningChildren.values()];
+  const tests = [...connectionTests.values()];
+  tests.forEach((control) => control.requestTermination('interrupted', '服务关闭，测试已中断'));
+  await Promise.all([...preparingJobs]);
+  const controls = [...runningChildren.values(), ...tests];
   for (const control of controls) {
     control.requestTermination('interrupted', '服务关闭，同步已中断');
   }

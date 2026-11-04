@@ -10,7 +10,7 @@
 // 本地明文LOGIN也可能因为这台机器上和本项目无关的其它 Dovecot 策略被拒绝,
 // 那种情况下 doveadm user 已经能确认 passdb/userdb 本身没问题了。
 
-const net = require('net');
+// Both installer and Web authentication probes enforce target TLS policy.
 
 const host = process.argv[2];
 const port = parseInt(process.argv[3], 10);
@@ -37,58 +37,15 @@ if (require.main === module) {
   });
 }
 
-function runCheck(password) {
-  const socket = net.createConnection({ host, port });
-  let buf = '';
-  let stage = 'greeting';
-
-  const timer = setTimeout(() => {
-    console.error('ERROR: timeout waiting for IMAP server response');
-    socket.destroy();
-    process.exit(1);
-  }, 8000);
-
-  const finish = (ok, message) => {
-    clearTimeout(timer);
-    if (ok) {
-      console.log('OK');
-      socket.end();
-      process.exit(0);
-    } else {
-      console.error(`ERROR: ${message}`);
-      socket.destroy();
-      process.exit(1);
-    }
-  };
-
-  socket.on('data', (data) => {
-    buf += data.toString('utf8');
-    if (!buf.includes('\r\n')) return;
-
-    if (stage === 'greeting') {
-      stage = 'login';
-      buf = '';
-      // Use IMAP quoted strings because --default-dovecot-password may contain
-      // whitespace, quotes, or backslashes even though generated passwords are hex.
-      socket.write(`a LOGIN ${imapQuote(username)} ${imapQuote(password)}\r\n`);
-      return;
-    }
-
-    if (stage === 'login') {
-      const lines = buf.split('\r\n').filter(Boolean);
-      const last = lines[lines.length - 1] || '';
-      if (/^a\s+OK/i.test(last)) {
-        finish(true);
-      } else if (/^a\s+(NO|BAD)/i.test(last)) {
-        finish(false, `IMAP LOGIN 被拒绝: ${last}`);
-      }
-      // 否则可能是多行响应的一部分,继续等待更多数据
-    }
-  });
-
-  socket.on('error', (err) => {
-    finish(false, `连接 ${host}:${port} 失败: ${err.message}`);
-  });
+async function runCheck(password) {
+  try {
+    imapQuote(username); imapQuote(password);
+    const ok = await require('./target-transport').testTargetLogin({ host, port }, username, password);
+    if (ok) console.log('OK');
+    else { console.error('ERROR: IMAP authentication failed'); process.exitCode = 1; }
+  } catch (_) {
+    console.error('ERROR: invalid credential or IMAP connection'); process.exitCode = 1;
+  }
 }
 
 function imapQuote(value) {

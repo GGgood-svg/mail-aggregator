@@ -27,7 +27,10 @@ npm test
 Linux 上额外执行：
 
 ```sh
-sh -n scripts/*.sh scripts/lib/*.sh scripts/platforms/*.sh
+for script in scripts/*.sh scripts/lib/*.sh scripts/platforms/*.sh scripts/mail-aggregator.openrc; do
+  sh -n "$script" || exit 1
+done
+npm run test:integration
 npm audit --omit=dev --audit-level=high
 ```
 
@@ -100,7 +103,7 @@ OAuth 必须在真实 HTTPS 域名和测试用 OAuth 客户端上验收：
 - 新账号只能使用隔离模式，实际 Dovecot 根目录使用系统生成的 `U<用户>-A<账号>` 名称
 - 手工请求 `INBOX`、其他用户根目录及其子目录时返回 404
 - 普通用户不能打开设置、系统信息、用户管理、备份恢复、服务控制和卸载
-- 停用用户后其现有会话立即失效；管理员重置密码后旧会话失效
+- 停用用户后其现有会话立即失效；用户本人修改密码后旧会话失效；管理员不能重置他人密码
 - 旧版账号全部归属首次管理员，原 Maildir 路径和邮件数量不变
 
 ## 4. 只读邮件浏览
@@ -112,7 +115,11 @@ OAuth 必须在真实 HTTPS 域名和测试用 OAuth 客户端上验收：
 - CID 内嵌图片显示正常
 - 远程图片初始不发起请求，手动允许后才加载
 - `<script>`、事件处理器、表单、iframe 和危险 URL 被移除
-- 附件只显示元数据，当前版本不应提供下载按钮
+- 当前文件夹按发件人、主题、收取日期和已读状态组合搜索；结束日期含当天，清除筛选后恢复列表
+- 筛选后翻页继续保留筛选条件，空结果有提示；切换文件夹重新开始分页
+- 中文、重复文件名、路径分隔符和控制字符附件下载安全；不能通过猜测 MIME 部分编号读取正文或其他用户目录
+- 原始 EML 导出与原文逐字节一致，下载不改变已读标记；邮箱 UIDVALIDITY 改变后旧下载链接返回 409
+- 超过 10 MB 的邮件仍可查看附件列表和导出；100 MB 下载上限、并发限制及取消下载释放资源均有效
 - 邮件量较大、日期损坏或正文异常时单封错误不会拖垮整个列表
 
 ## 5. Dovecot 密码

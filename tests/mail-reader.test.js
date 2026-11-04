@@ -194,6 +194,7 @@ test('read-only mail API exposes folders, newest-first list, and sanitized detai
           { uid: 11, envelope: { subject: 'Newest' }, flags: new Set(), size: 20 },
         ];
       },
+      async search() { return [10, 11]; },
       async fetchOne(uid, query) {
         if (query.source) {
           return { uid, source: Buffer.from('Subject: Safe\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>hello<script>bad()</script><img src="https://track.invalid/p"></p>') };
@@ -251,4 +252,33 @@ test('message detail rejects a body larger than the advertised IMAP size', async
   const response = await fetch(`http://127.0.0.1:${server.address().port}/api/mail/messages/1?folder=INBOX`);
   assert.equal(response.status, 413);
   assert.match((await response.json()).error, /10 MB/);
+});
+
+test('UID pagination remains stable across insertions and expunges and detects mailbox recreation', async (t) => {
+  let uids = [10, 20, 30, 40], validity = '7';
+  const app = express();
+  app.use('/api/mail', createMailRouter({ mailAccessForRequest: () => ({ all: true }), createClient: () => ({
+    async connect() {}, async logout() {},
+    async mailboxOpen() { return { exists: uids.length, uidValidity: validity }; },
+    async search(query, options) {
+      assert.equal(options.uid, true);
+      const end = query.uid.endsWith('*') ? Infinity : Number(query.uid.split(':')[1]);
+      return uids.filter(uid => uid <= end);
+    },
+    async fetchAll(range, fields, options) {
+      assert.equal(options.uid, true);
+      return range.map(uid => ({ uid, flags: new Set(), envelope: {} }));
+    },
+  }) }));
+  const server = http.createServer(app); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}/api/mail/messages?folder=INBOX&pageSize=2`;
+  const first = await fetch(base).then(res => res.json());
+  assert.deepEqual(first.messages.map(m => m.uid), [40, 30]);
+  uids = [10, 20, 40, 50]; // UID 30 expunged and UID 50 appended between pages.
+  const second = await fetch(`${base}&beforeUid=${first.nextBeforeUid}&uidValidity=7`).then(res => res.json());
+  assert.deepEqual(second.messages.map(m => m.uid), [20, 10]);
+  assert.equal(second.hasMore, false);
+  validity = '8';
+  assert.equal((await fetch(`${base}&beforeUid=30&uidValidity=7`)).status, 409);
 });

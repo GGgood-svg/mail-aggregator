@@ -1,13 +1,25 @@
 #!/usr/bin/env node
-const { db } = require('./db');
+const { db, DIRS } = require('./db');
+const { withStateLock } = require('./state-lock');
 const { ensureAccountOAuthToken } = require('./oauth-refresh');
 
 async function main() {
   const accountId = Number(process.argv[2]);
   if (!Number.isSafeInteger(accountId) || accountId < 1) throw new Error('OAuth2账号ID无效');
-  const account = db.prepare('SELECT * FROM accounts WHERE id=?').get(accountId);
-  if (!account) throw new Error('OAuth2账号不存在');
-  await ensureAccountOAuthToken(account);
+  const deadline = Date.now() + 30000;
+  while (true) {
+    try {
+      await withStateLock(DIRS.root, () => {
+        const account = db.prepare('SELECT * FROM accounts WHERE id=?').get(accountId);
+        if (!account) throw new Error('OAuth2账号不存在');
+        return ensureAccountOAuthToken(account);
+      });
+      break;
+    } catch (error) {
+      if (error.statusCode !== 409 || Date.now() >= deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
 }
 
 main().then(

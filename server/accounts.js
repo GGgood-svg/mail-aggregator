@@ -1,3 +1,4 @@
+const { stateRoute } = require('./state-lock');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -123,7 +124,7 @@ function restoreAccountConfiguration(account) {
     WHERE id=@id`).run(account);
 }
 
-router.post('/', (req, res) => {
+router.post('/', stateRoute((req, res) => {
   const { errors, normalized } = validatePayload(req.body || {}, { requireSecret: true });
   // 多用户共享同一个本地Dovecot时，flat会把不同用户的邮件混进公共根目录。
   // 新账号一律要求独立目标文件夹，旧版迁移账号仍可继续读取但不能新建flat。
@@ -190,9 +191,9 @@ router.post('/', (req, res) => {
       db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ? AND owner_user_id=?`).get(accountId, ownerId(req))
     )
   );
-});
+}));
 
-router.put('/:id', (req, res) => {
+router.put('/:id', stateRoute((req, res) => {
   const existing = ownedAccount(req, req.params.id);
   if (!existing) return res.status(404).json({ error: '账号不存在' });
 
@@ -205,6 +206,13 @@ router.put('/:id', (req, res) => {
     defaultDestinationFolder: existing.destination_folder,
     defaultSyncPolicy: existing,
   });
+  if (normalized.destination_mode === 'flat' &&
+      (existing.destination_mode !== 'flat' || existing.mailbox_folder || !req.user.mail_access_all)) {
+    errors.push('隔离账号不能切换到公共目录；仅允许主管理员保留已有旧版公共目录账号');
+  }
+  if (isAccountLocked(existing.id) || hasActiveJob(existing.id)) {
+    return res.status(409).json({ error: '账号正在同步、测试或排队中，请结束任务后再编辑' });
+  }
   if (req.user.role !== 'admin' && normalized.local_user !== existing.local_user) {
     errors.push('普通用户不能修改本地Dovecot目标用户');
   }
@@ -305,9 +313,9 @@ router.put('/:id', (req, res) => {
       db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ? AND owner_user_id=?`).get(req.params.id, ownerId(req))
     )
   );
-});
+}));
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', stateRoute((req, res) => {
   const existing = ownedAccount(req, req.params.id);
   if (!existing) return res.status(404).json({ error: '账号不存在' });
   if (isAccountLocked(existing.id) || hasActiveJob(existing.id)) {
@@ -327,16 +335,20 @@ router.delete('/:id', (req, res) => {
   // 永久保留目录归属，避免账号配置删除后遗留邮件被管理员兼容权限接管。
 
   res.json({ ok: true });
+}));
+
+// Do not hold the configuration lock while waiting for imapsync: OAuth refresh
+// is a child process which must acquire that same lock to update its tokens.
+router.post('/:id/test', async (req, res, next) => {
+  try {
+    const existing = ownedAccount(req, req.params.id);
+    if (!existing) return res.status(404).json({ error: '账号不存在' });
+    const result = await testConnection(req.params.id);
+    res.json(result);
+  } catch (error) { next(error); }
 });
 
-router.post('/:id/test', async (req, res) => {
-  const existing = ownedAccount(req, req.params.id);
-  if (!existing) return res.status(404).json({ error: '账号不存在' });
-  const result = await testConnection(req.params.id);
-  res.json(result);
-});
-
-router.post('/:id/sync', (req, res) => {
+router.post('/:id/sync', stateRoute((req, res) => {
   const existing = ownedAccount(req, req.params.id);
   if (!existing) return res.status(404).json({ error: '账号不存在' });
   const result = triggerSync(parseInt(req.params.id, 10));
@@ -356,7 +368,7 @@ router.post('/:id/sync', (req, res) => {
     return res.status(503).json({ error: '无法确认服务器剩余磁盘空间，已安全停止启动同步' });
   }
   res.json(result);
-});
+}));
 
 router.get('/:id/jobs', (req, res) => {
   if (!ownedAccount(req, req.params.id, 'id')) return res.status(404).json({ error: '账号不存在' });
@@ -368,7 +380,7 @@ router.get('/:id/jobs', (req, res) => {
   res.json(rows);
 });
 
-router.post('/:id/jobs/:jobId/cancel', (req, res) => {
+router.post('/:id/jobs/:jobId/cancel', stateRoute((req, res) => {
   if (!ownedAccount(req, req.params.id, 'id')) return res.status(404).json({ error: '账号不存在' });
   const result = cancelJob(req.params.jobId, req.params.id);
   if (!result.ok) {
@@ -382,7 +394,7 @@ router.post('/:id/jobs/:jobId/cancel', (req, res) => {
       .json({ error: messages[result.reason] || '任务无法取消' });
   }
   res.json(result);
-});
+}));
 
 router.get('/:id/jobs/:jobId/log', (req, res) => {
   const job = db

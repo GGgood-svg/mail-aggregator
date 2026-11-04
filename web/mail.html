@@ -22,6 +22,15 @@
       <button class="btn secondary" id="refresh-mail">刷新邮件</button>
     </div>
 
+    <form id="mail-search" class="mail-search">
+      <div class="hint mail-search-scope">搜索范围：当前文件夹；日期按收取日期筛选。</div>
+      <label>发件人<input name="from" type="search" maxlength="200" placeholder="邮箱地址或名称"></label>
+      <label>主题<input name="subject" type="search" maxlength="200" placeholder="主题关键词"></label>
+      <label>开始日期<input name="since" type="date"></label>
+      <label>结束日期<input name="until" type="date"></label>
+      <label>已读状态<select name="seen"><option value="all">全部</option><option value="unread">未读</option><option value="read">已读</option></select></label>
+      <div class="mail-search-actions"><button class="btn" type="submit">搜索邮件</button><button class="btn secondary" type="reset">清除筛选</button></div>
+    </form>
     <div class="mail-layout">
       <section class="mail-folders" aria-label="邮箱文件夹">
         <div class="mail-pane-title">邮箱文件夹</div>
@@ -50,6 +59,8 @@
           <header class="mail-message-header">
             <h2 id="reader-subject" data-i18n-skip></h2>
             <button class="btn secondary small" id="toggle-seen" type="button" data-i18n-skip></button>
+            <a class="btn secondary small" id="export-message" href="#" download>导出原始邮件</a>
+            <div class="hint">单次下载上限100 MB；下载不会修改邮件已读状态。</div>
             <dl class="mail-meta">
               <div><dt>发件人</dt><dd id="reader-from" data-i18n-skip></dd></div>
               <div><dt>收件人</dt><dd id="reader-to" data-i18n-skip></dd></div>
@@ -76,6 +87,8 @@
 const mailState = {
   folder: 'INBOX', page: 1, pageSize: 30, totalPages: 1,
   selectedUid: null, requestId: 0, collapsedGroups: new Set(), groupsInitialized: false,
+  cursors: [null], uidValidity: null, hasMore: false,
+  filters: {},
 };
 
 function t(source) {
@@ -212,6 +225,8 @@ function selectFolder(path) {
   if (path === mailState.folder) return;
   mailState.folder = path;
   mailState.page = 1;
+  mailState.cursors = [null];
+  mailState.uidValidity = null;
   mailState.selectedUid = null;
   document.querySelectorAll('.folder-item').forEach((item) => item.classList.toggle('active', item.dataset.folder === path));
   clearReader();
@@ -231,6 +246,8 @@ async function loadFolders() {
   }
   if (!data.folders.some((item) => item.path === mailState.folder)) {
     mailState.folder = data.folders[0].path;
+    mailState.page = 1; mailState.cursors = [null]; mailState.uidValidity = null;
+    mailState.selectedUid = null; clearReader();
   }
   const groups = groupFolders(data.folders, accounts);
   groups.sort((a, b) => {
@@ -282,8 +299,16 @@ async function loadMessages() {
   const list = document.getElementById('message-list');
   list.innerHTML = `<div class="mail-loading">${escapeHtml(t('正在加载…'))}</div>`;
   const query = new URLSearchParams({ folder: mailState.folder, page: mailState.page, pageSize: mailState.pageSize });
+  Object.entries(mailState.filters).forEach(([key, value]) => { if (value && value !== 'all') query.set(key, value); });
+  const beforeUid = mailState.cursors[mailState.page - 1];
+  if (beforeUid) query.set('beforeUid', beforeUid);
+  if (mailState.uidValidity) query.set('uidValidity', mailState.uidValidity);
   const data = await Api.get(`/api/mail/messages?${query}`);
   if (requestId !== mailState.requestId) return;
+  mailState.uidValidity = data.uidValidity;
+  mailState.hasMore = data.hasMore;
+  mailState.cursors.length = mailState.page;
+  mailState.cursors[mailState.page] = data.nextBeforeUid;
   const selected = data.messages.find((message) => message.uid === mailState.selectedUid);
   if (selected) { mailState.seen = selected.seen; updateSeenButton(); }
   mailState.totalPages = data.totalPages;
@@ -291,9 +316,10 @@ async function loadMessages() {
   document.getElementById('message-total').textContent = `${t('共')} ${data.total} ${t('封邮件')}`;
   document.getElementById('page-label').textContent = `${data.page} / ${data.totalPages}`;
   document.getElementById('previous-page').disabled = data.page <= 1;
-  document.getElementById('next-page').disabled = data.page >= data.totalPages;
+  document.getElementById('next-page').disabled = !data.hasMore;
   if (!data.messages.length) {
-    list.innerHTML = `<div class="mail-loading">${escapeHtml(t('这个文件夹还没有邮件'))}</div>`;
+    clearReader();
+    list.innerHTML = `<div class="mail-loading">${escapeHtml(t('没有符合条件的邮件'))}</div>`;
     return;
   }
   list.innerHTML = data.messages.map((message) => `
@@ -322,9 +348,12 @@ async function loadMessage(uid, markRead = false) {
   clearReader('正在加载邮件正文…');
   const folderAtRequest = mailState.folder;
   const query = new URLSearchParams({ folder: folderAtRequest });
+  if (mailState.uidValidity) query.set('uidValidity', mailState.uidValidity);
   const data = await Api.get(`/api/mail/messages/${uid}?${query}`);
   if (mailState.folder !== folderAtRequest || mailState.selectedUid !== uid) return;
   const message = data.message;
+  const fileQuery = new URLSearchParams({ folder: folderAtRequest, uidValidity: message.uidValidity });
+  document.getElementById('export-message').href = `/api/mail/messages/${uid}/export?${fileQuery}`;
   mailState.seen = message.seen;
   updateSeenButton();
   document.getElementById('reader-subject').textContent = message.subject;
@@ -340,7 +369,7 @@ async function loadMessage(uid, markRead = false) {
   if (message.attachments.length) {
     attachments.style.display = 'block';
     attachments.innerHTML = `<strong>${escapeHtml(t('附件'))} (${message.attachments.length})</strong>` + message.attachments.map((item) =>
-      `<span data-i18n-skip>📎 ${escapeHtml(item.filename)} · ${readableBytes(item.size)}</span>`
+      `<span data-i18n-skip>📎 ${escapeHtml(item.filename)} · ${readableBytes(item.size)} ${item.part ? `<a class="btn secondary small" href="/api/mail/messages/${uid}/attachments/${encodeURIComponent(item.part)}/download?${escapeHtml(fileQuery.toString())}" download>${escapeHtml(t('下载附件'))}</a>` : ''}</span>`
     ).join('');
   } else {
     attachments.style.display = 'none';
@@ -351,7 +380,7 @@ async function loadMessage(uid, markRead = false) {
   if (message.html) body.innerHTML = message.html;
   else {
     const pre = document.createElement('pre');
-    pre.textContent = message.text || t('这封邮件没有可显示的正文');
+    pre.textContent = message.bodyOmitted ? t('正文超过10 MB，暂不预览；可下载附件或导出原始邮件。') : message.text || t('这封邮件没有可显示的正文');
     body.replaceChildren(pre);
   }
   const imageControls = document.getElementById('reader-image-controls');
@@ -397,7 +426,9 @@ async function setSeen(seen, uid = mailState.selectedUid, folder = mailState.fol
   const button = document.getElementById('toggle-seen');
   button.disabled = true;
   try {
-    const result = await Api.put(`/api/mail/messages/${uid}/seen?${new URLSearchParams({ folder })}`, { seen });
+    const query = new URLSearchParams({ folder });
+    if (mailState.uidValidity) query.set('uidValidity', mailState.uidValidity);
+    const result = await Api.put(`/api/mail/messages/${uid}/seen?${query}`, { seen });
     if (mailState.folder === folder) {
       document.querySelectorAll('.message-item').forEach((item) => {
         if (Number(item.dataset.uid) === uid) item.classList.toggle('unread', !result.seen);
@@ -428,6 +459,31 @@ function showError(error) {
   toast(error.message, 'error');
 }
 
+document.querySelector('.mail-reader').addEventListener('click', async (event) => {
+  const link = event.target.closest('a[download]');
+  if (!link) return;
+  event.preventDefault();
+  if (link.dataset.busy === 'true') return;
+  link.dataset.busy = 'true';
+  link.setAttribute('aria-busy', 'true');
+  const label = link.textContent;
+  link.textContent = t('正在下载…');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 150000);
+  try {
+    const result = await Api.downloadGet(link.href, 'message', { signal: controller.signal });
+    const url = URL.createObjectURL(result.blob);
+    const save = document.createElement('a');
+    save.href = url; save.download = result.filename;
+    document.body.appendChild(save); save.click(); save.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (error) { showError(error); }
+  finally {
+    clearTimeout(timeout); delete link.dataset.busy;
+    link.removeAttribute('aria-busy'); link.textContent = label;
+  }
+});
+
 async function refreshAll() {
   try {
     const hasFolders = await loadFolders();
@@ -435,7 +491,22 @@ async function refreshAll() {
   } catch (error) { showError(error); }
 }
 
-document.getElementById('refresh-mail').addEventListener('click', refreshAll);
+function resetMailSearch() {
+  mailState.page = 1; mailState.cursors = [null]; mailState.uidValidity = null;
+  mailState.hasMore = false;
+  mailState.requestId++;
+  mailState.selectedUid = null; clearReader(); refreshAll();
+}
+document.getElementById('mail-search').addEventListener('submit', (event) => {
+  event.preventDefault();
+  mailState.filters = Object.fromEntries(new FormData(event.currentTarget));
+  resetMailSearch();
+});
+document.getElementById('mail-search').addEventListener('reset', () => {
+  mailState.filters = {};
+  resetMailSearch();
+});
+document.getElementById('refresh-mail').addEventListener('click', resetMailSearch);
 document.getElementById('folder-seen-all').addEventListener('click', () => markAllSeen(mailState.folder, [mailState.folder]));
 document.getElementById('toggle-seen').addEventListener('click', () => setSeen(!mailState.seen).catch(showError));
 document.getElementById('load-remote-images').addEventListener('click', loadRemoteImages);
@@ -443,7 +514,7 @@ document.getElementById('previous-page').addEventListener('click', () => {
   if (mailState.page > 1) { mailState.page -= 1; mailState.selectedUid = null; clearReader(); loadMessages().catch(showError); }
 });
 document.getElementById('next-page').addEventListener('click', () => {
-  if (mailState.page < mailState.totalPages) { mailState.page += 1; mailState.selectedUid = null; clearReader(); loadMessages().catch(showError); }
+  if (mailState.hasMore) { mailState.page += 1; mailState.selectedUid = null; clearReader(); loadMessages().catch(showError); }
 });
 
 (async function initializeMail() {

@@ -1,5 +1,7 @@
+const { stateRoute } = require('./state-lock');
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const { validNewPassword, passwordHelp } = require('./password-policy');
 const { db } = require('./db');
 
 const router = express.Router();
@@ -21,12 +23,12 @@ router.get('/', (req, res) => {
   })));
 });
 
-router.post('/', (req, res) => {
+router.post('/', stateRoute((req, res) => {
   const username = String(req.body?.username || '').normalize('NFKC').trim();
   const password = String(req.body?.password || '');
   const role = req.body?.role === 'admin' ? 'admin' : 'user';
   if (!USERNAME_RE.test(username)) return res.status(400).json({ error: '用户名需为2-64位字母、数字、中文或 _ . @ -' });
-  if (password.length < 10 || password.length > 256) return res.status(400).json({ error: '密码需为10-256位' });
+  if (!validNewPassword(password)) return res.status(400).json({ error: passwordHelp });
   if (role === 'admin' && !req.user.mail_access_all) {
     return res.status(403).json({ error: '仅主管理员可以创建其他管理员' });
   }
@@ -38,9 +40,9 @@ router.post('/', (req, res) => {
     if (String(error.code).includes('SQLITE_CONSTRAINT')) return res.status(409).json({ error: '用户名已存在' });
     throw error;
   }
-});
+}));
 
-router.put('/:id', (req, res) => {
+router.put('/:id', stateRoute((req, res) => {
   const id = Number(req.params.id);
   const user = db.prepare('SELECT * FROM admin_users WHERE id=?').get(id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
@@ -65,9 +67,9 @@ router.put('/:id', (req, res) => {
   db.prepare('UPDATE admin_users SET role=?,enabled=?,session_version=session_version+1 WHERE id=?')
     .run(role, enabled, id);
   res.json({ ok: true });
-});
+}));
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', stateRoute((req, res) => {
   const id = Number(req.params.id);
   if (id === Number(req.user.id)) return res.status(400).json({ error: '不能删除当前登录用户' });
   const user = db.prepare('SELECT * FROM admin_users WHERE id=?').get(id);
@@ -80,6 +82,6 @@ router.delete('/:id', (req, res) => {
   if (count) return res.status(409).json({ error: '该用户仍有邮箱账号，请先删除或迁移这些账号' });
   db.prepare('DELETE FROM admin_users WHERE id=?').run(id);
   res.json({ ok: true });
-});
+}));
 
 module.exports = router;

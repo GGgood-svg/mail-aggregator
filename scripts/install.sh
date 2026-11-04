@@ -250,7 +250,9 @@ echo "==> 3/9 自动安装可以自动装的部分(Node.js/npm/SQLite/imapsync)"
 TO_INSTALL=""
 [ "$NODE_OK" = "0" ] && TO_INSTALL="$TO_INSTALL nodejs"
 [ "$NPM_OK" = "0" ] && TO_INSTALL="$TO_INSTALL npm"
-[ "$SQLITE_OK" = "0" ] && TO_INSTALL="$TO_INSTALL sqlite"
+if [ "$SQLITE_OK" = "0" ]; then
+  if [ "$PLATFORM_ID" = "alpine" ]; then TO_INSTALL="$TO_INSTALL sqlite"; else TO_INSTALL="$TO_INSTALL sqlite3"; fi
+fi
 [ "$IMAPSYNC_OK" = "0" ] && TO_INSTALL="$TO_INSTALL imapsync"
 if [ "$PLATFORM_ID" = "alpine" ]; then
   TO_INSTALL="$TO_INSTALL build-base python3 sqlite-dev"
@@ -705,6 +707,7 @@ if command -v sudo >/dev/null 2>&1; then
     echo "${APP_USER} ALL=(root) NOPASSWD: ${HELPER_INSTALL_PATH} set-password *"
     echo "${APP_USER} ALL=(root) NOPASSWD: ${HELPER_INSTALL_PATH} restore-backup"
     echo "${APP_USER} ALL=(root) NOPASSWD: ${HELPER_INSTALL_PATH} reload"
+    echo "${APP_USER} ALL=(root) NOPASSWD: ${HELPER_INSTALL_PATH} storage-status *"
     echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} remove-app"
     echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} purge"
   } > "$SUDOERS_FILE"

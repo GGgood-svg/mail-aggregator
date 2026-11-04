@@ -1,3 +1,4 @@
+const { stateRoute } = require('./state-lock');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -52,7 +53,7 @@ function createRestoreRouter({
     safeCleanup(item.workDir);
   }
 
-  router.post('/inspect', async (req, res) => {
+  router.post('/inspect', stateRoute(async (req, res) => {
     if (!isSecureRequest(req)) {
       return res.status(400).json({ error: '远程恢复必须使用 HTTPS；HTTP 仅允许服务器本机访问' });
     }
@@ -109,9 +110,9 @@ function createRestoreRouter({
       console.error(`[restore] 预检失败: ${error.message}`);
       res.status(error.statusCode || 400).json({ error: error.message || '备份预检失败' });
     }
-  });
+  }));
 
-  router.post('/apply', async (req, res) => {
+  router.post('/apply', stateRoute(async (req, res) => {
     if (!isSecureRequest(req)) {
       return res.status(400).json({ error: '远程恢复必须使用 HTTPS；HTTP 仅允许服务器本机访问' });
     }
@@ -204,7 +205,7 @@ function createRestoreRouter({
       scheduler.start();
       maintenanceLock.release('restore');
     }
-  });
+  }));
 
   router.get('/snapshot/:id', (req, res) => {
     if (!isSecureRequest(req)) {

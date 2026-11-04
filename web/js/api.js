@@ -7,6 +7,17 @@ function setCsrfToken(token) {
   csrfToken = token || null;
 }
 
+function downloadFilename(disposition, fallback) {
+  const encoded = /filename\*=UTF-8''([^;\s]+)/i.exec(disposition || '');
+  if (encoded) {
+    try { return decodeURIComponent(encoded[1]); } catch (_) {}
+  }
+  const quoted = /filename="((?:\\.|[^"\\])*)"/i.exec(disposition || '');
+  if (quoted) return quoted[1].replace(/\\(.)/g, '$1');
+  const plain = /filename=([^;\s]+)/i.exec(disposition || '');
+  return plain ? plain[1] : fallback;
+}
+
 const Api = (() => {
   async function request(method, url, body) {
     const headers = {};
@@ -80,17 +91,16 @@ const Api = (() => {
       if (!res.ok) throw new Error(data.error || `上传失败 (${res.status})`);
       return data;
     },
-    downloadGet: async (url, fallbackFilename) => {
-      const res = await fetch(url, { credentials: 'same-origin' });
+    downloadGet: async (url, fallbackFilename, options = {}) => {
+      const res = await fetch(url, { credentials: 'same-origin', signal: options.signal });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `下载失败 (${res.status})`);
       }
       const disposition = res.headers.get('content-disposition') || '';
-      const match = disposition.match(/filename="?([^";]+)"?/i);
       return {
         blob: await res.blob(),
-        filename: match ? match[1] : fallbackFilename,
+        filename: downloadFilename(disposition, fallbackFilename),
         sha256: res.headers.get('X-Backup-SHA256') || '',
       };
     },

@@ -13,6 +13,7 @@ const {
   restoreApplicationState,
 } = require('./restore');
 const { version } = require('../package.json');
+const { withStateLock } = require('./state-lock');
 
 function readExpectedChecksum(checksumPath, archivePath) {
   if (!checksumPath) return null;
@@ -108,7 +109,7 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+Promise.resolve().then(() => withStateLock(DIRS.root, main)).catch((error) => {
   console.error(`恢复失败: ${error.message}`);
   if (error.rollbackError) console.error(`密钥回滚失败: ${error.rollbackError.message}`);
   if (error.recoveryDir) console.error(`为避免丢失旧密钥，故障现场已保留: ${error.recoveryDir}`);

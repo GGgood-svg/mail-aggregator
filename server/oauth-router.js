@@ -1,3 +1,4 @@
+const { stateRoute } = require('./state-lock');
 const express = require('express');
 const crypto = require('crypto');
 const { db } = require('./db');
@@ -36,13 +37,13 @@ router.get('/config', (req, res) => {
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-router.put('/config', (req, res) => {
+router.put('/config', stateRoute((req, res) => {
   if (req.user.role !== 'admin' || !req.user.mail_access_all) return res.status(403).json({ error: '仅主管理员可以修改OAuth2系统配置' });
   try { res.json({ ok: true, ...saveOAuthConfig(req.body || {}) }); }
   catch (error) { res.status(400).json({ error: error.message }); }
-});
+}));
 
-router.post('/accounts/:id/start', (req, res) => {
+router.post('/accounts/:id/start', stateRoute((req, res) => {
   const account = db.prepare('SELECT * FROM accounts WHERE id=? AND owner_user_id=?').get(req.params.id, req.user.id);
   if (!account) return res.status(404).json({ error: '账号不存在' });
   if (account.auth_type !== 'oauth2') return res.status(400).json({ error: '该账号未使用OAuth2' });
@@ -80,9 +81,9 @@ router.post('/accounts/:id/start', (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
-});
+}));
 
-router.get('/callback/:provider', async (req, res) => {
+router.get('/callback/:provider', stateRoute(async (req, res) => {
   const flow = req.session.oauthFlow;
   delete req.session.oauthFlow;
   if (!flow
@@ -123,6 +124,6 @@ router.get('/callback/:provider', async (req, res) => {
     console.error(`[oauth] 授权回调失败: ${String(error.message).replace(/[\r\n]/g, ' ').slice(0, 400)}`);
     redirect('error', error.message);
   }
-});
+}));
 
 module.exports = router;

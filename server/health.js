@@ -5,6 +5,7 @@ const { localDovecot } = require('./config');
 const { checkTcpPort } = require('./system');
 const { checkUserExists, checkMaildirExists, imapLoginTest } = require('./dovecot');
 const { hasGlobalLocalSecret, readGlobalLocalSecret } = require('./credentials');
+const { syncDiskCapacity } = require('./resource-limits');
 
 function commandExists(command) {
   return new Promise((resolve) => {
@@ -28,6 +29,7 @@ function diskAvailableMb() {
 
 async function getHealthReport() {
   const local = localDovecot();
+  const capacity = syncDiskCapacity(db, DIRS, local);
   const [node, imapsync, dovecotCommand, reachable, userExists, diskMb] = await Promise.all([
     commandExists('node'), commandExists('imapsync'), commandExists('dovecot'),
     checkTcpPort(local.host, local.port), checkUserExists(local.user), diskAvailableMb(),
@@ -40,7 +42,7 @@ async function getHealthReport() {
     { id: 'dovecot-user', label: `本地用户 (${local.user})`, ok: userExists, severity: 'critical', fix: '确认安装配置或重新初始化本地 Dovecot 用户。' },
     { id: 'maildir', label: 'Maildir', ok: checkMaildirExists(local.user), severity: 'critical', fix: '检查本地用户 home 目录和 Maildir 所有者。' },
     { id: 'local-credential', label: '本地目标凭据', ok: hasGlobalLocalSecret(), severity: 'critical', fix: '在设置页配置或修改本地 Dovecot 密码。' },
-    { id: 'disk', label: '可用磁盘空间', ok: diskMb === null || diskMb >= 512, severity: 'warning', detail: diskMb === null ? '未知' : `${diskMb} MB`, fix: '清理日志、缓存或扩容磁盘。' },
+    { id: 'disk', label: '应用与邮件存储空间', ok: capacity.ok, severity: 'warning', detail: capacity.availableMb === null ? '未知；同步已暂停' : `${capacity.availableMb} MB`, fix: '检查邮件盘、inode、helper 和磁盘安全余量。' },
   ];
 
   if (hasGlobalLocalSecret() && reachable) {

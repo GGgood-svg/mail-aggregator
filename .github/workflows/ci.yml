@@ -22,8 +22,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: npm run test:integration
       - name: Check shell syntax
-        run: sh -n scripts/*.sh scripts/lib/*.sh scripts/platforms/*.sh
+        run: |
+          for script in scripts/*.sh scripts/lib/*.sh scripts/platforms/*.sh scripts/mail-aggregator.openrc; do
+            sh -n "$script" || exit 1
+          done
 
   dependency-audit:
     runs-on: ubuntu-latest

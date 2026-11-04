@@ -1,3 +1,4 @@
+const { withStateLock } = require('./state-lock');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -89,7 +90,11 @@ function cleanupStaleBackupWorkdirs(tmpDir, nowMs = Date.now(), maxAgeMs = 24 * 
   return removed;
 }
 
-async function createBackupBundle({
+function createBackupBundle(options) {
+  return withStateLock(options.dirs.root || path.dirname(options.dirs.tmp), () => createBackupBundleUnlocked(options));
+}
+
+async function createBackupBundleUnlocked({
   db,
   dirs,
   version,

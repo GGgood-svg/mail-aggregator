@@ -1,6 +1,8 @@
+const { stateRoute } = require('./state-lock');
 const express = require('express');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
+const { validNewPassword, passwordHelp } = require('./password-policy');
 const { db } = require('./db');
 const { LoginRateLimiter, normalizedClientIp } = require('./login-rate-limit');
 
@@ -30,14 +32,14 @@ function issueSession(req, user, callback) {
 }
 
 // 首次启动:创建管理员账号
-router.post('/setup', (req, res) => {
+router.post('/setup', stateRoute((req, res) => {
   if (hasAdmin()) {
     return res.status(400).json({ error: '管理员账号已存在' });
   }
   const username = String(req.body?.username || '').normalize('NFKC').trim();
   const password = String(req.body?.password || '');
-  if (!USERNAME_RE.test(username) || password.length < 10 || password.length > 256) {
-    return res.status(400).json({ error: '用户名需为2-64位，密码需为10-256位' });
+  if (!USERNAME_RE.test(username) || !validNewPassword(password)) {
+    return res.status(400).json({ error: `用户名需为2-64位；${passwordHelp}` });
   }
   const hash = bcrypt.hashSync(password, 12);
   const info = db.prepare("INSERT INTO admin_users (username, password_hash, role, mail_access_all) VALUES (?, ?, 'admin', 1)").run(
@@ -48,13 +50,13 @@ router.post('/setup', (req, res) => {
     if (error) return res.status(500).json({ error: '创建登录会话失败，请重试' });
     res.json({ ok: true, csrfToken });
   });
-});
+}));
 
 router.get('/setup-status', (req, res) => {
   res.json({ needsSetup: !hasAdmin() });
 });
 
-router.post('/login', (req, res) => {
+router.post('/login', stateRoute((req, res) => {
   const username = String(req.body?.username || '').normalize('NFKC').trim();
   const ip = normalizedClientIp(req);
   if (!ip) {
@@ -86,16 +88,16 @@ router.post('/login', (req, res) => {
     if (error) return res.status(500).json({ error: '创建登录会话失败，请重试' });
     res.json({ ok: true, csrfToken });
   });
-});
+}));
 
-router.post('/logout', requireAuth, requireCsrf, (req, res) => {
+router.post('/logout', requireAuth, requireCsrf, stateRoute((req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
-});
+}));
 
-router.post('/change-password', requireAuth, requireCsrf, (req, res) => {
+router.post('/change-password', requireAuth, requireCsrf, stateRoute((req, res) => {
   const currentPassword = String(req.body?.currentPassword || '');
   const newPassword = String(req.body?.newPassword || '');
-  if (newPassword.length < 10 || newPassword.length > 256) return res.status(400).json({ error: '新密码需为10-256位' });
+  if (!validNewPassword(newPassword)) return res.status(400).json({ error: passwordHelp });
   const verification = verifyCurrentPassword(req, currentPassword);
   if (!verification.ok) return res.status(verification.status).json({ error: verification.error });
   const full = db.prepare('SELECT * FROM admin_users WHERE id=?').get(req.user.id);
@@ -106,7 +108,7 @@ router.post('/change-password', requireAuth, requireCsrf, (req, res) => {
     if (error) return res.status(500).json({ error: '密码已修改，但创建新会话失败，请重新登录' });
     res.json({ ok: true, csrfToken });
   });
-});
+}));
 
 router.get('/me', (req, res) => {
   const user = sessionUser(req);

@@ -75,6 +75,32 @@ function tempEnvironment() {
   return { root, currentPath, sourcePath, current, source, currentSecrets, backupSecrets, workDir };
 }
 
+integrationTest('restore retains deleted-account ownership and keeps unknown owners inaccessible', () => {
+  const env = tempEnvironment();
+  try {
+    for (const database of [env.current, env.source]) database.exec(`
+      ALTER TABLE admin_users ADD COLUMN mail_access_all INTEGER DEFAULT 0;
+      ALTER TABLE accounts ADD COLUMN owner_user_id INTEGER;
+      ALTER TABLE accounts ADD COLUMN mailbox_folder TEXT;
+      CREATE TABLE mailbox_ownership(local_user TEXT, mailbox_folder TEXT COLLATE NOCASE,
+        owner_user_id INTEGER, former_account_id INTEGER, PRIMARY KEY(local_user,mailbox_folder));
+    `);
+    env.current.exec("INSERT INTO admin_users VALUES(10,'primary','x',1),(20,'alice','x',0)");
+    env.source.exec("INSERT INTO admin_users VALUES(2,'alice','x',0)");
+    env.source.exec(`INSERT INTO mailbox_ownership VALUES
+      ('mailuser','U2-A7',2,7),('mailuser','Deleted-owner',99,9);
+      INSERT INTO accounts(id,name,username,local_user,destination_mode,destination_folder,owner_user_id,mailbox_folder)
+      VALUES(1,'active','alice@test','mailuser','subfolder','Active',2,'U2-A1');`);
+    restoreApplicationState({ Database: TestDatabase, currentDb: env.current, backupDbPath: env.sourcePath,
+      currentSecretsDir: env.currentSecrets, backupSecretsDir: env.backupSecrets, workDir: env.workDir });
+    assert.equal(env.current.prepare("SELECT owner_user_id FROM mailbox_ownership WHERE mailbox_folder='U2-A7'").get().owner_user_id, 20);
+    assert.equal(env.current.prepare("SELECT owner_user_id FROM mailbox_ownership WHERE mailbox_folder='U2-A1'").get().owner_user_id, 20);
+    assert.ok(env.current.prepare("SELECT owner_user_id FROM mailbox_ownership WHERE mailbox_folder='Deleted-owner'").get().owner_user_id < 0);
+  } finally {
+    env.current.close(); env.source.close(); fs.rmSync(env.root, { recursive: true, force: true });
+  }
+});
+
 integrationTest('restore database inspection verifies integrity and reports safe counts', () => {
   const env = tempEnvironment();
   try {

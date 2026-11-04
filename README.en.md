@@ -19,6 +19,8 @@ A lightweight, self-hosted mail aggregator. It synchronizes multiple remote IMAP
 - Opt-in destination mirroring with strict deletion safety rules
 - A built-in read-only mailbox backed by local Dovecot
 - Sanitized HTML mail, embedded CID images, and privacy-gated remote images
+- Search the current folder by sender, subject, received date and read status
+- Download attachments with Unicode filenames and export original `.eml` messages without changing read status
 - Health checks, failure notifications, verified backups, restore preflight, and snapshots
 - Simplified Chinese, English, Japanese, Korean, Spanish, French, and German UI
 
@@ -159,7 +161,8 @@ Report vulnerabilities privately as described in [SECURITY.md](./SECURITY.md). D
 
 ## Current limitations
 
-- The Web mailbox is read-only: no compose, reply, move, delete, or attachment download
+- The Web mailbox supports search, attachment downloads, original EML export and local read/unread changes; it cannot compose, reply, move or delete messages
+- Search is scoped to the current folder and the end date includes that day. Body preview is limited to 10 MB; larger messages still expose attachment actions. Downloads are limited to 100 MB, two concurrent files per user and four globally
 - Sources share one local Dovecot service account by default, but new accounts use unforgeable storage roots enforced by the Web API
 - Google and Microsoft OAuth behavior still depends on provider console and tenant configuration
 - Debian and Ubuntu installer support needs broader real-machine validation
