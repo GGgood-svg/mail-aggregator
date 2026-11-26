@@ -4,10 +4,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 const { spawnSync } = require('node:child_process');
 
 const { createBackupBundle, runTar } = require('../server/backup');
-const { normalizeEntryPath, verifyBackupArchive } = require('../server/backup-verifier');
+const { normalizeEntryPath, verifyBackupArchive, readTarInventory } = require('../server/backup-verifier');
 
 function tempRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mail-aggregator-verify-test-'));
@@ -63,6 +64,25 @@ test('verifier accepts a generated Web backup and its archive checksum', async (
   }
 });
 
+test('verifier still accepts an old backup listing a legacy notification destination', async () => {
+  const { root } = tempRoot();
+  try {
+    const stage = path.join(root, 'stage');
+    const files = Object.entries({ 'data/db/mail-aggregator.db':'synthetic snapshot',
+      'data/secrets/notification.json':JSON.stringify({ enabled:true, webhookUrl:'https://notify.invalid/legacy' }) });
+    for (const [name, value] of files) {
+      const file = path.join(stage, name);
+      fs.mkdirSync(path.dirname(file), { recursive:true });
+      fs.writeFileSync(file, value);
+    }
+    fs.writeFileSync(path.join(stage, 'manifest.json'), JSON.stringify({ formatVersion:1, application:'mail-aggregator',
+      applicationVersion:'0.1.6', files:files.map(([name,value]) => ({ path:name, size:Buffer.byteLength(value), sha256:digest(value) })) }));
+    const archive = path.join(root, 'legacy.tar.gz');
+    await runTar(stage, archive);
+    assert.equal((await verifyBackupArchive(archive)).fileCount, 2);
+  } finally { fs.rmSync(root, { recursive:true, force:true }); }
+});
+
 test('verifier rejects an archive whose payload does not match the manifest', async () => {
   const { root } = tempRoot();
   try {
@@ -100,4 +120,14 @@ test('verifier rejects archive content outside the Web-backup allowlist', async 
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('application backup byte guard counts trailing tar padding and handles source read failures', async () => {
+  const { root } = tempRoot();
+  try {
+    const archive = path.join(root, 'padding.tar.gz');
+    fs.writeFileSync(archive, zlib.gzipSync(Buffer.alloc(16384)));
+    await assert.rejects(readTarInventory(archive, { maxExpandedBytes: 4096 }), /体积超过安全上限/);
+    await assert.rejects(readTarInventory(path.join(root, 'missing.tar.gz')), /ENOENT/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

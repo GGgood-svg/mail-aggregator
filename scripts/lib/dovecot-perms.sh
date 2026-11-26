@@ -30,7 +30,11 @@ fix_users_permissions() {
 
   DOVECOT_INTERNAL_USER=""
   if command -v doveconf >/dev/null 2>&1; then
-    DOVECOT_INTERNAL_USER="$(doveconf default_internal_user 2>/dev/null | sed -n 's/^default_internal_user = //p')"
+    if [ -n "${2:-}" ]; then
+      DOVECOT_INTERNAL_USER="$(doveconf -c "$2" -h default_internal_user 2>/dev/null || true)"
+    else
+      DOVECOT_INTERNAL_USER="$(doveconf -h default_internal_user 2>/dev/null || true)"
+    fi
   fi
 
   DOVECOT_INTERNAL_GROUP=""

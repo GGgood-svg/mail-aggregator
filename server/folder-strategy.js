@@ -12,9 +12,16 @@ function isValidDestinationFolder(value) {
   return /^[\p{L}\p{N}][\p{L}\p{N} _-]{0,63}$/u.test(value);
 }
 
+function destinationRoot(account) {
+  return account.destination_mode === 'subfolder' ? account.mailbox_folder || account.destination_folder : null;
+}
+
 function applyDestinationStrategy(args, account) {
+  if (account.destination_mode === 'flat' && account.mailbox_folder) {
+    throw new Error('隔离账号不能写入公共目录');
+  }
   if (account.destination_mode === 'subfolder') {
-    args.push('--subfolder2', account.mailbox_folder || account.destination_folder);
+    args.push('--subfolder2', destinationRoot(account));
   }
   return args;
 }
@@ -24,4 +31,5 @@ module.exports = {
   normalizeDestinationFolder,
   isValidDestinationFolder,
   applyDestinationStrategy,
+  destinationRoot,
 };

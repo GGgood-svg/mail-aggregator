@@ -1,7 +1,17 @@
 # Changelog
 
-## Unreleased
+## v0.2.0
 
+- Add a temporary HTTPS setup wizard for supported fresh Linux installations. It selects a LAN address automatically when there is a single choice and can enable the matching Alpine community repository for required packages. The administrator set in the wizard can sign in as soon as installation completes.
+- Listen on `0.0.0.0:8080` by default on fresh installations for trusted LAN access, including app-only installs. Keep existing Web access settings on upgrade and offer `--local-http` for loopback access.
+- Add GitHub application update checks and an opt-in preview channel. For this release, install manually; automatic installation of future signed Alpine 3.24 packages requires separate host enablement and release verification.
+- Preserve the old application and a verified SQLite snapshot until the new service passes readiness; recover an interrupted cutover and block repeats of a failed release.
+- Serialize application switch, backup restore and uninstall in the installed maintenance paths; run CLI restore as the service user so Web can read its restore points.
+- Settle sync jobs, account status, and notification intents together, and distinguish an unconfirmed interruption from a confirmed result. Report capacity barriers and retry times, including independent log volumes. Allow the primary administrator to set different queue limits for built-in mail providers.
+- Probe both IMAP endpoints without changing folders or subscriptions, preview sync effects, and let unrelated accounts progress during OAuth refresh. If a full folder list times out or exceeds its limit, inspect a selected source range without treating it as a complete preview.
+- Continue bounded searches and rule previews without losing their place, and move keyboard focus to the next useful control after a search retry. Add attachment filtering, private labels, mobile navigation, and optional read-only previews after successful sync.
+- Pair application and Maildir backups, inspect verified pairing reports in the browser, and rehearse a single-account recovery in an isolated mailbox.
+- Add read-only operations, capacity trends, device revocation, administrator two-factor sign-in, and optional notifications for committed restore and update outcomes. Filter audit history by operation ID to follow a request through completion or rollback. Webhooks with unknown delivery are only retried when the endpoint is confirmed to deduplicate event IDs.
 - Scope login throttling by normalized client address and username, enforce a real failure window, and reject reverse-proxy login traffic that omits the configured forwarded client address.
 - Apply the same bounded password-attempt policy to authenticated password changes, backup exports, restores, and uninstall confirmations.
 - Bound imapsync output retained in memory and cap each task log (configurable, 16 MB by default) while preserving its beginning, diagnostic tail, and complete streamed counters.

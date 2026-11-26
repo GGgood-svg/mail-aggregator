@@ -76,3 +76,18 @@ test('failure windows expire and successful login clears only its scoped key', (
   assert.equal(limiter.check('203.0.113.8', 'alice'), 0);
   db.close();
 });
+
+test('in-flight password attempts count against username and IP limits and release exactly once', () => {
+  const { limiter } = fixture();
+  const reservations = Array.from({ length: 5 }, () => limiter.reserve('203.0.113.8', 'alice'));
+  assert.ok(reservations.every(item => !item.lockedUntil));
+  assert.ok(limiter.reserve('203.0.113.8', 'alice').lockedUntil);
+  reservations[0].release(); reservations[0].release();
+  const replacement = limiter.reserve('203.0.113.8', 'alice');
+  assert.equal(replacement.lockedUntil, 0);
+  reservations.slice(1).forEach(item => item.release()); replacement.release();
+  const many = Array.from({ length: 50 }, (_, i) => limiter.reserve('203.0.113.8', `user-${i}`));
+  assert.ok(limiter.reserve('203.0.113.8', 'new-user').lockedUntil);
+  many.forEach(item => item.release());
+  assert.equal(limiter.pending.size, 0);
+});

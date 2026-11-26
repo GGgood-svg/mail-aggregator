@@ -1,112 +1,278 @@
+const { stateRoute, asyncRoute, withStateLock } = require('./state-lock');
 const express = require('express');
 const crypto = require('crypto');
-const bcrypt = require('bcryptjs');
-const { db } = require('./db');
+const { passwordHasher } = require('./password-hasher');
+const { validNewPassword, passwordHelp } = require('./password-policy');
+const { createAdminSetup } = require('./admin-setup');
+const { db, DIRS } = require('./db');
 const { LoginRateLimiter, normalizedClientIp } = require('./login-rate-limit');
+const { createTotpSecurity, fault } = require('./totp-security');
+const { isLoopbackAddress } = require('./http-security');
 
 const router = express.Router();
 
-const USERNAME_RE = /^[\p{L}\p{N}_.@-]{2,64}$/u;
 // Run the same bcrypt cost for an unknown username so response timing does not
 // become a reliable account-enumeration signal.
 const DUMMY_PASSWORD_HASH = '$2a$12$gZSyu4KDMYsuziMP/Fyqu.o3b82jWsYs7hZjMD3f8O1KXckvzqjji';
 const loginLimiter = new LoginRateLimiter(db);
+const totp = createTotpSecurity(DIRS.root);
+const locked = (work, options) => withStateLock(DIRS.root, work, options);
+const adminSetup = createAdminSetup({ db, root: DIRS.root, hasher: passwordHasher });
 
-function hasAdmin() {
-  const row = db.prepare('SELECT COUNT(*) c FROM admin_users').get();
-  return row.c > 0;
+function sameUser(before, after) {
+  return Boolean(after && after.enabled && Number(before.id) === Number(after.id)
+    && Number(before.session_version || 0) === Number(after.session_version || 0)
+    && (before.username === undefined || before.username === after.username)
+    && (before.role === undefined || before.role === after.role)
+    && (before.mail_access_all === undefined || Number(before.mail_access_all) === Number(after.mail_access_all))
+    && (before.password_hash === undefined || before.password_hash === after.password_hash));
 }
 
-function issueSession(req, user, callback) {
+function assertCurrentUser(req, snapshot = null, role = null) {
+  const user = sessionUser(req);
+  if (user && req.sessionID) {
+    const row = db.prepare('SELECT sess,expires FROM sessions WHERE sid=?').get(req.sessionID);
+    let stored = null;
+    try { stored = row && row.expires > Date.now() ? JSON.parse(row.sess) : null; } catch (_) {}
+    const sameOwner = stored && (typeof stored.userId === 'number' ? stored.userId === Number(user.id) : stored.userId === user.username);
+    if (!sameOwner || Number(stored.sessionVersion || 0) !== Number(user.session_version || 0)) {
+      // Logout/session regeneration in a different request may have removed this
+      // session while work was pending. Do not let response-time touch revive it.
+      req.session = null;
+      throw Object.assign(new Error('登录会话已失效，请重新登录'), { statusCode: 401 });
+    }
+  }
+  if (!user || (snapshot && !sameUser(snapshot, db.prepare('SELECT * FROM admin_users WHERE id=?').get(user.id)))) {
+    throw Object.assign(new Error('登录状态或密码已变更，请重新登录'), { statusCode: 401 });
+  }
+  if ((role === 'admin' && user.role !== 'admin')
+      || (role === 'primary' && !(user.role === 'admin' && user.mail_access_all))) {
+    throw Object.assign(new Error('当前账号无权执行此操作'), { statusCode: 403 });
+  }
+  req.user = user;
+  return user;
+}
+
+function rateLimitResult(lockedUntil, label = '登录') {
+  const seconds = Math.max(1, Math.ceil((lockedUntil - Date.now()) / 1000));
+  return { ok: false, status: 429, error: `${label}失败次数过多或验证正在进行，请在 ${seconds} 秒后重试` };
+}
+
+function issueSession(req, user, callback, validate = () => {}, verifiedTotp = undefined) {
   // Rotate the session identifier after authentication so an identifier that
   // existed before login cannot be fixed and reused by another party.
   req.session.regenerate((error) => {
     if (error) return callback(error);
+    let factor;
+    try {
+      const current = db.prepare('SELECT * FROM admin_users WHERE id=?').get(user.id);
+      if (!sameUser(user, current)) throw Object.assign(new Error('登录状态已变更，请重试'), { statusCode: 401 });
+      factor = totp.status(current);
+      if ((factor.enabled || verifiedTotp !== undefined) && factor.generation !== verifiedTotp) throw fault('totp_login_expired', 401);
+      validate();
+    } catch (failure) { return callback(failure); }
     req.session.userId = Number(user.id);
     req.session.sessionVersion = Number(user.session_version || 0);
+    const agent = String(req.get?.('user-agent') || '').slice(0, 512);
+    if (factor.generation) req.session.totpGeneration = factor.generation;
+    req.session.deviceFamily = /Edg(?:e|A|iOS)?[/]/i.test(agent) ? 'Edge' : /(?:Firefox|FxiOS)[/]/i.test(agent) ? 'Firefox'
+      : /(?:Chrome|CriOS)[/]/i.test(agent) ? 'Chrome' : /Safari[/]/i.test(agent) ? 'Safari' : 'Other';
     req.session.csrfToken = crypto.randomBytes(24).toString('hex');
     callback(null, req.session.csrfToken);
   });
 }
 
 // 首次启动:创建管理员账号
-router.post('/setup', (req, res) => {
-  if (hasAdmin()) {
-    return res.status(400).json({ error: '管理员账号已存在' });
-  }
-  const username = String(req.body?.username || '').normalize('NFKC').trim();
-  const password = String(req.body?.password || '');
-  if (!USERNAME_RE.test(username) || password.length < 10 || password.length > 256) {
-    return res.status(400).json({ error: '用户名需为2-64位，密码需为10-256位' });
-  }
-  const hash = bcrypt.hashSync(password, 12);
-  const info = db.prepare("INSERT INTO admin_users (username, password_hash, role, mail_access_all) VALUES (?, ?, 'admin', 1)").run(
-    username,
-    hash
-  );
+router.post('/setup', asyncRoute(async (req, res) => {
+  const info = await adminSetup.create({
+    username: String(req.body?.username || ''),
+    password: String(req.body?.password || ''),
+  });
   issueSession(req, { id: info.lastInsertRowid, session_version: 0 }, (error, csrfToken) => {
     if (error) return res.status(500).json({ error: '创建登录会话失败，请重试' });
     res.json({ ok: true, csrfToken });
   });
-});
+}));
 
 router.get('/setup-status', (req, res) => {
-  res.json({ needsSetup: !hasAdmin() });
+  res.json({ needsSetup: !adminSetup.hasAdmin() });
 });
 
-router.post('/login', (req, res) => {
+router.post('/login', asyncRoute(async (req, res) => {
   const username = String(req.body?.username || '').normalize('NFKC').trim();
   const ip = normalizedClientIp(req);
   if (!ip) {
-    return res.status(503).json({ error: 'HTTPS反向代理未传递客户端地址，请配置 X-Forwarded-For' });
+    return res.status(503).json({ error: '请通过配置好的 HTTPS 反向代理访问，代理须传递客户端地址（X-Forwarded-For）。' });
   }
 
-  const lockedUntil = loginLimiter.check(ip, username);
-  if (lockedUntil) {
-    const remainingSec = Math.ceil((lockedUntil - Date.now()) / 1000);
-    return res.status(429).json({
-      error: `登录失败次数过多,请在 ${remainingSec} 秒后重试`,
+  const reservation = locked(() => loginLimiter.reserve(ip, username));
+  if (reservation.lockedUntil) return res.status(429).json({ error: rateLimitResult(reservation.lockedUntil).error });
+  try {
+    const password = String(req.body?.password || '');
+    const user = db.prepare('SELECT * FROM admin_users WHERE username = ? AND enabled = 1').get(username);
+    const passwordMatches = password.length <= 256
+      ? await passwordHasher.compare(password, user ? user.password_hash : DUMMY_PASSWORD_HASH)
+      : false;
+    const verification = locked(() => {
+      const lockedUntil = loginLimiter.check(ip, username);
+      if (lockedUntil) return rateLimitResult(lockedUntil);
+      const current = user && db.prepare('SELECT * FROM admin_users WHERE id=?').get(user.id);
+      if (!passwordMatches || !user || !sameUser(user, current)) {
+        loginLimiter.failure(ip, username);
+        return { ok: false, status: 401, error: '用户名或密码错误' };
+      }
+      loginLimiter.success(ip, username);
+      return { ok: true };
     });
-  }
+    if (!verification.ok) return res.status(verification.status).json({ error: verification.error, code: verification.code });
+    let factor;
+    try { factor = totp.status(user); } catch (error) { return sendTotpError(res, error); }
+    if (factor.enabled) {
+      if (!protectedTotpTransport(req)) return res.status(403).json({ error: 'totp_secure_transport', code: 'totp_secure_transport' });
+      return await new Promise((resolve, reject) => req.session.regenerate(error => {
+        if (error) return reject(error);
+        try {
+          locked(() => {
+            const current = db.prepare('SELECT * FROM admin_users WHERE id=?').get(user.id);
+            if (!sameUser(user, current)) throw fault('totp_login_expired', 401);
+            totp.beginLogin(current, req.sessionID, ip);
+          });
+          // This CSRF token binds step two to the same anonymous browser session.
+          req.session.csrfToken = crypto.randomBytes(24).toString('hex');
+          res.set('Cache-Control', 'no-store').status(202).json({ requiresTotp: true, csrfToken: req.session.csrfToken });
+          resolve();
+        } catch (failure) { reject(failure); }
+      })).catch(error => sendTotpError(res, error));
+    }
+    issueSession(req, user, (error, csrfToken) => {
+      if (error) return res.status(error.statusCode || 500).json({ error: '创建登录会话失败，请重试' });
+      res.json({ ok: true, csrfToken });
+    }, () => {
+      const until = loginLimiter.check(ip, username);
+      if (until) throw Object.assign(new Error('登录已被限速，请稍后重试'), { statusCode: 429 });
+    });
+  } finally { reservation.release(); }
+}));
 
-  const password = String(req.body?.password || '');
-  const user = db.prepare('SELECT * FROM admin_users WHERE username = ? AND enabled = 1').get(username);
-  const passwordMatches = password.length <= 256
-    ? bcrypt.compareSync(password, user ? user.password_hash : DUMMY_PASSWORD_HASH)
-    : false;
-  const ok = Boolean(user && passwordMatches);
+function protectedTotpTransport(req) {
+  if (req.secure) return true;
+  if (!isLoopbackAddress(req.socket?.remoteAddress) || ['Forwarded', 'Via', 'X-Forwarded-For', 'X-Forwarded-Host', 'X-Forwarded-Proto', 'X-Real-IP'].some(header => req.get(header))) return false;
+  try {
+    const hostname = new URL(`http://${req.get('Host')}`).hostname.replace(/^\[|\]$/g, '');
+    return hostname === 'localhost' || isLoopbackAddress(hostname);
+  } catch (_) { return false; }
+}
+function requireTotpTransport(req, res, next) {
+  res.set('Cache-Control', 'no-store');
+  if (!protectedTotpTransport(req)) return res.status(403).json({ error: 'totp_secure_transport', code: 'totp_secure_transport' });
+  next();
+}
+function sendTotpError(res, error) {
+  if (!/^totp_[a-z_]+$/.test(error?.code || '')) throw error;
+  res.status(error.statusCode || 409).json({ error: error.code, code: error.code });
+}
 
-  if (!ok) {
-    loginLimiter.failure(ip, username);
-    return res.status(401).json({ error: '用户名或密码错误' });
-  }
+router.post('/login/totp', requireTotpTransport, requireCsrf, asyncRoute(async (req, res) => {
+  try {
+    const ip = normalizedClientIp(req);
+    const { user, generation } = locked(() => {
+      const candidate = ip && totp.pending(req.sessionID, ip);
+      const user = candidate && db.prepare('SELECT * FROM admin_users WHERE id=? AND enabled=1').get(candidate.id);
+      if (!user) throw fault('totp_login_expired', 401);
+      const generation = totp.finishLogin(user, req.sessionID, ip, req.body?.code);
+      return { user, generation };
+    });
+    issueSession(req, user, (error, csrfToken) => {
+      if (error) return res.status(error.statusCode || 500).json({ error: 'totp_login_expired', code: 'totp_login_expired' });
+      res.json({ ok: true, csrfToken });
+    }, undefined, generation);
+  } catch (error) { return sendTotpError(res, error); }
+}));
 
-  loginLimiter.success(ip, username);
-  issueSession(req, user, (error, csrfToken) => {
-    if (error) return res.status(500).json({ error: '创建登录会话失败，请重试' });
-    res.json({ ok: true, csrfToken });
+router.get('/totp', requireOwnSecurity, requirePrimaryAdmin, asyncRoute(async (req, res) => {
+  try {
+    const { enabled, remainingCodes } = totp.status(assertCurrentUser(req, null, 'primary'));
+    res.set('Cache-Control', 'no-store').json({ enabled, remainingCodes, secure: protectedTotpTransport(req) });
+  } catch (error) { return sendTotpError(res, error); }
+}));
+for (const operation of ['begin', 'enable', 'recovery-codes', 'disable']) {
+  router.post(`/totp/${operation}`, requireOwnSecurity, requirePrimaryAdmin, requireTotpTransport, requireCsrf, asyncRoute(async (req, res) => {
+    try {
+      const verification = await verifyCurrentPassword(req, req.body?.currentPassword);
+      if (!verification.ok) return res.status(verification.status).json({ error: verification.error, code: verification.code });
+      const result = locked(() => {
+        const user = assertCurrentUser(req, verification.user, 'primary');
+        if (operation === 'begin') return totp.begin(user, req.sessionID);
+        const changed = operation === 'enable'
+          ? totp.enable(user, req.sessionID, req.body?.code)
+          : totp.change(user, req.body?.code, operation === 'disable');
+        return { user, ...changed };
+      });
+      if (operation === 'begin') {
+        const { totpQr } = require('./totp-qr');
+        return res.json({ ...result, qr: totpQr(result.uri) });
+      }
+      // Clear old device entries before the new generation can log in.
+      // Generation checks still invalidate them if this cleanup fails.
+      try { req.sessionStore?.revokeOtherDevices?.(result.user.id, result.user.session_version, req.sessionID, result.user.username); }
+      catch (_) { /* Invalid generations cannot authenticate. */ }
+      issueSession(req, result.user, (error, csrfToken) => {
+        res.json({ ok: true, codes: result.codes, csrfToken: csrfToken || null, loginRequired: Boolean(error) });
+      }, undefined, result.generation);
+    } catch (error) { return sendTotpError(res, error); }
+  }));
+}
+
+// Session revocation has its own SQLite transaction and must remain available
+// even during a configuration snapshot or maintenance operation.
+router.post('/logout', requireOwnSecurity, requireCsrf, (req, res) => {
+  const { secure, httpOnly, sameSite, path } = req.session.cookie;
+  req.session.destroy((error) => {
+    if (error) return res.status(503).json({ error: '未能撤销当前会话，请稍后重试退出。' });
+    res.clearCookie('connect.sid', { secure: secure === true || (secure === 'auto' && req.secure), httpOnly, sameSite, path });
+    return res.json({ ok: true });
   });
 });
 
-router.post('/logout', requireAuth, requireCsrf, (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
+router.get('/devices', requireOwnSecurity, (req, res) => {
+  const user = assertCurrentUser(req);
+  res.set('Cache-Control', 'no-store').json({ devices: req.sessionStore.listDevices(user.id, user.session_version, req.sessionID) });
 });
 
-router.post('/change-password', requireAuth, requireCsrf, (req, res) => {
+router.post('/devices/revoke-others', requireOwnSecurity, requireCsrf, (req, res) => {
+  const user = assertCurrentUser(req);
+  res.json({ ok: true, revoked: req.sessionStore.revokeOtherDevices(user.id, user.session_version, req.sessionID, user.username) });
+});
+
+router.delete('/devices/:id', requireOwnSecurity, requireCsrf, (req, res) => {
+  const user = assertCurrentUser(req);
+  const id = req.params.id;
+  if (!/^[a-f0-9-]{36}$/.test(id)) return res.status(404).json({ error: '未找到该登录设备' });
+  const outcome = req.sessionStore.revokeDevice(user.id, user.session_version, req.sessionID, id);
+  if (outcome === 'not_found') return res.status(404).json({ error: '未找到该登录设备' });
+  if (outcome === 'current') return res.status(400).json({ error: '请使用退出登录结束当前会话' });
+  res.json({ ok: true });
+});
+
+router.post('/change-password', requireOwnSecurity, requireCsrf, asyncRoute(async (req, res) => {
   const currentPassword = String(req.body?.currentPassword || '');
   const newPassword = String(req.body?.newPassword || '');
-  if (newPassword.length < 10 || newPassword.length > 256) return res.status(400).json({ error: '新密码需为10-256位' });
-  const verification = verifyCurrentPassword(req, currentPassword);
-  if (!verification.ok) return res.status(verification.status).json({ error: verification.error });
-  const full = db.prepare('SELECT * FROM admin_users WHERE id=?').get(req.user.id);
-  db.prepare('UPDATE admin_users SET password_hash=?,session_version=session_version+1 WHERE id=?')
-    .run(bcrypt.hashSync(newPassword, 12), full.id);
-  const updated = db.prepare('SELECT * FROM admin_users WHERE id=?').get(full.id);
+  if (!validNewPassword(newPassword)) return res.status(400).json({ error: passwordHelp });
+  const verification = await verifyCurrentPassword(req, currentPassword, { allowDuringRestore: true });
+  if (!verification.ok) return res.status(verification.status).json({ error: verification.error, code: verification.code });
+  const hash = await passwordHasher.hash(newPassword);
+  const verifiedTotp = req.session.totpGeneration;
+  const updated = locked(() => {
+    assertCurrentUser(req, verification.user);
+    db.prepare('UPDATE admin_users SET password_hash=?,session_version=session_version+1 WHERE id=?')
+      .run(hash, verification.user.id);
+    return db.prepare('SELECT * FROM admin_users WHERE id=?').get(verification.user.id);
+  }, { allowDuringRestore: true });
   issueSession(req, updated, (error, csrfToken) => {
     if (error) return res.status(500).json({ error: '密码已修改，但创建新会话失败，请重新登录' });
     res.json({ ok: true, csrfToken });
-  });
-});
+  }, undefined, verifiedTotp);
+}));
 
 router.get('/me', (req, res) => {
   const user = sessionUser(req);
@@ -128,13 +294,24 @@ router.get('/me', (req, res) => {
   }
 });
 
-function requireAuth(req, res, next) {
+function acceptSession(req, res, next, allowed) {
   const user = sessionUser(req);
-  if (user) {
-    req.user = user;
-    return next();
-  }
-  res.status(401).json({ error: '未登录' });
+  if (!user) return res.status(401).json({ error: '未登录' });
+  if (!allowed(user)) return res.status(403).json({ error: '当前账号无权执行此操作' });
+  req.user = user;
+  return next();
+}
+
+// Mail/account/work routes opt out of operator access by default. The only
+// exceptions are self-service security and explicit redacted operations routes.
+function requireAuth(req, res, next) {
+  return acceptSession(req, res, next, user => user.role === 'user' || user.role === 'admin');
+}
+function requireOwnSecurity(req, res, next) {
+  return acceptSession(req, res, next, user => ['user', 'admin', 'operator'].includes(user.role));
+}
+function requireOperations(req, res, next) {
+  return acceptSession(req, res, next, user => user.role === 'operator' || user.role === 'admin' && user.mail_access_all);
 }
 
 function sessionUser(req) {
@@ -148,6 +325,8 @@ function sessionUser(req) {
   if (req.session.sessionVersion === undefined && Number(user.session_version || 0) !== 0) return null;
   if (req.session.sessionVersion !== undefined
       && Number(req.session.sessionVersion) !== Number(user.session_version || 0)) return null;
+  const factor = totp.status(user);
+  if (factor.generation !== (req.session.totpGeneration ?? null)) return null;
   req.session.userId = Number(user.id);
   req.session.sessionVersion = Number(user.session_version || 0);
   return user;
@@ -176,37 +355,56 @@ function requireCsrf(req, res, next) {
   next();
 }
 
-function verifyCurrentPassword(req, password) {
-  const user = req.user || sessionUser(req);
+async function verifyCurrentPassword(req, password, lockOptions) {
+  const user = sessionUser(req);
   if (!user) return { ok: false, status: 401, error: '未登录' };
   const ip = normalizedClientIp(req);
   if (!ip) {
-    return { ok: false, status: 503, error: 'HTTPS反向代理未传递客户端地址，请配置 X-Forwarded-For' };
+    return { ok: false, status: 503, error: '请通过配置好的 HTTPS 反向代理访问，代理须传递客户端地址（X-Forwarded-For）。' };
   }
-  const lockedUntil = loginLimiter.check(ip, user.username);
-  if (lockedUntil) {
-    const remainingSec = Math.ceil((lockedUntil - Date.now()) / 1000);
-    return { ok: false, status: 429, error: `密码验证失败次数过多,请在 ${remainingSec} 秒后重试` };
-  }
-  const full = db.prepare('SELECT password_hash FROM admin_users WHERE id=? AND enabled=1').get(user.id);
-  const ok = Boolean(full && String(password || '').length <= 256
-    && bcrypt.compareSync(String(password || ''), full.password_hash));
-  if (!ok) {
-    loginLimiter.failure(ip, user.username);
-    return { ok: false, status: 401, error: '当前密码错误' };
-  }
-  loginLimiter.success(ip, user.username);
-  return { ok: true, status: 200 };
+  const reservation = locked(() => loginLimiter.reserve(ip, user.username), lockOptions);
+  if (reservation.lockedUntil) return rateLimitResult(reservation.lockedUntil, '密码验证');
+  try {
+    const full = db.prepare('SELECT * FROM admin_users WHERE id=? AND enabled=1').get(user.id);
+    const ok = Boolean(full && String(password || '').length <= 256
+      && await passwordHasher.compare(String(password || ''), full.password_hash));
+    return locked(() => {
+      // The account may have been disabled, demoted or changed while awaiting bcrypt.
+      assertCurrentUser(req, full);
+      const lockedUntil = loginLimiter.check(ip, user.username);
+      if (lockedUntil) return rateLimitResult(lockedUntil, '密码验证');
+      if (!ok) {
+        loginLimiter.failure(ip, user.username);
+        return { ok: false, status: 401, code: 'current_password_invalid', error: '当前密码错误' };
+      }
+      loginLimiter.success(ip, user.username);
+      return { ok: true, status: 200, user: full };
+    }, lockOptions);
+  } finally { reservation.release(); }
+}
+
+function currentPasswordGuard(role = null) {
+  return asyncRoute(async (req, res, next) => {
+    const verification = await verifyCurrentPassword(req, req.body?.currentPassword);
+    if (!verification.ok) return res.status(verification.status).json({ error: verification.error, code: verification.code });
+    assertCurrentUser(req, verification.user, role);
+    // next() enters the short state-lock section synchronously. Password work
+    // is already complete, and no request can interleave before lock acquisition.
+    return next();
+  });
 }
 
 module.exports = {
   router,
   requireAuth,
+  requireOperations,
   requireAdmin,
   requirePrimaryAdmin,
   requireCsrf,
-  hasAdmin,
+  hasAdmin: adminSetup.hasAdmin,
   verifyCurrentPassword,
   issueSession,
   sessionUser,
+  assertCurrentUser,
+  currentPasswordGuard,
 };

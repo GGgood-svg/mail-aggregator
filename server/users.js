@@ -1,9 +1,14 @@
+const { stateRoute, asyncRoute, withStateLock } = require('./state-lock');
 const express = require('express');
-const bcrypt = require('bcryptjs');
-const { db } = require('./db');
+const { passwordHasher } = require('./password-hasher');
+const { assertCurrentUser } = require('./auth');
+const { validNewPassword, passwordHelp } = require('./password-policy');
+const { db, DIRS } = require('./db');
 
 const router = express.Router();
 const USERNAME_RE = /^[\p{L}\p{N}_.@-]{2,64}$/u;
+const ROLES = new Set(['user', 'admin', 'operator']);
+const privileged = role => role === 'admin' || role === 'operator';
 
 router.get('/', (req, res) => {
   const users = db.prepare(`SELECT u.id,u.username,u.role,u.enabled,u.mail_access_all,u.created_at,
@@ -21,36 +26,47 @@ router.get('/', (req, res) => {
   })));
 });
 
-router.post('/', (req, res) => {
+router.post('/', asyncRoute(async (req, res) => {
   const username = String(req.body?.username || '').normalize('NFKC').trim();
   const password = String(req.body?.password || '');
-  const role = req.body?.role === 'admin' ? 'admin' : 'user';
+  const role = req.body?.role ?? 'user';
+  if (!ROLES.has(role)) return res.status(400).json({ error: '用户角色无效' });
   if (!USERNAME_RE.test(username)) return res.status(400).json({ error: '用户名需为2-64位字母、数字、中文或 _ . @ -' });
-  if (password.length < 10 || password.length > 256) return res.status(400).json({ error: '密码需为10-256位' });
-  if (role === 'admin' && !req.user.mail_access_all) {
-    return res.status(403).json({ error: '仅主管理员可以创建其他管理员' });
+  if (!validNewPassword(password)) return res.status(400).json({ error: passwordHelp });
+  if (privileged(role) && !req.user.mail_access_all) {
+    return res.status(403).json({ error: '仅主管理员可以管理管理员或只读运维账号' });
   }
+  const actor = assertCurrentUser(req, null, 'admin');
+  const hash = await passwordHasher.hash(password);
   try {
-    const info = db.prepare('INSERT INTO admin_users(username,password_hash,role) VALUES(?,?,?)')
-      .run(username, bcrypt.hashSync(password, 12), role);
-    res.status(201).json({ id: Number(info.lastInsertRowid), username, role, enabled: true });
+    const info = withStateLock(DIRS.root, () => {
+      assertCurrentUser(req, actor, privileged(role) ? 'primary' : 'admin');
+      return db.prepare('INSERT INTO admin_users(username,password_hash,role) VALUES(?,?,?)')
+        .run(username, hash, role);
+    });
+    res.locals.auditSubjectId = Number(info.lastInsertRowid);
+    res.status(201).json({ id: res.locals.auditSubjectId, username, role, enabled: true });
   } catch (error) {
     if (String(error.code).includes('SQLITE_CONSTRAINT')) return res.status(409).json({ error: '用户名已存在' });
     throw error;
   }
-});
+}));
 
-router.put('/:id', (req, res) => {
+router.put('/:id', stateRoute((req, res) => {
   const id = Number(req.params.id);
   const user = db.prepare('SELECT * FROM admin_users WHERE id=?').get(id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
   if (user.mail_access_all && id !== Number(req.user.id)) {
     return res.status(403).json({ error: '不能修改主管理员账号' });
   }
-  const role = req.body?.role === undefined ? user.role : (req.body.role === 'admin' ? 'admin' : 'user');
+  const role = req.body?.role ?? user.role;
+  if (!ROLES.has(role)) return res.status(400).json({ error: '用户角色无效' });
   const enabled = req.body?.enabled === undefined ? user.enabled : (req.body.enabled ? 1 : 0);
-  if (!req.user.mail_access_all && (user.role === 'admin' || role === 'admin')) {
-    return res.status(403).json({ error: '仅主管理员可以授予、取消或管理管理员权限' });
+  if (!req.user.mail_access_all && (privileged(user.role) || privileged(role))) {
+    return res.status(403).json({ error: '仅主管理员可以管理管理员或只读运维账号' });
+  }
+  if (role === 'operator' && user.role !== 'operator' && db.prepare('SELECT 1 FROM accounts WHERE owner_user_id=? LIMIT 1').get(id)) {
+    return res.status(409).json({ error: '该用户仍有邮箱账号，请先删除或迁移这些账号' });
   }
   if (id === Number(req.user.id) && (!enabled || role !== 'admin')) {
     return res.status(400).json({ error: '不能停用自己或取消自己的管理员权限' });
@@ -65,21 +81,21 @@ router.put('/:id', (req, res) => {
   db.prepare('UPDATE admin_users SET role=?,enabled=?,session_version=session_version+1 WHERE id=?')
     .run(role, enabled, id);
   res.json({ ok: true });
-});
+}, { allowDuringRestore: true }));
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', stateRoute((req, res) => {
   const id = Number(req.params.id);
   if (id === Number(req.user.id)) return res.status(400).json({ error: '不能删除当前登录用户' });
   const user = db.prepare('SELECT * FROM admin_users WHERE id=?').get(id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
   if (user.mail_access_all) return res.status(403).json({ error: '不能删除主管理员账号' });
-  if (user.role === 'admin' && !req.user.mail_access_all) {
-    return res.status(403).json({ error: '仅主管理员可以删除其他管理员' });
+  if (privileged(user.role) && !req.user.mail_access_all) {
+    return res.status(403).json({ error: '仅主管理员可以管理管理员或只读运维账号' });
   }
   const count = db.prepare('SELECT COUNT(*) c FROM accounts WHERE owner_user_id=?').get(id).c;
   if (count) return res.status(409).json({ error: '该用户仍有邮箱账号，请先删除或迁移这些账号' });
   db.prepare('DELETE FROM admin_users WHERE id=?').run(id);
   res.json({ ok: true });
-});
+}));
 
 module.exports = router;

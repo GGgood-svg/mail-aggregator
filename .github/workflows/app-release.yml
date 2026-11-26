@@ -1,0 +1,132 @@
+name: Signed application release
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Build an unsigned artifact, or publish a previously built artifact'
+        type: choice
+        options: [build, publish]
+        default: build
+      build_run_id:
+        description: 'Successful build-only workflow run ID for publish'
+        required: false
+        type: string
+      rehearsal_receipt:
+        description: 'Signed OpenRC receipt (automatic builds only)'
+        required: false
+        type: string
+      tag:
+        description: 'Existing release tag, e.g. v0.2.0 or v0.2.0-rc.1'
+        required: true
+        type: string
+      from_versions:
+        description: 'Exact source tags tested in upgrade rehearsals (comma-separated)'
+        required: false
+        type: string
+      policy:
+        description: 'Automatic installation is only for releases with unchanged host prerequisites'
+        required: true
+        default: manual
+        type: choice
+        options: [manual, automatic]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-application-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  alpine-test-and-build:
+    if: inputs.action == 'build' && github.repository == 'GGgood-svg/mail-aggregator' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: '[[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]{0,7})\.(0|[1-9][0-9]{0,7})\.(0|[1-9][0-9]{0,7})(-(beta|rc)(\.(0|[1-9][0-9]{0,7}))?)?$ ]]'
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check release commit belongs to the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+          git merge-base --is-ancestor HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
+      - name: Test and build on Alpine 3.24 x86_64
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          FROM_VERSIONS: ${{ inputs.from_versions }}
+          RELEASE_POLICY: ${{ inputs.policy }}
+        run: |
+          mkdir -m 700 release-out
+          export RELEASE_COMMIT="$(git rev-parse HEAD)"
+          docker run --rm --platform linux/amd64 -v "$PWD:/workspace" -w /workspace \
+            -e RELEASE_TAG -e FROM_VERSIONS -e RELEASE_POLICY -e RELEASE_COMMIT alpine:3.24 sh -ec '
+              apk add --no-cache nodejs npm nodejs-dev python3 make g++ tar
+              npm_config_nodedir=/usr npm_config_build_from_source=true npm ci --no-audit --no-fund
+              npm test
+              npm run test:integration
+              sh scripts/updater/build-release.sh release-out "$RELEASE_TAG" "$RELEASE_COMMIT" "$FROM_VERSIONS" "$RELEASE_POLICY"
+              chmod -R a+rX release-out
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: alpine-runtime
+          path: release-out/*
+          if-no-files-found: error
+
+  sign-and-publish:
+    if: inputs.action == 'publish' && github.repository == 'GGgood-svg/mail-aggregator' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment: app-release-signing
+    permissions:
+      actions: read
+      contents: write
+    env:
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      RELEASE_POLICY: ${{ inputs.policy }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      REHEARSAL_RECEIPT: ${{ inputs.rehearsal_receipt }}
+      REHEARSAL_KEY: ${{ vars.APP_UPDATE_REHEARSAL_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: alpine-runtime
+          path: release-out
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.build_run_id }}
+      - name: Verify exact build, CI, tag, and rehearsal evidence after approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/updater/release-gate.js release-out/app-update.json
+      - name: Sign tested release assets
+        env:
+          RELEASE_SIGNING_KEY_B64: ${{ secrets.APP_UPDATE_SIGNING_KEY_B64 }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test "$(node -p 'require("./release-out/app-update.json").tag')" = "$RELEASE_TAG"
+          node scripts/updater/build-release.js sign release-out
+      - name: Publish signed assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          node scripts/updater/release-gate.js release-out/app-update.json
+          preview=()
+          case "$RELEASE_TAG" in *-beta|*-beta.*|*-rc|*-rc.*) preview=(--prerelease --latest=false);; esac
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "${preview[@]}" release-out/*

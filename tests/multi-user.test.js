@@ -42,13 +42,17 @@ function withDatabase(run) {
   unload();
   const database = loadDatabase(root);
   let activeDb = database.db;
-  try { return run(database.db, root, (replacement) => { activeDb = replacement; }); }
-  finally {
+  const cleanup = () => {
     try { activeDb.close(); } catch (_) {} unload();
     if (previous === undefined) delete process.env.MAIL_AGG_DATA_DIR;
     else process.env.MAIL_AGG_DATA_DIR = previous;
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-  }
+  };
+  try {
+    const result = run(database.db, root, (replacement) => { activeDb = replacement; });
+    if (result && typeof result.then === 'function') return result.finally(cleanup);
+    cleanup(); return result;
+  } catch (error) { cleanup(); throw error; }
 }
 
 integrationTest('account access always includes the authenticated owner', () => {
@@ -205,8 +209,8 @@ integrationTest('operational administrators cannot promote users or manage peer 
   });
 });
 
-integrationTest('authenticated current-password checks are throttled like login attempts', () => {
-  withDatabase((db) => {
+integrationTest('authenticated current-password checks are throttled like login attempts', async () => {
+  await withDatabase(async (db) => {
     const id = db.prepare('INSERT INTO admin_users(username,password_hash,role) VALUES(?,?,?)')
       .run('password-check-user', bcrypt.hashSync('correct-password', 4), 'user').lastInsertRowid;
     const { verifyCurrentPassword } = require('../server/auth');
@@ -215,12 +219,13 @@ integrationTest('authenticated current-password checks are throttled like login 
       app: { get: () => false },
       get: () => '',
       ip: '203.0.113.20',
+      session: { userId: Number(id), sessionVersion: 0 },
     };
     for (let attempt = 0; attempt < 5; attempt++) {
-      assert.equal(verifyCurrentPassword(req, 'wrong-password').status, 401);
+      assert.equal((await verifyCurrentPassword(req, 'wrong-password')).status, 401);
     }
-    assert.equal(verifyCurrentPassword(req, 'wrong-password').status, 429);
+    assert.equal((await verifyCurrentPassword(req, 'wrong-password')).status, 429);
     db.prepare('DELETE FROM login_attempts').run();
-    assert.equal(verifyCurrentPassword(req, 'correct-password').ok, true);
+    assert.equal((await verifyCurrentPassword(req, 'correct-password')).ok, true);
   });
 });

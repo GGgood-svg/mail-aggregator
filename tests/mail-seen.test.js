@@ -9,8 +9,12 @@ test('bulk seen covers every page, validates scope before writes and reports par
   const client = {
     async connect() {}, async logout() {},
     async list() { return ['A.INBOX', 'A.Sent', 'B.INBOX'].map(path => ({ path, flags: new Set() })); },
-    async mailboxOpen(path) { opened = path; if (path === 'A.Sent') throw new Error('offline'); },
-    async search(query, options) { assert.equal(query.seen, false); assert.equal(options.uid, true); return Array.from({length: 550}, (_, i) => i + 1); },
+    async mailboxOpen(path) { opened = path; if (path === 'A.Sent') throw new Error('offline'); return { uidNext: 551 }; },
+    async search(query, options) {
+      assert.equal(query.seen, false); assert.equal(options.uid, true);
+      const [low, high] = query.uid.split(':').map(Number);
+      return Array.from({ length: high - low + 1 }, (_, i) => low + i);
+    },
     async messageFlagsAdd(uids, flags, options) { writes.push({ folder: opened, uids }); assert.deepEqual(flags, ['\\Seen']); assert.equal(options.uid, true); return true; },
   };
   const app = express(); app.use(express.json()); app.use(createMailRouter({
@@ -37,7 +41,7 @@ test('seen writes persist, preserve other flags, reject invalid input and report
   let fail = false;
   const client = {
     async connect() {}, async logout() {},
-    async mailboxOpen(folder, options) { assert.equal(folder, 'Work.INBOX'); assert.equal(options.readOnly, false); },
+    async mailboxOpen(folder, options) { assert.equal(folder, 'Work.INBOX'); assert.equal(options.readOnly, false); return { uidValidity: 77n }; },
     async fetchOne(uid) { return uid === 7 ? { flags } : false; },
     async messageFlagsAdd(uid, values, options) {
       assert.equal(uid, 7); assert.equal(options.uid, true);
@@ -55,9 +59,12 @@ test('seen writes persist, preserve other flags, reject invalid input and report
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
-  const put = (uid, seen) => fetch(`http://127.0.0.1:${server.address().port}/messages/${uid}/seen?folder=Work.INBOX`, {
+  const put = (uid, seen, validity = '&uidValidity=77') => fetch(`http://127.0.0.1:${server.address().port}/messages/${uid}/seen?folder=Work.INBOX${validity}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seen }),
   });
+  assert.equal((await put(7, true, '')).status, 400);
+  assert.equal((await put(7, true, '&uidValidity=78')).status, 409);
+  assert.ok(!flags.has('\\Seen'));
   assert.equal((await (await put(7, true)).json()).seen, true);
   assert.ok(flags.has('\\Seen'));
   assert.equal((await (await put(7, false)).json()).seen, false);

@@ -11,6 +11,12 @@ WorkingDirectory=/opt/mail-aggregator
 EnvironmentFile=-/etc/mail-aggregator/config
 Environment=MAIL_AGG_DATA_DIR=/var/lib/mail-aggregator
 Environment=MAIL_AGG_SERVICE_MANAGER=systemd
+Environment=MAIL_AGG_MANUAL_UPDATE_JOURNAL=/var/lib/mail-aggregator-updater/manual-gate
+Environment=MAIL_AGG_UPDATE_CONTROL=/run/mail-aggregator-update-app/control.sock
+Environment=MAIL_AGG_HOST_MAINTENANCE_LOCK=/run/mail-aggregator-maintenance/lock
+RuntimeDirectory=mail-aggregator-update-app
+RuntimeDirectoryMode=0700
+ExecStartPre=+/bin/sh -ec '. /usr/local/lib/mail-aggregator-maintenance.sh; prepare_mail_aggregator_maintenance; test ! -e /var/lib/mail-aggregator-updater/manual-gate || test -f /run/mail-aggregator-maintenance/manual-start'
 ExecStart=/usr/bin/node /opt/mail-aggregator/server/app.js
 Restart=on-failure
 RestartSec=3

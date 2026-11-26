@@ -10,6 +10,7 @@ const {
   cleanupStaleBackupWorkdirs,
   createBackupBundle,
 } = require('../server/backup');
+const { notificationConfigStore } = require('../server/notification-config');
 
 function createDirs() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mail-aggregator-backup-test-'));
@@ -22,6 +23,41 @@ function createDirs() {
   for (const dir of Object.values(dirs)) fs.mkdirSync(dir, { recursive: true });
   return { root, dirs };
 }
+
+test('compression uses an independent snapshot and does not hold the state lock', async () => {
+  const { withStateLock } = require('../server/state-lock');
+  const { root, dirs } = createDirs();
+  let release, entered, bundle;
+  const gate = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  try {
+    const pending = createBackupBundle({ db: { backup: async target => fs.writeFileSync(target, 'snapshot') }, dirs, version: 'test',
+      archiveRunner: async (_, target) => { entered(); await gate; fs.writeFileSync(target, 'archive'); } });
+    await started;
+    assert.equal(withStateLock(root, () => 'available'), 'available');
+    release(); bundle = await pending;
+  } finally { release?.(); bundle?.cleanup(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('backup excludes competing credential writes across its asynchronous snapshot boundary', async () => {
+  const { withStateLock } = require('../server/state-lock');
+  const { root, dirs } = createDirs();
+  let releaseSnapshot, bundle;
+  fs.writeFileSync(path.join(dirs.secrets, 'source.pass'), 'original');
+  try {
+    const pending = createBackupBundle({ db: { backup: destination => new Promise(resolve => {
+      fs.writeFileSync(destination, 'snapshot'); releaseSnapshot = resolve;
+    }) }, dirs, version: 'test', archiveRunner: async (stage, archive) => {
+      assert.equal(fs.readFileSync(path.join(stage, 'data/secrets/source.pass'), 'utf8'), 'original');
+      fs.writeFileSync(archive, 'fixture');
+    } });
+    assert.throws(() => withStateLock(root, () => fs.writeFileSync(path.join(dirs.secrets, 'source.pass'), 'changed')), { statusCode: 409 });
+    releaseSnapshot(); bundle = await pending;
+    withStateLock(root, () => fs.writeFileSync(path.join(dirs.secrets, 'source.pass'), 'after'));
+  } finally {
+    if (bundle) bundle.cleanup(); fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('backup filename is deterministic and filesystem-safe', () => {
   assert.equal(
@@ -52,6 +88,10 @@ test('backup bundle uses an online database snapshot and copies only backup payl
     fs.mkdirSync(path.join(dirs.secrets, '7'));
     fs.writeFileSync(path.join(dirs.secrets, '7', 'source.pass'), 'source-secret');
     fs.writeFileSync(path.join(dirs.logs, 'job-1.log'), 'must not be included');
+    const currentPolicy = { enabled:false };
+    const config = notificationConfigStore(root, dirs.secrets);
+    config.write(currentPolicy);
+    fs.writeFileSync(path.join(dirs.secrets, 'notification.json'), JSON.stringify({ enabled:true, telegramToken:'fixture-obsolete-secret' }));
     let backupCalls = 0;
     const db = {
       async backup(destination) {
@@ -64,10 +104,14 @@ test('backup bundle uses an online database snapshot and copies only backup payl
       assert.equal(fs.readFileSync(path.join(stageDir, 'data', 'secrets', 'local-target.pass'), 'utf8'), 'local-secret');
       assert.equal(fs.readFileSync(path.join(stageDir, 'data', 'secrets', '7', 'source.pass'), 'utf8'), 'source-secret');
       assert.equal(fs.existsSync(path.join(stageDir, 'data', 'logs')), false);
+      assert.equal(fs.existsSync(path.join(stageDir, 'data', 'notification.json')), false);
+      assert.equal(fs.existsSync(path.join(stageDir, 'data', 'secrets', 'notification.json')), false);
+      assert.deepEqual(config.read(), currentPolicy);
       const manifest = JSON.parse(fs.readFileSync(path.join(stageDir, 'manifest.json'), 'utf8'));
       assert.equal(manifest.formatVersion, 1);
       assert.equal(manifest.applicationVersion, '0.1.6');
       assert.ok(manifest.excludes.includes('Maildir'));
+      assert.ok(manifest.excludes.includes('data/secrets/notification.json'));
       assert.deepEqual(manifest.files.map((file) => file.path), [
         'data/db/mail-aggregator.db',
         'data/secrets/7/source.pass',
@@ -101,6 +145,29 @@ test('backup bundle uses an online database snapshot and copies only backup payl
     if (bundle) bundle.cleanup();
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('an offline pre-restore backup migrates the live legacy destination without exporting it', async () => {
+  const { root, dirs } = createDirs();
+  const config = notificationConfigStore(root, dirs.secrets);
+  const destination = 'https://notify.invalid/fixture-live';
+  let bundle;
+  try {
+    fs.writeFileSync(path.join(dirs.secrets, 'notification.json'), JSON.stringify({ enabled:true, provider:'webhook',
+      webhookUrl:destination, subscriptions:{ sync:true, capacity:false, restore:true, update:true } }));
+    assert.deepEqual(config.read(), {});
+    bundle = await createBackupBundle({ db:{ async backup(target) { fs.writeFileSync(target, 'snapshot'); } }, dirs, version:'test',
+      archiveRunner: async (stage, target) => {
+        assert.equal(fs.existsSync(path.join(stage, 'data', 'secrets', 'notification.json')), false);
+        fs.writeFileSync(target, 'synthetic archive');
+      } });
+    assert.deepEqual(config.read(), { enabled:true, provider:'webhook', webhookUrl:destination,
+      subscriptions:{ sync:true, capacity:false, restore:false, update:false }, operationEpochs:{}, operationTarget:null,
+      webhookSupportsDeduplication:false, webhookDedupEpoch:null });
+    // Runtime reads do not fall back to a stale file if the live policy vanishes.
+    fs.unlinkSync(path.join(root, 'notification.json'));
+    assert.deepEqual(config.read(), {});
+  } finally { bundle?.cleanup(); fs.rmSync(root, { recursive:true, force:true }); }
 });
 
 test('backup failure removes its temporary work directory', async () => {

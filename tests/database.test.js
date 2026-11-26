@@ -98,7 +98,7 @@ integrationTest('database initialization enables WAL, foreign keys, and current 
       }
       const accountId = insertAccount(db, 'flat-default');
       const account = db.prepare(`SELECT destination_mode, destination_folder, folder_includes,
-        folder_excludes, max_age_days, max_size_mb, deletion_mode FROM accounts WHERE id=?`).get(accountId);
+        folder_excludes, max_age_days, max_size_mb, deletion_mode, last_sync_category, sync_failure_count FROM accounts WHERE id=?`).get(accountId);
       assert.equal(account.destination_mode, 'flat');
       assert.equal(account.destination_folder, null);
       assert.equal(account.folder_includes, '');
@@ -106,6 +106,8 @@ integrationTest('database initialization enables WAL, foreign keys, and current 
       assert.equal(account.max_age_days, null);
       assert.equal(account.max_size_mb, null);
       assert.equal(account.deletion_mode, 'archive');
+      assert.equal(account.last_sync_category, null);
+      assert.equal(account.sync_failure_count, 0);
       const accountColumns = db.prepare('PRAGMA table_info(accounts)').all().map((row) => row.name);
       const userColumns = db.prepare('PRAGMA table_info(admin_users)').all().map((row) => row.name);
       for (const name of ['owner_user_id', 'mailbox_folder']) assert.ok(accountColumns.includes(name));

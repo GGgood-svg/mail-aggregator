@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+name="mail-aggregator-updater"
+description="Mail Aggregator application update service"
+command="/usr/bin/node"
+command_args="/usr/local/lib/mail-aggregator-updater/daemon.js"
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=3
+respawn_period=60
+pidfile="/run/mail-aggregator-updater.pid"
+output_log="/var/log/mail-aggregator-updater.log"
+error_log="/var/log/mail-aggregator-updater.log"
+
+depend() {
+    need localmount
+    use net
+    before mail-aggregator
+}
+
+start_pre() {
+    . /usr/local/lib/mail-aggregator-maintenance.sh || return 1
+    prepare_mail_aggregator_maintenance || return 1
+    checkpath -d -m 0750 -o root:mailadmin /run/mail-aggregator-updater /var/lib/mail-aggregator-updater
+    checkpath -f -m 0600 -o root:root "$output_log"
+    /usr/bin/node /usr/local/lib/mail-aggregator-updater/daemon.js --recover
+}

@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>同步日志 - Mail Aggregator</title>
 <link rel="stylesheet" href="/css/style.css">
 </head>
@@ -18,7 +19,25 @@
       <button class="btn secondary" id="cleanup-btn">清理旧日志(每账号保留最近30条)</button>
     </div>
 
-    <div class="panel">
+    <div class="task-tabs" role="tablist" aria-label="任务类型">
+      <button class="btn secondary" id="sync-tab" role="tab" aria-selected="true" aria-controls="sync-tasks-panel">同步任务</button>
+      <button class="btn secondary" id="mail-tab" role="tab" aria-selected="false" aria-controls="mail-tasks-panel">邮件整理</button>
+    </div>
+    <section class="panel" id="mail-tasks-panel" role="tabpanel" aria-labelledby="mail-tab" hidden>
+      <div class="topbar"><h2>邮件整理</h2><button class="btn secondary" id="refresh-mail-tasks">刷新任务</button></div>
+      <p class="hint">服务重启后任务会中断。重新登录后可手动继续；已提交但未确认的结果会先核对。</p>
+      <p id="mail-tasks-message" role="status" data-i18n-skip></p>
+      <div id="mail-tasks-list" aria-live="polite"></div>
+      <div id="mail-tasks-pagination" class="mail-search-actions"></div>
+      <section id="mail-task-results" hidden></section>
+    </section>
+    <div class="panel" id="sync-tasks-panel" role="tabpanel" aria-labelledby="sync-tab">
+      <section class="panel" id="linked-job" hidden>
+        <h2>查看同步任务</h2>
+        <p id="linked-job-details" data-i18n-skip hidden></p>
+        <p class="hint" id="linked-job-message" role="status"></p>
+        <button class="btn small secondary" type="button" id="linked-job-log" hidden>查看日志</button>
+      </section>
       <div class="form-row" style="align-items:flex-end;margin-bottom:14px;">
         <div class="form-group" style="margin-bottom:0;">
           <label>账号</label>
@@ -63,16 +82,40 @@
 <script src="/js/api.js"></script>
 <script src="/js/branding.js"></script>
 <script src="/js/i18n.js"></script>
+<script src="/js/sync-availability-ui.js"></script>
+<script src="/js/mail-continuation-i18n.js"></script>
+<script src="/js/mail-tasks.js"></script>
 <script>
 const params = new URLSearchParams(location.search);
+const linkedJobParam = params.get('job');
+const linkedEventId = params.get('event');
+const linkedJobNumber = Number(linkedJobParam);
+const linkedJobId = /^[1-9][0-9]*$/.test(linkedJobParam) && Number.isSafeInteger(linkedJobNumber) ? linkedJobNumber : null;
 let currentPage = Math.max(1, Number(params.get('page')) || 1);
 let selectedJobId = null;
 let logPollTimer = null;
+let activeTab = params.get('tab') === 'mail' ? 'mail' : 'sync';
+const mailTaskCenter = MailTaskCenter.create();
+function selectTaskTab(value) {
+  activeTab = value;
+  const mail = value === 'mail';
+  document.getElementById('sync-tasks-panel').hidden = mail;
+  document.getElementById('cleanup-btn').hidden = mail;
+  document.getElementById('sync-tab').setAttribute('aria-selected', String(!mail));
+  document.getElementById('mail-tab').setAttribute('aria-selected', String(mail));
+  if (mail) { stopLogPolling(); document.getElementById('log-panel').style.display = 'none'; }
+  mailTaskCenter.show(mail);
+  if (!mail) loadJobs().catch(error => toast(error.message, 'error'));
+  else history.replaceState(null, '', `${location.pathname}?tab=mail${params.get('task') ? `&task=${encodeURIComponent(params.get('task'))}` : ''}`);
+}
+document.getElementById('sync-tab').addEventListener('click', () => selectTaskTab('sync'));
+document.getElementById('mail-tab').addEventListener('click', () => selectTaskTab('mail'));
 
 async function load() {
   applyBranding();
-  await requireLogin();
+  if (!await requireLogin()) return;
   renderNav('logs');
+  if (activeTab === 'sync' && linkedJobParam !== null) void loadLinkedJob();
   try {
     const accounts = await Api.get('/api/accounts');
     const accountSelect = document.getElementById('account-filter');
@@ -82,13 +125,37 @@ async function load() {
     document.getElementById('status-filter').value = params.get('status') || '';
     const initialPageSize = params.get('pageSize');
     document.getElementById('page-size').value = ['25', '50', '100'].includes(initialPageSize) ? initialPageSize : '25';
-    await loadJobs();
+    selectTaskTab(activeTab);
   } catch (e) {
     toast(e.message, 'error');
   }
 }
 
+async function loadLinkedJob() {
+  const panel = document.getElementById('linked-job');
+  const details = document.getElementById('linked-job-details');
+  const message = document.getElementById('linked-job-message');
+  const logButton = document.getElementById('linked-job-log');
+  const unavailable = '相关同步任务已不可用或当前账号无权查看。';
+  panel.hidden = false;
+  if (linkedJobId === null || !/^[a-f0-9-]{36}$/.test(linkedEventId)) {
+    message.textContent = I18n.t(unavailable);
+    return;
+  }
+  try {
+    const job = await Api.get(`/api/jobs/${linkedJobId}/notification-task?event=${encodeURIComponent(linkedEventId)}`);
+    if (!job) return;
+    details.textContent = `#${job.id} · ${job.accountName} · ${fmtTime(job.startedAt)} · ${statusLabel(job.status)}`;
+    details.hidden = false;
+    logButton.hidden = false;
+    logButton.addEventListener('click', () => viewLog(job.id, { scroll: true, eventId: linkedEventId }));
+  } catch (error) {
+    message.textContent = I18n.t([403, 404].includes(error.status) ? unavailable : '暂时无法加载同步任务，请重试。');
+  }
+}
+
 async function loadJobs() {
+  if (activeTab !== 'sync') return;
   const query = new URLSearchParams({
     page: String(currentPage),
     pageSize: document.getElementById('page-size').value,
@@ -98,10 +165,15 @@ async function loadJobs() {
   if (account) query.set('account', account);
   if (status) query.set('status', status);
   const result = await Api.get(`/api/jobs?${query}`);
+  if (activeTab !== 'sync' || !result) return;
   currentPage = result.pagination.page;
   render(result.items);
   renderPagination(result.pagination);
   query.set('page', String(currentPage));
+  if (linkedJobId !== null && /^[a-f0-9-]{36}$/.test(linkedEventId)) {
+    query.set('job', linkedJobId);
+    query.set('event', linkedEventId);
+  }
   history.replaceState(null, '', `${location.pathname}?${query}`);
 }
 
@@ -143,11 +215,15 @@ function render(jobs) {
       return `<tr>
         <td data-i18n-skip>${escapeHtml(j.account_name)}</td>
         <td>${fmtTime(j.started_at)}</td>
-        <td><span class="badge ${j.status}">${statusLabel(j.status)}</span></td>
+        <td><span class="badge ${j.status}">${statusLabel(j.status)}</span>${j.resultKnown === false
+          ? `<div class="hint" data-i18n-skip>${escapeHtml(syncUi('unknown'))}</div>` : j.stage === 'blocked' && j.resultCode
+          ? `<div class="hint" data-i18n-skip>${escapeHtml(syncUi(j.resultCode))}${j.nextRetryAt ? ` · ${escapeHtml(syncUi('nextRetry'))}：${escapeHtml(fmtTime(j.nextRetryAt))}` : ''}</div>` : ''}
+          ${j.status === 'running' && ['preparing','transfer','cancelling'].includes(j.stage) ? `<div class="hint" data-i18n-skip>${escapeHtml(syncUi(j.stage))}</div>` : ''}
+          ${j.triggerSource ? `<div class="hint" data-i18n-skip>${escapeHtml(syncUi(j.triggerSource))}</div>` : ''}</td>
         <td>${j.duration_ms != null ? (j.duration_ms / 1000).toFixed(1) + 's' : '-'}</td>
         <td>${fmtVal(j.messages_transferred)}</td>
         <td>${fmtVal(j.messages_skipped)}</td>
-        <td>${fmtVal(j.host2_messages)}</td>
+        <td>${fmtVal(j.host2_messages)}<div class="hint" data-i18n-skip>${escapeHtml(syncUi('targetFolders'))}：${fmtVal(j.host2_folders)}</div></td>
         <td>${fmtVal(j.errors)}</td>
         <td>
           <button class="btn small secondary" data-job="${j.id}">查看日志</button>
@@ -171,7 +247,12 @@ function render(jobs) {
 
 async function retryJob(jobId) {
   try {
-    await Api.post(`/api/jobs/${jobId}/retry`);
+    try { await Api.post(`/api/jobs/${jobId}/retry`); }
+    catch (e) {
+      if (e.details?.reason !== 'confirm_unknown_result') throw e;
+      if (!confirm(syncUi('review'))) return;
+      await Api.post(`/api/jobs/${jobId}/retry`, { confirmUnknown: true });
+    }
     toast('已重新加入同步队列');
     await loadJobs();
   } catch (e) { toast(e.message, 'error'); }
@@ -182,20 +263,21 @@ function stopLogPolling() {
   logPollTimer = null;
 }
 
-function scheduleLogRefresh(jobId) {
+function scheduleLogRefresh(jobId, eventId) {
   stopLogPolling();
   if (selectedJobId !== String(jobId)) return;
   logPollTimer = setTimeout(
-    () => viewLog(jobId, { scroll: false, silent: true }),
+    () => viewLog(jobId, { scroll: false, silent: true, eventId }),
     document.hidden ? 10000 : 2000
   );
 }
 
-async function viewLog(jobId, { scroll = false, silent = false } = {}) {
+async function viewLog(jobId, { scroll = false, silent = false, eventId = null } = {}) {
   stopLogPolling();
   selectedJobId = String(jobId);
   try {
-    const result = await fetch(`/api/jobs/${jobId}/log`, { credentials: 'same-origin' }).then(async (r) => {
+    const event = eventId ? `?event=${encodeURIComponent(eventId)}` : '';
+    const result = await fetch(`/api/jobs/${jobId}/log${event}`, { credentials: 'same-origin' }).then(async (r) => {
       if (r.status === 401) {
         window.location.href = '/login.html';
         throw new Error('登录已过期');
@@ -203,6 +285,7 @@ async function viewLog(jobId, { scroll = false, silent = false } = {}) {
       if (!r.ok) {
         const error = new Error('日志不存在或已被清理');
         error.jobStatus = r.headers.get('X-Job-Status') || '';
+        error.status = r.status;
         throw error;
       }
       return {
@@ -213,6 +296,7 @@ async function viewLog(jobId, { scroll = false, silent = false } = {}) {
       };
     });
     if (selectedJobId !== String(jobId)) return;
+    if (eventId) document.getElementById('linked-job-message').textContent = '';
     // 用textContent而不是innerHTML,原始日志内容不做任何HTML解析
     const notices = [];
     if (result.status === 'running') notices.push('[任务运行中，日志每 2 秒自动刷新；页面转入后台后每 10 秒刷新]');
@@ -225,7 +309,7 @@ async function viewLog(jobId, { scroll = false, silent = false } = {}) {
     if (scroll) document.getElementById('log-panel').scrollIntoView({ behavior: 'smooth' });
     if (scroll || wasNearBottom) logContent.scrollTop = logContent.scrollHeight;
     if (result.status === 'running') {
-      scheduleLogRefresh(jobId);
+      scheduleLogRefresh(jobId, eventId);
     } else {
       loadJobs().catch((e) => toast(e.message, 'error'));
     }
@@ -236,9 +320,17 @@ async function viewLog(jobId, { scroll = false, silent = false } = {}) {
       logContent.textContent = '[任务运行中，正在等待日志输出…]';
       document.getElementById('log-panel').style.display = 'block';
       if (scroll) document.getElementById('log-panel').scrollIntoView({ behavior: 'smooth' });
-      scheduleLogRefresh(jobId);
+      scheduleLogRefresh(jobId, eventId);
     } else {
-      if (!silent) toast(e.message, 'error');
+      if (eventId && [403, 404].includes(e.status)) {
+        const message = document.getElementById('linked-job-message');
+        message.textContent = I18n.t(e.jobStatus ? '同步任务仍可查看，日志文件已清理或不存在。' : '相关同步任务已不可用或当前账号无权查看。');
+        if (!e.jobStatus) {
+          document.getElementById('linked-job-details').hidden = true;
+          document.getElementById('linked-job-log').hidden = true;
+        }
+        document.getElementById('log-panel').style.display = 'none';
+      } else if (!silent) toast(e.message, 'error');
       loadJobs().catch((error) => toast(error.message, 'error'));
     }
   }

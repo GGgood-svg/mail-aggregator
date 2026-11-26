@@ -69,3 +69,19 @@ test('spawn failures and output without a hash return useful errors', async () =
     /生成密码哈希失败/
   );
 });
+
+test('hash timeout, output overflow and input failure retain the child until close', async () => {
+  for (const reason of ['timeout', 'output', 'stdin']) {
+    let child, settled = false;
+    const pending = generateDovecotHash('private-fixture', 'SHA512-CRYPT', { timeoutMs: 20,
+      spawnImpl() {
+        child = fakeChild(() => { if (reason === 'stdin') throw Error('fixture EPIPE'); });
+        child.kill = () => { child.killed = true; }; return child;
+      } });
+    const rejected = assert.rejects(pending, reason === 'timeout' ? /超时/ : reason === 'output' ? /超过上限/ : /写入密码/).then(() => { settled = true; });
+    if (reason === 'output') child.stdout.emit('data', Buffer.alloc(8193));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(child.killed, true); assert.equal(settled, false);
+    child.emit('close', null, 'SIGKILL'); await rejected;
+  }
+});

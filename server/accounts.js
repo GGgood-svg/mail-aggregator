@@ -1,3 +1,5 @@
+const { stateRoute, asyncRoute, stateWritesBlocked } = require('./state-lock');
+const { assertCurrentUser } = require('./auth');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -8,6 +10,9 @@ const { getProvider, loadProviders } = require('./providers');
 const { validateAccountPayload } = require('./account-validation');
 const { registerMailboxOwnership } = require('./mailbox-ownership');
 const { accountLimit } = require('./resource-limits');
+const { scheduleDecision } = require('./scheduler-core');
+const { describeAvailability } = require('./sync-availability');
+const { serializeJob } = require('./job-query');
 const {
   saveSourceSecret,
   deleteSourceSecret,
@@ -25,6 +30,8 @@ const {
   testConnection,
   isAccountLocked,
   hasActiveJob,
+  syncQueueHealth,
+  isTestingConnection,
 } = require('./sync');
 
 const router = express.Router();
@@ -34,7 +41,10 @@ const PUBLIC_FIELDS = `
   sync_interval, local_user, sync_mode, destination_mode, destination_folder, mailbox_folder,
   folder_includes, folder_excludes, max_age_days, max_size_mb, deletion_mode,
   created_at, updated_at,
-  last_sync_at, last_sync_status, last_sync_message,
+  last_sync_at, last_sync_status, last_sync_message, last_sync_category, sync_failure_count,
+  last_sync_attempt_at, last_sync_success_at, last_finished_job_id, sync_result_unknown, sync_review_required,
+  sync_block_code, sync_block_since, sync_block_scope, sync_next_retry_at, sync_paused_until, sync_pause_started_at,
+  (SELECT MAX(COALESCE(j.finished_at, j.started_at)) FROM sync_jobs j WHERE j.account_id=accounts.id AND j.status='cancelled') AS last_cancelled_at,
   last_host2_messages, last_host2_folders, last_transferred, last_skipped, last_errors
 `;
 
@@ -45,13 +55,26 @@ function naSafe(v) {
 
 function serializeAccount(row) {
   if (!row) return null;
+  const syncing = isAccountLocked(row.id);
+  const checking = isTestingConnection?.(row.id) || false;
+  const active = db.prepare(`SELECT status,stage,trigger_source,result_code,next_attempt_at FROM sync_jobs
+    WHERE account_id=? AND status IN ('queued','running') LIMIT 1`).get(row.id);
+  const queued = !syncing && active?.status === 'queued';
+  const hasSecret = row.auth_type === 'oauth2' ? hasOAuthTokens(row.id) : hasSourceSecret(row.id);
+  const now = Date.now();
+  const decision = scheduleDecision(row, now);
+  const { providerGroup, readProviderCooldown } = require('./sync-provider-policy');
+  const cooldownUntil = readProviderCooldown(db, providerGroup(row), new Date(now).toISOString());
+  const syncAvailability = describeAvailability(row, { running: syncing, queued, checking, activeJob: active, hasSecret, queue: syncQueueHealth?.(), cooldownUntil, now });
   return {
     ...row,
     ssl: !!row.ssl,
     enabled: !!row.enabled,
-    syncing: isAccountLocked(row.id),
-    queued: !isAccountLocked(row.id) && hasActiveJob(row.id),
-    hasSecret: row.auth_type === 'oauth2' ? hasOAuthTokens(row.id) : hasSourceSecret(row.id),
+    syncing,
+    queued,
+    hasSecret,
+    syncAvailability,
+    nextSyncAt: row.enabled && hasSecret && !syncing && !queued ? new Date(decision.dueAt || Date.now()).toISOString() : null,
     oauthAuthorized: row.auth_type === 'oauth2' && hasOAuthTokens(row.id),
     // 前端展示用的N/A安全字段
     display: {
@@ -123,7 +146,7 @@ function restoreAccountConfiguration(account) {
     WHERE id=@id`).run(account);
 }
 
-router.post('/', (req, res) => {
+router.post('/', stateRoute((req, res) => {
   const { errors, normalized } = validatePayload(req.body || {}, { requireSecret: true });
   // 多用户共享同一个本地Dovecot时，flat会把不同用户的邮件混进公共根目录。
   // 新账号一律要求独立目标文件夹，旧版迁移账号仍可继续读取但不能新建flat。
@@ -190,9 +213,9 @@ router.post('/', (req, res) => {
       db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ? AND owner_user_id=?`).get(accountId, ownerId(req))
     )
   );
-});
+}));
 
-router.put('/:id', (req, res) => {
+router.put('/:id', stateRoute((req, res) => {
   const existing = ownedAccount(req, req.params.id);
   if (!existing) return res.status(404).json({ error: '账号不存在' });
 
@@ -205,6 +228,13 @@ router.put('/:id', (req, res) => {
     defaultDestinationFolder: existing.destination_folder,
     defaultSyncPolicy: existing,
   });
+  if (normalized.destination_mode === 'flat' &&
+      (existing.destination_mode !== 'flat' || existing.mailbox_folder || !req.user.mail_access_all)) {
+    errors.push('隔离账号不能切换到公共目录；仅允许主管理员保留已有旧版公共目录账号');
+  }
+  if (isAccountLocked(existing.id) || hasActiveJob(existing.id)) {
+    return res.status(409).json({ error: '账号正在同步、测试或排队中，请结束任务后再编辑' });
+  }
   if (req.user.role !== 'admin' && normalized.local_user !== existing.local_user) {
     errors.push('普通用户不能修改本地Dovecot目标用户');
   }
@@ -305,9 +335,9 @@ router.put('/:id', (req, res) => {
       db.prepare(`SELECT ${PUBLIC_FIELDS} FROM accounts WHERE id = ? AND owner_user_id=?`).get(req.params.id, ownerId(req))
     )
   );
-});
+}));
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', stateRoute((req, res) => {
   const existing = ownedAccount(req, req.params.id);
   if (!existing) return res.status(404).json({ error: '账号不存在' });
   if (isAccountLocked(existing.id) || hasActiveJob(existing.id)) {
@@ -327,48 +357,135 @@ router.delete('/:id', (req, res) => {
   // 永久保留目录归属，避免账号配置删除后遗留邮件被管理员兼容权限接管。
 
   res.json({ ok: true });
-});
+}));
 
-router.post('/:id/test', async (req, res) => {
+// The probe is read-only over IMAP. It never invokes the synchronization process
+// and each async phase rechecks the requesting session and account ownership.
+function planSubject(req, user) {
+  return JSON.stringify([req.sessionID || null, user.id, user.session_version || 0, user.role, Boolean(user.mail_access_all)]);
+}
+function accountProbeRoute(mode) {
+  return asyncRoute(async (req, res) => {
+    if (!ownedAccount(req, req.params.id)) return res.status(404).json({ error: '账号不存在' });
+    const actor = req.user;
+    const controller = new AbortController();
+    const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+    res.once?.('close', disconnected);
+    try {
+      const result = await testConnection(req.params.id, { mode, subject: planSubject(req, actor),
+        scope: mode === 'plan' ? req.body?.scope : undefined, signal: controller.signal, authorize: () => {
+        assertCurrentUser(req, actor);
+        if (!ownedAccount(req, req.params.id)) throw Object.assign(new Error('账号不存在'), { statusCode: 404 });
+      } });
+      if (!controller.signal.aborted) {
+        if (mode === 'plan') res.set('Cache-Control', 'no-store');
+        res.json(result);
+      }
+    } finally {
+      res.removeListener?.('close', disconnected);
+    }
+  });
+}
+router.post('/:id/test', accountProbeRoute('test'));
+router.post('/:id/sync-plan', accountProbeRoute('plan'));
+router.post('/:id/sync-plan/page', asyncRoute((req, res) => {
+  if (req.aborted || res.destroyed) return;
+  const actor = assertCurrentUser(req, req.user);
+  const account = ownedAccount(req, req.params.id);
+  if (!account) return res.status(404).json({ error: '账号不存在' });
+  const { readSyncPlanPage, probeError } = require('./account-imap-probe');
+  const result = readSyncPlanPage(account, req.body?.cursor, { subject: planSubject(req, actor), assertOperational() {
+    if (require('./maintenance-lock').current() === 'restore' || stateWritesBlocked(DIRS.root)) throw probeError('maintenance');
+  } });
+  return res.set('Cache-Control', 'no-store').json(result);
+}));
+
+router.patch('/:id/sync-schedule', stateRoute((req, res) => {
+  const existing = ownedAccount(req, req.params.id, 'id');
+  if (!existing) return res.status(404).json({ error: '账号不存在' });
+  const { pauseUntil } = req.body || {};
+  const now = Date.now();
+  const time = typeof pauseUntil === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(pauseUntil) ? Date.parse(pauseUntil) : NaN;
+  const iso = Number.isFinite(time) ? new Date(time).toISOString() : null;
+  if (pauseUntil !== null && (iso !== pauseUntil || time <= now || time > now + 30 * 86400000)) {
+    return res.status(400).json({ error: '请选择未来 30 天内的暂停结束时间', code: 'invalid_pause' });
+  }
+  const value = pauseUntil === null ? null : iso;
+  db.transaction(() => {
+    db.prepare(`UPDATE accounts SET sync_paused_until=?,sync_pause_started_at=?,
+      sync_next_retry_at=CASE WHEN sync_block_code='account_paused' THEN ? ELSE sync_next_retry_at END
+      WHERE id=? AND owner_user_id=?`).run(value, value ? new Date(now).toISOString() : null, value, existing.id, req.user.id);
+    db.prepare(`UPDATE sync_jobs SET next_attempt_at=?,stage=?,result_code=?
+      WHERE account_id=? AND status='queued' AND trigger_source='scheduled' AND result_code='account_paused'`)
+      .run(value, value ? 'blocked' : null, value ? 'account_paused' : null, existing.id);
+  })();
+  return res.json({ pausedUntil: value });
+}));
+
+router.post('/:id/sync', asyncRoute(async (req, res) => {
   const existing = ownedAccount(req, req.params.id);
   if (!existing) return res.status(404).json({ error: '账号不存在' });
-  const result = await testConnection(req.params.id);
-  res.json(result);
-});
-
-router.post('/:id/sync', (req, res) => {
-  const existing = ownedAccount(req, req.params.id);
-  if (!existing) return res.status(404).json({ error: '账号不存在' });
-  const result = triggerSync(parseInt(req.params.id, 10));
+  const actor = req.user;
+  let result;
+  try {
+    result = await triggerSync(parseInt(req.params.id, 10), { ownerUserId: actor.id, confirmUnknown: req.body?.confirmUnknown === true, authorize: () => {
+      const current = assertCurrentUser(req, actor);
+      const live = ownedAccount(req, req.params.id);
+      if (!live) throw Object.assign(new Error('账号不存在'), { statusCode: 404 });
+      if (req.body?.planTicket !== undefined && !require('./account-imap-probe').verifySyncPlan(live, req.body.planTicket, { subject: planSubject(req, current) })) {
+        throw Object.assign(new Error('同步预览已变更或过期，请重新预览'), { code: 'stale_sync_plan' });
+      }
+    } });
+  } catch (error) {
+    if (error.code !== 'stale_sync_plan') throw error;
+    return res.status(409).json({ error: error.message, code: error.code });
+  }
   if (!result.ok && result.reason === 'already_running') {
     return res.status(409).json({ error: '当前账号正在同步或已在排队,请勿重复启动' });
   }
-  if (!result.ok && result.reason === 'missing_credentials') {
-    return res.status(409).json({ error: '账号尚未完成凭据配置或OAuth2授权' });
+  if (!result.ok && ['missing_credentials','authorization_required'].includes(result.reason)) {
+    return res.status(409).json({ ...result, error: '账号尚未完成凭据配置或OAuth2授权' });
+  }
+  if (!result.ok && result.reason === 'confirm_unknown_result') {
+    return res.status(409).json({ ...result, error: '上次同步结果未确认，请核对后明确确认再次同步' });
+  }
+  if (!result.ok && result.reason === 'queue_degraded') {
+    return res.status(503).json({ ...result, error: '同步队列待核对，暂不能接收任务' });
+  }
+  if (!result.ok && result.reason === 'provider_cooldown') {
+    return res.status(503).json({ ...result, error: '邮箱服务商暂时限流，请在冷却后重试' });
   }
   if (!result.ok && result.reason === 'maintenance') {
     return res.status(409).json({ error: '系统正在恢复，请稍后再启动同步' });
   }
   if (!result.ok && result.reason === 'low_disk') {
-    return res.status(507).json({ error: '服务器可用磁盘空间不足，已停止启动新同步任务' });
+    return res.status(507).json({ ...result, error: '服务器可用磁盘空间不足，已停止启动新同步任务' });
   }
+  if (!result.ok && result.reason === 'low_inodes') {
+    return res.status(507).json({ ...result, error: '存储卷可用文件节点不足，已停止启动新同步任务' });
+  }
+  if (!result.ok && result.reason === 'disk_check_busy') return res.status(503).set('Retry-After', '2').json({ error: '容量检查繁忙，请稍后重试' });
   if (!result.ok && result.reason === 'disk_check_failed') {
     return res.status(503).json({ error: '无法确认服务器剩余磁盘空间，已安全停止启动同步' });
   }
+  if (!result.ok && result.reason === 'configuration_changed') {
+    return res.status(409).json({ error: '账号或存储配置已变更，请刷新后重试' });
+  }
+  if (result.ok) res.locals.auditOperationId = result.jobId;
   res.json(result);
-});
+}));
 
 router.get('/:id/jobs', (req, res) => {
   if (!ownedAccount(req, req.params.id, 'id')) return res.status(404).json({ error: '账号不存在' });
   const rows = db
     .prepare(
-      `SELECT * FROM sync_jobs WHERE account_id = ? ORDER BY started_at DESC LIMIT 30`
+      `SELECT * FROM sync_jobs WHERE account_id = ? ORDER BY started_at DESC, id DESC LIMIT 30`
     )
     .all(req.params.id);
-  res.json(rows);
+  res.json(rows.map(serializeJob));
 });
 
-router.post('/:id/jobs/:jobId/cancel', (req, res) => {
+router.post('/:id/jobs/:jobId/cancel', stateRoute((req, res) => {
   if (!ownedAccount(req, req.params.id, 'id')) return res.status(404).json({ error: '账号不存在' });
   const result = cancelJob(req.params.jobId, req.params.id);
   if (!result.ok) {
@@ -381,8 +498,9 @@ router.post('/:id/jobs/:jobId/cancel', (req, res) => {
     return res.status(result.reason === 'not_found' ? 404 : 409)
       .json({ error: messages[result.reason] || '任务无法取消' });
   }
+  res.locals.auditOperationId = String(Number(req.params.jobId));
   res.json(result);
-});
+}));
 
 router.get('/:id/jobs/:jobId/log', (req, res) => {
   const job = db

@@ -9,6 +9,9 @@ function summarizeScheduler(status, nowMs = Date.now()) {
   if (!scheduler.running) {
     healthCode = 'stopped';
     healthLabel = '已停止';
+  } else if (scheduler.queue?.degraded) {
+    healthCode = 'degraded';
+    healthLabel = '同步队列待核对';
   } else if (scheduler.lastError) {
     healthCode = 'error';
     healthLabel = '有异常';

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mail Aggregator · 安装向导</title>
+  <link rel="stylesheet" href="/setup.css">
+  <script src="/setup.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="brand"><span class="mark" aria-hidden="true">MA</span> Mail Aggregator</div>
+      <button class="secondary small" type="button" id="toggle-language" aria-label="Switch language">English</button>
+    </header>
+    <div class="intro">
+      <p class="eyebrow" data-t="eyebrow">首次安装 · 邮件汇聚</p>
+      <h1 data-t="title">安装向导</h1>
+      <p class="quiet" data-t="lead">检查服务器、创建网页管理员，然后启动邮件面板。</p>
+    </div>
+    <p id="message" role="alert" class="message" hidden></p>
+    <section id="pairing" class="card" aria-labelledby="pair-title" hidden>
+      <h2 id="pair-title" data-t="pairTitle">输入终端上的安装口令</h2>
+      <p data-t="pairHelp">请先核对浏览器证书的 SHA-256 指纹与终端显示的一致。口令只能用一次，15 分钟内有效。</p>
+      <form id="pair-form">
+        <label for="code" data-t="code">安装口令</label>
+        <div class="pair-row">
+          <input id="code" placeholder="XXXX-XXXX-XXXX-XXXX" maxlength="32" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
+          <button type="submit" data-t="pair">继续</button>
+        </div>
+      </form>
+    </section>
+    <section id="configure" class="card" aria-labelledby="configure-title" hidden>
+      <h2 id="configure-title" data-t="configureTitle">预检与设置</h2>
+      <form id="install-form">
+        <div class="grid">
+          <div>
+            <label for="web-port" data-t="webPort">邮件面板端口</label>
+            <input id="web-port" type="number" min="1024" max="65535" step="1" value="8080" required>
+          </div>
+          <div>
+            <label for="language" data-t="language">邮件面板语言</label>
+            <select id="language">
+              <option value="zh-CN">简体中文</option><option value="en-US">English</option><option value="ja-JP">日本語</option>
+              <option value="ko-KR">한국어</option><option value="es-ES">Español</option><option value="fr-FR">Français</option><option value="de-DE">Deutsch</option>
+            </select>
+          </div>
+        </div>
+        <div class="check-box">
+          <div class="row"><strong data-t="checks">服务器检查</strong><button id="check" type="button" class="secondary small" data-t="check">重新检查</button></div>
+          <ul id="checks" aria-live="polite"></ul>
+        </div>
+        <label for="username" data-t="username">网页管理员用户名</label>
+        <input id="username" value="admin" maxlength="64" autocomplete="username" spellcheck="false" required>
+        <div class="grid password-row">
+          <div><label for="password" data-t="password">网页管理员密码</label><input id="password" type="password" autocomplete="new-password" required></div>
+          <div><label for="confirm" data-t="confirm">再次输入密码</label><input id="confirm" type="password" autocomplete="new-password" required></div>
+        </div>
+        <p class="hint" data-t="passwordHelp">至少 10 个字符，最多 72 个 UTF-8 字节。这个密码用于登录邮件面板。</p>
+        <label class="ack"><input id="ack" type="checkbox" required><span data-t="ack">确认这是一台未装过 Mail Aggregator 或 Dovecot 的服务器。</span></label>
+        <button id="install" type="submit" disabled data-t="install">开始安装</button>
+        <p class="hint" data-t="trusted">安装后，邮件面板使用局域网 HTTP。仅在可信局域网访问。</p>
+      </form>
+    </section>
+    <section id="running" class="card" aria-labelledby="running-title" hidden>
+      <h2 id="running-title" data-t="runningTitle">正在安装</h2>
+      <p data-t="runningHelp">可以刷新或关闭这一页。安装会在服务器上继续，稍后用同一浏览器回来查看。</p>
+      <progress id="progress" max="9" aria-label="Installation progress"></progress>
+      <p id="stage" class="status" role="status"></p>
+    </section>
+    <section id="finished" class="card" aria-labelledby="finished-title" hidden>
+      <h2 id="finished-title"></h2>
+      <p id="finished-info"></p>
+      <div id="success-info" hidden>
+        <p data-t="accountInfo">进邮件面板请用上一步设置的管理员用户名和密码，不需要再注册。</p>
+        <div class="check-box">
+          <strong data-t="imapTitle">独立的 Dovecot 密码 · mailuser</strong>
+          <p id="imap-hint" class="hint"></p>
+          <button id="reveal" class="secondary" type="button" data-t="reveal" hidden>显示一次</button>
+          <input id="imap-password" aria-label="Dovecot password" readonly hidden spellcheck="false" autocomplete="off">
+        </div>
+        <p><a id="panel" target="_blank" rel="noopener noreferrer" data-t="panel">打开邮件面板 ↗</a></p>
+      </div>
+      <button id="finish" type="button" data-t="finish">完成并关闭向导</button>
+      <p class="hint" data-t="closeHelp">安装结束后，向导最多继续开放 5 分钟。</p>
+    </section>
+  </main>
+</body>
+</html>

@@ -100,11 +100,13 @@ function buildAuthorizationUrl({
 }
 
 function safeProviderError(payload, status) {
-  const raw = payload && (payload.error_description || payload.error);
-  const message = typeof raw === 'string'
-    ? raw.replace(/[\r\n\0]/g, ' ').slice(0, 300)
-    : `HTTP ${status}`;
-  return new Error(`OAuth2令牌请求失败: ${message}`);
+  // Provider descriptions are untrusted and may echo submitted credentials.
+  const code = ['invalid_grant', 'invalid_client', 'invalid_scope', 'temporarily_unavailable'].includes(payload?.error)
+    ? payload.error : null;
+  const message = code === 'invalid_grant' ? '授权已经失效，请重新授权'
+    : code === 'invalid_client' ? 'OAuth2客户端配置未通过服务商验证'
+      : `OAuth2令牌请求失败 (HTTP ${Number(status) || 0})`;
+  return Object.assign(new Error(message), { code: code || 'oauth_request_failed' });
 }
 
 async function postToken(endpoint, params, { fetchImpl = globalThis.fetch, timeoutMs = 20000 } = {}) {
@@ -115,6 +117,7 @@ async function postToken(endpoint, params, { fetchImpl = globalThis.fetch, timeo
   try {
     const response = await fetchImpl(endpoint, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams(params).toString(),
       signal: controller.signal,
@@ -126,8 +129,11 @@ async function postToken(endpoint, params, { fetchImpl = globalThis.fetch, timeo
     }
     return payload;
   } catch (error) {
-    if (error && error.name === 'AbortError') throw new Error('OAuth2令牌请求超时');
-    throw error;
+    if (controller.signal.aborted || error?.name === 'AbortError') {
+      throw Object.assign(new Error('OAuth2令牌请求超时'), { code: 'oauth_timeout' });
+    }
+    if (['invalid_grant','invalid_client','invalid_scope','temporarily_unavailable','oauth_request_failed'].includes(error?.code)) throw error;
+    throw Object.assign(new Error('无法连接OAuth2令牌服务'), { code: 'oauth_network' });
   } finally {
     clearTimeout(timer);
   }

@@ -1,23 +1,28 @@
+const { withStateLock } = require('./state-lock');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const { runBounded } = require('./bounded-process');
+const { notificationConfigStore, NOTIFICATION_CONFIG_NAME } = require('./notification-config');
 
 function backupFilename(now = new Date()) {
   const stamp = now.toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
   return `mail-aggregator-${stamp}.tar.gz`;
 }
 
-function copySecrets(sourceDir, destinationDir) {
+function copySecrets(sourceDir, destinationDir, topLevel = true) {
   fs.mkdirSync(destinationDir, { recursive: true, mode: 0o700 });
   if (!fs.existsSync(sourceDir)) return;
   for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    // Used for both export and restoring old archives. A notification target is
+    // local policy, not a mailbox credential to transfer between installations.
+    if (topLevel && entry.name.toLowerCase() === NOTIFICATION_CONFIG_NAME) continue;
     const source = path.join(sourceDir, entry.name);
     const destination = path.join(destinationDir, entry.name);
     const stat = fs.lstatSync(source);
     if (stat.isSymbolicLink()) continue;
     if (stat.isDirectory()) {
-      copySecrets(source, destination);
+      copySecrets(source, destination, false);
     } else if (stat.isFile()) {
       fs.copyFileSync(source, destination);
       fs.chmodSync(destination, 0o600);
@@ -25,26 +30,16 @@ function copySecrets(sourceDir, destinationDir) {
   }
 }
 
-function runTar(stageDir, archivePath) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('tar', ['-czf', archivePath, '-C', stageDir, '.'], {
-      env: { PATH: process.env.PATH },
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
-    let stderr = '';
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.once('error', reject);
-    child.once('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`tar 退出码 ${code}${stderr ? `: ${stderr.trim()}` : ''}`));
-    });
+function runTar(stageDir, archivePath, { signal } = {}) {
+  return runBounded('tar', ['-czf', archivePath, '-C', stageDir, '.'], {
+    env: { PATH: process.env.PATH }, signal, timeout: 120000, maxBuffer: 64 * 1024,
   });
 }
 
-function hashFile(filePath) {
+function hashFile(filePath, { signal } = {}) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
-    const stream = fs.createReadStream(filePath);
+    const stream = fs.createReadStream(filePath, { signal });
     stream.on('data', (chunk) => hash.update(chunk));
     stream.once('error', reject);
     stream.once('end', () => resolve(hash.digest('hex')));
@@ -89,12 +84,20 @@ function cleanupStaleBackupWorkdirs(tmpDir, nowMs = Date.now(), maxAgeMs = 24 * 
   return removed;
 }
 
-async function createBackupBundle({
+function createBackupBundle(options) {
+  return createBackupBundleUnlocked(options);
+}
+
+async function createBackupBundleUnlocked({
   db,
   dirs,
   version,
   now = new Date(),
   archiveRunner = runTar,
+  signal,
+  allowDuringRestore = false,
+  inspectSnapshot,
+  migrateNotificationConfig = true,
 }) {
   const workDir = fs.mkdtempSync(path.join(dirs.tmp, 'web-backup-'));
   const stageDir = path.join(workDir, 'stage');
@@ -106,13 +109,25 @@ async function createBackupBundle({
   try {
     fs.mkdirSync(databaseDir, { recursive: true, mode: 0o700 });
     const databasePath = path.join(databaseDir, 'mail-aggregator.db');
+    // Opening a read-only WAL database can leave SQLite sidecars behind.
+    // Keep inspection outside the packaged tree and move only the snapshot.
+    const snapshotPath = inspectSnapshot ? path.join(workDir, 'inspected.db') : databasePath;
     if (!db || typeof db.backup !== 'function') {
       throw new Error('当前 SQLite 驱动不支持在线备份');
     }
-    await db.backup(databasePath);
-    fs.chmodSync(databasePath, 0o600);
-    copySecrets(dirs.secrets, secretsDir);
+    const root = dirs.root || path.dirname(dirs.tmp);
+    await withStateLock(root, async () => {
+      if (signal?.aborted) throw new Error('Operation cancelled');
+      // An offline pre-restore snapshot may be the first operation after a
+      // manual upgrade. Preserve this host's old destination before the swap.
+      if (migrateNotificationConfig) notificationConfigStore(root, dirs.secrets).initialize({ onlyIfLegacy: true });
+      await db.backup(snapshotPath);
+      fs.chmodSync(snapshotPath, 0o600);
+      copySecrets(dirs.secrets, secretsDir);
+    }, { allowDuringRestore });
 
+    const snapshot = inspectSnapshot ? await inspectSnapshot(snapshotPath) : undefined;
+    if (inspectSnapshot) fs.renameSync(snapshotPath, databasePath);
     const files = await buildFileInventory(stageDir);
 
     const manifest = {
@@ -121,7 +136,8 @@ async function createBackupBundle({
       applicationVersion: version,
       createdAt: now.toISOString(),
       includes: ['data/db/mail-aggregator.db', 'data/secrets/'],
-      excludes: ['Maildir', 'cache', 'logs', 'tmp', 'restore-points', 'session.secret', 'runtime-config'],
+      excludes: ['Maildir', 'cache', 'logs', 'tmp', 'restore-points', 'session.secret', 'runtime-config',
+        'notification.json', 'data/secrets/notification.json'],
       warning: 'Contains plaintext email credentials. Store offline and encrypted.',
       files,
     };
@@ -131,7 +147,7 @@ async function createBackupBundle({
       { mode: 0o600 }
     );
 
-    await archiveRunner(stageDir, archivePath);
+    await archiveRunner(stageDir, archivePath, { signal });
     fs.chmodSync(archivePath, 0o600);
     const sha256 = await hashFile(archivePath);
     let cleaned = false;
@@ -142,6 +158,7 @@ async function createBackupBundle({
       checksumFilename: `${filename}.sha256`,
       checksumText: `${sha256}  ${filename}\n`,
       manifest,
+      ...(inspectSnapshot ? { snapshot } : {}),
       cleanup() {
         if (cleaned) return;
         cleaned = true;

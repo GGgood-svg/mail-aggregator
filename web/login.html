@@ -13,26 +13,52 @@
     <div id="http-warning" class="hint" style="display:none;background:rgba(245,166,35,.1);border:1px solid var(--warn);border-radius:8px;padding:10px;margin-bottom:14px;color:var(--warn);">
       当前通过 HTTP 连接。密码会交给服务器校验，但传输过程无法抵御窃听或网页劫持；外网访问请先配置 HTTPS。
     </div>
+    <div id="password-step">
     <div class="form-group">
-      <label>用户名</label>
+      <label for="username">用户名</label>
       <input type="text" id="username" autocomplete="username">
     </div>
     <div class="form-group">
-      <label>密码</label>
+      <label for="password">密码</label>
       <input type="password" id="password" autocomplete="current-password">
     </div>
     <div class="form-group" id="password-hint" style="display:none;">
       <div class="hint">首次使用,请创建管理员账号(密码至少10位)</div>
     </div>
+    </div>
+    <section id="login-totp-step" hidden data-i18n-skip>
+      <p class="hint" data-totp="loginHint"></p>
+      <div class="form-group"><label for="login-totp-code" data-totp="loginCode"></label>
+        <input id="login-totp-code" type="text" maxlength="40" autocomplete="one-time-code" autocapitalize="none" spellcheck="false">
+      </div>
+      <p><button type="button" class="btn secondary" id="login-totp-back" data-totp="back"></button></p>
+    </section>
     <button class="btn" id="submit-btn" style="width:100%;">登录</button>
-    <div id="error-msg" style="color:var(--err);font-size:13px;margin-top:10px;"></div>
+    <div id="error-msg" role="alert" style="color:var(--err);font-size:13px;margin-top:10px;"></div>
   </div>
 </div>
 <script src="/js/api.js"></script>
 <script src="/js/branding.js"></script>
 <script src="/js/i18n.js"></script>
+<script src="/js/totp-i18n.js"></script>
 <script>
 let isSetupMode = false;
+let waitingForTotp = false;
+const submit = document.getElementById('submit-btn');
+const totpCode = document.getElementById('login-totp-code');
+const error = document.getElementById('error-msg');
+function totpStep(active) {
+  waitingForTotp = active;
+  document.getElementById('password-step').hidden = active;
+  document.getElementById('login-totp-step').hidden = !active;
+  document.getElementById('login-totp-back').disabled = false;
+  document.getElementById('password').value = '';
+  totpCode.value = '';
+  submit.textContent = active ? TotpText.t('verify') : I18n.t('登录');
+  if (!active) setCsrfToken(null);
+  (active ? totpCode : document.getElementById('username')).focus();
+}
+document.getElementById('login-totp-back').onclick = () => { if (!submit.disabled) { error.textContent = ''; totpStep(false); } };
 
 async function init() {
   document.getElementById('http-warning').style.display = location.protocol === 'https:' ? 'none' : 'block';
@@ -50,30 +76,37 @@ async function init() {
   }
 }
 
-document.getElementById('submit-btn').addEventListener('click', async () => {
-  const username = document.getElementById('username').value.trim();
-  const password = document.getElementById('password').value;
-  const errEl = document.getElementById('error-msg');
-  errEl.textContent = '';
-  if (!username || !password) {
-    errEl.textContent = '请输入用户名和密码';
-    return;
-  }
+submit.addEventListener('click', async () => {
+  if (submit.disabled) return;
+  error.textContent = '';
+  submit.disabled = true;
   try {
-    if (isSetupMode) {
-      await Api.post('/api/auth/setup', { username, password });
+    if (waitingForTotp) {
+      const code = totpCode.value.trim();
+      if (!code) { error.textContent = TotpText.t('loginCode'); return; }
+      await Api.post('/api/auth/login/totp', { code });
     } else {
-      await Api.post('/api/auth/login', { username, password });
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+      if (!username || !password) { error.textContent = I18n.t('请输入用户名和密码'); return; }
+      const result = await Api.post(isSetupMode ? '/api/auth/setup' : '/api/auth/login', { username, password });
+      if (result.requiresTotp) {
+        setCsrfToken(result.csrfToken);
+        totpStep(true);
+        return;
+      }
     }
     window.location.href = '/index.html';
-  } catch (e) {
-    errEl.textContent = e.message;
-  }
+  } catch (failure) {
+    if (waitingForTotp && failure.details?.code === 'totp_login_expired') totpStep(false);
+    if (waitingForTotp) { totpCode.value = ''; totpCode.focus(); }
+    error.textContent = TotpText.failure(failure);
+  } finally { submit.disabled = false; }
 });
 
-document.getElementById('password').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') document.getElementById('submit-btn').click();
-});
+for (const id of ['username', 'password', 'login-totp-code']) {
+  document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') submit.click(); });
+}
 
 init();
 </script>

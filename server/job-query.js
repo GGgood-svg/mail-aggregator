@@ -8,6 +8,14 @@ const JOB_STATUSES = Object.freeze([
   'cancelled',
 ]);
 
+function serializeJob(row) {
+  const { pid_identity, ...legacy } = row;
+  return { ...legacy, stage: row.stage ?? null, resultCode: row.result_code ?? null,
+    resultKnown: row.result_known == null ? (row.status === 'interrupted' ? false : null) : Boolean(row.result_known),
+    triggerSource: row.trigger_source ?? null, transportState: row.transport_state ?? null,
+    transferStartedAt: row.transfer_started_at ?? null, nextRetryAt: row.next_attempt_at ?? null, finishedAt: row.finished_at ?? null };
+}
+
 function listJobs(db, { accountId = null, ownerUserId = null, status = null, page = 1, pageSize = 25 } = {}) {
   const clauses = [];
   const params = [];
@@ -39,9 +47,9 @@ function listJobs(db, { accountId = null, ownerUserId = null, status = null, pag
   ).all(...params, pageSize, offset);
 
   return {
-    items,
+    items: items.map(serializeJob),
     pagination: { page: safePage, pageSize, total, totalPages },
   };
 }
 
-module.exports = { JOB_STATUSES, listJobs };
+module.exports = { JOB_STATUSES, listJobs, serializeJob };

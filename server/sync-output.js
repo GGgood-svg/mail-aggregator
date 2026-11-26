@@ -32,6 +32,13 @@ function parseSummary(output) {
   };
 }
 
+// Only a source IMAP error can throttle that provider. Folder names, normal
+// diagnostics, and target errors must not slow other accounts at the source.
+function isSourceRateLimit(line) {
+  return /^\s*Host1\s*:?\s+(?:failure\b|error\b|login\s+failed\b|(?:\*\s+)?(?:NO|BYE)\b)/i.test(line)
+    && /\[(?:LIMIT|THROTTLED|RATE-LIMIT)\]|too many simultaneous (?:connections|sessions)|(?:explicit )?rate limit exceeded/i.test(line);
+}
+
 // imapsync can be very verbose. Keep only a bounded diagnostic tail while
 // extracting counters incrementally, so a long-running job cannot retain its
 // complete stdout/stderr in the Node.js heap.
@@ -40,6 +47,7 @@ function createOutputCollector({ tailChars = 1024 * 1024, maxFolders = 100000 } 
   const explicit = Object.create(null);
   const folders = { 1: new Map(), 2: new Map() };
   let tail = '';
+  let sourceRateLimited = false;
 
   const keepTail = (text) => {
     tail += text;
@@ -47,6 +55,7 @@ function createOutputCollector({ tailChars = 1024 * 1024, maxFolders = 100000 } 
   };
 
   const consumeLine = (line) => {
+    sourceRateLimited ||= isSourceRateLimit(line);
     const counters = [
       ['host1Messages', /Host1\s+Nb\s+messages\s*:\s*(\d+)/i],
       ['host2Messages', /Host2\s+Nb\s+messages\s*:\s*(\d+)/i],
@@ -89,6 +98,7 @@ function createOutputCollector({ tailChars = 1024 * 1024, maxFolders = 100000 } 
     const host2 = fallback(2);
     return {
       tail,
+      sourceRateLimited,
       summary: {
         host1Messages: explicit.host1Messages ?? host1?.messages ?? null,
         host2Messages: explicit.host2Messages ?? host2?.messages ?? null,
@@ -124,4 +134,16 @@ function categorizeTestError(combinedOutput, timedOut) {
   return { category: 'unknown', message: '连接失败,请查看详细日志' };
 }
 
-module.exports = { parseSummary, createOutputCollector, categorizeTestError };
+// Match explicit failure phrases only. Normal imapsync output also mentions
+// passwords and authentication, so those words alone are not diagnostic.
+function categorizeSyncFailure(output, status, sourceRateLimited = false) {
+  if (status === 'timed_out') return 'timeout';
+  const text = String(output || '');
+  if (sourceRateLimited || text.split(/\r?\n/).some(isSourceRateLimit)) return 'provider_rate_limited';
+  if (/(?:authenticationfailed|invalid_grant|invalid credentials|authentication\s+(?:failed|failure)|login\s+(?:failed|failure)|(?:password|credential).{0,60}(?:incorrect|invalid|rejected))/i.test(text)) return 'auth_failed';
+  if (/(?:connection refused|network is unreachable|no route to host|could not connect|econnrefused|econnreset|eai_again|enotfound|timed?\s*out|temporary failure in name resolution|无法解析[^\r\n]*地址)/i.test(text)) return 'network';
+  if (/(?:certificate verify failed|tls handshake failed|ssl handshake failed)/i.test(text)) return 'tls_failed';
+  return 'unknown';
+}
+
+module.exports = { parseSummary, createOutputCollector, categorizeTestError, categorizeSyncFailure };

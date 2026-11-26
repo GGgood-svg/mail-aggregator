@@ -1,7 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const root = path.join(__dirname, '..');
 
@@ -13,10 +15,11 @@ test('CLI backup uses the online backup implementation instead of copying a live
 
 test('CLI restore verifies before stopping and never directly extracts or deletes live state', () => {
   const script = fs.readFileSync(path.join(root, 'scripts', 'restore.sh'), 'utf8');
-  const verifyAt = script.indexOf('verify-backup.sh');
+  const verifyAt = script.indexOf('server/cli-restore.js" prepare');
   const stopAt = script.indexOf('mail-aggregator stop');
   assert.ok(verifyAt >= 0 && stopAt > verifyAt, 'preflight must happen before service stop');
   assert.match(script, /server\/cli-restore\.js/);
+  assert.match(script, /su -s \/bin\/sh mailadmin -c[^\n]+server\/cli-restore\.js/);
   assert.doesNotMatch(script, /tar\s+x/);
   assert.doesNotMatch(script, /rm\s+-rf\s+[^\n]*DATA_DIR/);
 });
@@ -24,7 +27,8 @@ test('CLI restore verifies before stopping and never directly extracts or delete
 test('direct CLI restore refuses to run without the stopped-service wrapper marker', () => {
   const source = fs.readFileSync(path.join(root, 'server', 'cli-restore.js'), 'utf8');
   assert.match(source, /MAIL_AGG_CLI_RESTORE_STOPPED/);
-  assert.match(source, /verifyBackupArchive/);
+  assert.match(source, /prepareRestoreArchive/);
+  assert.match(source, /prepared\.stageSeal !== await sealStage/);
   assert.match(source, /createBackupBundle/);
   assert.match(source, /restoreApplicationState/);
 });
@@ -37,14 +41,57 @@ test('full installer generates a unique password instead of shipping a shared de
   assert.match(script, /\$\{#INITIAL_DOVECOT_PASSWORD\}[^\n]*-eq 32/);
 });
 
-test('fresh installs bind locally and require an explicit exposure mode', () => {
+test('installer previews LAN for fresh apps and preserves the exposure of upgrades', {
+  skip: process.platform === 'win32' && !process.env.MAIL_TEST_POSIX_SH,
+}, t => {
+  const fixture = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'mail-agg-install-'));
+  t.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+  const write = (name, contents) => {
+    const file = path.join(fixture, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, contents);
+  };
+  // Re-root install markers without adding path overrides to the privileged installer.
   const script = fs.readFileSync(path.join(root, 'scripts', 'install.sh'), 'utf8');
-  assert.match(script, /MAIL_AGG_BIND_HOST="127\.0\.0\.1"/);
-  assert.match(script, /--lan-http/);
-  assert.match(script, /--https-proxy/);
-  assert.match(script, /MAIL_AGG_REQUIRE_HTTPS="true"/);
-  const openrc = fs.readFileSync(path.join(root, 'scripts', 'mail-aggregator.openrc'), 'utf8');
-  assert.match(openrc, /MAIL_AGG_REQUIRE_HTTPS/);
+  write('scripts/install.sh', script.replace(/\/(etc|opt|var)\//g, './$1/'));
+  for (const file of ['maintenance.sh', 'manual-update.sh', 'install-platform.sh', 'imapsync-install.sh']) {
+    write(`scripts/lib/${file}`, fs.readFileSync(path.join(root, 'scripts', 'lib', file), 'utf8')
+      .replace(/\/(etc|opt|var)\//g, './$1/'));
+  }
+  // --custom normally hides the password on a terminal, but this fixture supplies blank input.
+  fs.appendFileSync(path.join(fixture, 'scripts/lib/maintenance.sh'), '\nstty() { :; }\n');
+  const preview = (args, bind, https = false, input) => {
+    const output = execFileSync(process.env.MAIL_TEST_POSIX_SH || 'sh',
+      ['scripts/install.sh', '--show-config', ...args], { cwd: fixture, encoding: 'utf8', input });
+    const lines = output.split(/\r?\n/);
+    assert.ok(lines.includes(`Web bind: ${bind}`), output);
+    assert.ok(lines.includes(`Require HTTPS: ${https}`), output);
+    return output;
+  };
+
+  assert.match(preview(['--quick'], '0.0.0.0'), /^Dovecot host: 127\.0\.0\.1$/m);
+  write('etc/dovecot/dovecot.conf', '# Existing Dovecot');
+  preview(['--app-only'], '0.0.0.0');
+  preview(['--full', '--local-http'], '127.0.0.1');
+  preview(['--full', '--https-proxy'], '127.0.0.1', true);
+  preview(['--custom'], '0.0.0.0', false, '\n'.repeat(8));
+
+  const oldData = path.join(fixture, 'var/lib/mail-aggregator');
+  fs.mkdirSync(oldData, { recursive: true });
+  preview(['--app-only'], '127.0.0.1');
+  fs.rmdirSync(oldData);
+  const service = 'etc/init.d/mail-aggregator';
+  write(service, '# Existing OpenRC service');
+  preview(['--app-only'], '127.0.0.1');
+  fs.unlinkSync(path.join(fixture, service));
+  write('etc/mail-aggregator/config', 'WEB_PORT=8181\n');
+  assert.match(preview(['--app-only'], '127.0.0.1'), /^Web port: 8181$/m);
+  write('etc/mail-aggregator/config', 'MAIL_AGG_BIND_HOST=127.0.0.1\nMAIL_AGG_TRUST_PROXY=loopback\nMAIL_AGG_COOKIE_SECURE=true\nMAIL_AGG_REQUIRE_HTTPS=true\n');
+  preview(['--app-only'], '127.0.0.1', true);
+  preview(['--app-only', '--local-http'], '127.0.0.1');
+  preview(['--app-only', '--lan-http'], '0.0.0.0');
+  write('etc/mail-aggregator/config', 'MAIL_AGG_BIND_HOST=192.0.2.17\n');
+  preview(['--custom'], '192.0.2.17', false, '\n'.repeat(8));
 });
 
 test('installer exposes an explicit app-only mode and rejects conflicting full modes', () => {
@@ -57,9 +104,12 @@ test('installer exposes an explicit app-only mode and rejects conflicting full m
 test('installer stages a complete app tree and service logs are owner-only', () => {
   const script = fs.readFileSync(path.join(root, 'scripts', 'install.sh'), 'utf8');
   assert.match(script, /APP_STAGE="\$\{APP_DIR\}\.deploy"/);
-  assert.match(script, /! -d "\$APP_DIR"[^\n]*-d "\$APP_PREVIOUS"/);
-  assert.match(script, /npm install --omit=dev --no-audit --no-fund/);
-  assert.ok(script.indexOf('npm install --omit=dev') < script.indexOf('mv "$APP_STAGE" "$APP_DIR"'));
+  const recovery = fs.readFileSync(path.join(root, 'scripts', 'lib', 'manual-update.sh'), 'utf8');
+  assert.match(recovery, /! -d "\$APP_DIR"[^\n]*-d "\$APP_PREVIOUS"/);
+  assert.ok(recovery.indexOf('assert_mail_aggregator_unresolved_absent') < recovery.indexOf('mv "$APP_PREVIOUS" "$APP_DIR"'));
+  assert.ok(recovery.indexOf('manual_phase swapping') < recovery.indexOf('mv "$APP_DIR" "$APP_PREVIOUS"'));
+  assert.match(script, /npm_run='install'/);
+  assert.ok(script.indexOf('npm rebuild --omit=dev') < script.indexOf('mv "$APP_STAGE" "$APP_DIR"'));
   const openrc = fs.readFileSync(path.join(root, 'scripts', 'mail-aggregator.openrc'), 'utf8');
   assert.match(openrc, /checkpath -f -m 0600/);
   assert.match(script, /chmod 700 "\$DATA_DIR"/);
@@ -67,15 +117,17 @@ test('installer stages a complete app tree and service logs are owner-only', () 
 
 test('app-only deployment installs locked dependencies and must restart the service', () => {
   const source = fs.readFileSync(path.join(root, 'scripts', 'install.sh'), 'utf8');
-  assert.match(source, /npm ci --omit=dev --no-audit --no-fund/);
+  assert.match(source, /npm_run='ci'/);
   assert.match(source, /service_restart mail-aggregator \\\n\s*\|\| fail_step "9\/9"/);
   assert.doesNotMatch(source, /if \[ "\$FULL" = "1" \]; then\s*\n\s*if service_status mail-aggregator/);
 });
 
 test('installer rejects a Node.js runtime older than the package engine', () => {
   const script = fs.readFileSync(path.join(root, 'scripts', 'install.sh'), 'utf8');
-  assert.match(script, /process\.versions\.node\.split/);
-  assert.match(script, /major > 22 \|\| \(major === 22 && minor >= 12\)/);
+  const platform = fs.readFileSync(path.join(root, 'scripts', 'lib', 'install-platform.sh'), 'utf8');
+  assert.match(script, /\. "\$PROJECT_ROOT\/scripts\/lib\/install-platform\.sh"/);
+  assert.match(script, /node_version_supported \\\n\s*\|\| fail_step "3\/9"/);
+  assert.match(platform, /major > 22 \|\| \(major === 22 && minor >= 12\)/);
   assert.match(script, /Node\.js 版本低于 22\.12/);
 });
 
