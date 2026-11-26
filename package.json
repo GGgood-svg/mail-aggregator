@@ -1,6 +1,6 @@
 {
   "name": "mail-aggregator",
-  "version": "0.2.2-beta.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Self-hosted IMAP aggregation and read-only Web mail panel powered by imapsync and Dovecot",
   "main": "server/app.js",

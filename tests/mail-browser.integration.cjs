@@ -73,6 +73,38 @@ test('dashboard renders accounts while diagnostics are pending and contains mobi
   assert.deepEqual(errors, []);
 });
 
+test('phone pages use the device width and keep wide tables locally scrollable', async t => {
+  const app = express();
+  const long = `Layout fixture ${'UnbrokenAccountIdentifier'.repeat(9)}`;
+  app.get('/api/auth/me', (_, res) => res.json({ id: 1, username: 'Fixture', role: 'admin', primaryAdmin: true, csrfToken: 'fixture' }));
+  app.get('/api/auth/setup-status', (_, res) => res.json({ needsSetup: false }));
+  app.get('/api/branding', (_, res) => res.json({ web_language: 'zh-CN' }));
+  app.get('/api/accounts', (_, res) => res.json([{ id: 1, name: long, username: 'fixture@example.invalid', enabled: false,
+    display: { totalMessages: 0, totalFolders: 0 } }]));
+  app.get('/api/accounts/providers', (_, res) => res.json([]));
+  app.get('/api/jobs', (_, res) => res.json({ items: [{ id: 1, account_name: long, status: 'failed', error: long }],
+    pagination: { page: 1, total: 1, totalPages: 1 } }));
+  app.use(express.static(path.join(__dirname, '../web')));
+  const server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  let browser;
+  t.after(async () => { await browser?.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  browser = await chromium.launch({ headless: true, executablePath: process.env.MAIL_TEST_BROWSER_EXECUTABLE });
+  const width = 390;
+  const page = await browser.newPage({ viewport: { width, height: 844 }, isMobile: true, hasTouch: true });
+  for (const file of ['login', 'accounts', 'account-edit', 'settings', 'system-info', 'logs']) {
+    await page.goto(`http://127.0.0.1:${server.address().port}/${file}.html`);
+    if (file === 'accounts' || file === 'logs') {
+      await page.locator('.table-scroll tbody tr').first().waitFor();
+      const region = page.locator('.main .table-scroll').first();
+      await region.focus();
+      assert.equal(await region.evaluate(el => el === document.activeElement && el.scrollWidth > el.clientWidth), true, file);
+    }
+    const sizes = await page.evaluate(() => ({ viewport: document.documentElement.clientWidth, document: document.scrollingElement.scrollWidth }));
+    assert.deepEqual(sizes, { viewport: width, document: width }, file);
+  }
+});
+
 test('browser handles cross-folder search, unified unread, flags and background progress', async t => {
   const makeMessage = (uid, prefix) => ({ uid, size: 1572864, flags: new Set(), body: 'synthetic content', recipient: 'reader@example.invalid', envelope: { subject: `${prefix} ${uid}`, to: [{ address: 'reader@example.invalid' }] } });
   const boxes = {
@@ -152,6 +184,15 @@ test('browser handles cross-folder search, unified unread, flags and background 
     throw new Error(`page errors: ${JSON.stringify(errors)}; notifications: ${JSON.stringify(await page.locator('.toast').allTextContents())}`, { cause: error });
   });
   assert.equal(boxes['U1-A1.INBOX'].messages.filter(m => m.flags.has('\\Seen')).length, 0);
+  // Internal overflow can clip the reader without making the document wider.
+  for (const width of [768, 1050, 1051, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    const geometry = await page.locator('.mail-layout').evaluate(layout => ({
+      layout: layout.getBoundingClientRect().right,
+      reader: layout.querySelector('.mail-reader').getBoundingClientRect().right,
+    }));
+    assert.ok(geometry.reader <= geometry.layout + 1, `${width}px: ${JSON.stringify(geometry)}`);
+  }
   let failPage = true;
   const failedPagination = async route => {
     const query = route.request().postDataJSON();

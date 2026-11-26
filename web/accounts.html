@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>邮箱账号 - Mail Aggregator</title>
 <link rel="stylesheet" href="/css/style.css">
 </head>
@@ -14,7 +15,7 @@
   </div>
   <div class="main">
     <div class="topbar">
-      <h1>邮箱账号</h1>
+      <h1 id="accounts-title">邮箱账号</h1>
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn secondary" id="sync-all-btn">同步所有已启用账号</button>
         <button class="btn secondary" id="cancel-all-btn">取消全部排队任务</button>
@@ -23,15 +24,17 @@
     </div>
 
     <div class="panel">
-      <table>
-        <thead>
-          <tr>
-            <th>名称</th><th>邮箱</th><th>落盘方式</th><th>状态</th><th>邮件总数</th>
-            <th>最后同步</th><th>启用</th><th style="min-width:320px;">操作</th>
-          </tr>
-        </thead>
-        <tbody id="accounts-body"></tbody>
-      </table>
+      <div class="table-scroll table-scroll-wide" role="region" aria-labelledby="accounts-title" tabindex="0">
+        <table>
+          <thead>
+            <tr>
+              <th>名称</th><th>邮箱</th><th>落盘方式</th><th>状态</th><th>邮件总数</th>
+              <th>最后同步</th><th>启用</th><th style="min-width:320px;">操作</th>
+            </tr>
+          </thead>
+          <tbody id="accounts-body"></tbody>
+        </table>
+      </div>
       <div class="empty" id="empty" style="display:none;">还没有添加任何邮箱账号</div>
     </div>
   </div>
