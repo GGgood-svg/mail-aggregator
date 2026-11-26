@@ -27,6 +27,13 @@ function installed(platform) {
     .map(line => line.split('\t')).filter(([name, status]) => packageName.test(name) && status === 'installed')
     .map(([name]) => name).sort();
 }
+function managedUserFile(contents, user) {
+  const lines = contents.split(/\r?\n/).filter(Boolean);
+  const prefix = `${user}:`;
+  // The installer and password helper use a Dovecot passwd-file entry
+  // with empty optional fields. A nonempty field may override mailbox access.
+  return lines.length === 1 && lines[0].startsWith(prefix) && /^\{[A-Z0-9-]+\}[^:\s]+::::::$/.test(lines[0].slice(prefix.length));
+}
 function readConfig(user, { partial = false } = {}) {
   const state = Object.create(null);
   const root = exists(config);
@@ -59,8 +66,7 @@ function readConfig(user, { partial = false } = {}) {
     if (mutable.has(relative)) {
       // The app legitimately replaces this hash; any extra user or directive
       // makes the entire install ineligible for automatic removal.
-      const lines = bytes.toString('utf8').split(/\r?\n/).filter(Boolean);
-      check(lines.length === 1 && lines[0].startsWith(`${user}:`) && /^\{[A-Z0-9-]+\}[^:\s]+$/.test(lines[0].slice(user.length + 1)));
+      check(managedUserFile(bytes.toString('utf8'), user));
       if (relative === 'users.mail-aggregator-backup') return;
       state[relative] = 'managed-user';
       return;
@@ -182,4 +188,4 @@ if (require.main === module) {
   try { main(process.argv.slice(2)); }
   catch (_) { process.exitCode = 1; }
 }
-module.exports = { removals };
+module.exports = { managedUserFile, removals };

@@ -1,8 +1,18 @@
 'use strict';
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { removals } = require('../scripts/lib/owned-dovecot');
+const { managedUserFile, removals } = require('../scripts/lib/owned-dovecot');
 const { createUninstallHost } = require('../server/uninstall-host');
+
+test('the installer passwd-file remains eligible after its password changes, but extra users or overrides do not', () => {
+  const original = 'mailuser:{SHA512-CRYPT}$6$salt$hash::::::\n';
+  assert.equal(managedUserFile(original, 'mailuser'), true);
+  assert.equal(managedUserFile(original.replace('$hash', '$changed'), 'mailuser'), true);
+  assert.equal(managedUserFile(original, 'different_user'), false);
+  assert.equal(managedUserFile(original + original.replace('mailuser:', 'another:'), 'mailuser'), false);
+  assert.equal(managedUserFile(original.replace('::::::', ':1234:::::'), 'mailuser'), false);
+  assert.equal(managedUserFile(original.replace('::::::', '::::::userdb_mail_path=/srv/other'), 'mailuser'), false);
+});
 
 const alpine = ['dovecot-openrc', 'dovecot'];
 const alpinePlan = `( 1/3) Purging dovecot-openrc (2.4.5-r0)
