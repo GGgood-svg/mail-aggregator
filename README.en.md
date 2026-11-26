@@ -46,6 +46,10 @@ Mail Aggregator manages synchronization; it does not replace Dovecot. Message da
 
 ## Quick install
 
+### Download the release source
+
+Select a version on [GitHub Releases](https://github.com/GGgood-svg/mail-aggregator/releases/latest) and download **Source code (tar.gz)**. The [complete deployment guide (Simplified Chinese)](./DEPLOYMENT.md) has copyable commands for downloading directly on the server or transferring the archive from another computer, plus upgrade, backup, and restore instructions. The signed Alpine update bundle does not include the first-time installation wizard.
+
 ### Web installation wizard (fresh Linux host)
 
 The wizard accepts **Alpine 3.21 and later 3.x (OpenRC)**, **Debian 12/13 (systemd)** and **Ubuntu 22.04 / 24.04 / 26.04 and later Ubuntu releases recognized by the installer (systemd)** on `x86_64` and `aarch64`. The configured repositories must supply Dovecot 2.3 or 2.4. Prefer a distribution release still receiving maintenance.
@@ -53,7 +57,7 @@ The wizard accepts **Alpine 3.21 and later 3.x (OpenRC)**, **Debian 12/13 (syste
 - Alpine: if only `main` is enabled for this release, the wizard checks for `community` on the same mirror and release branch. When the index refresh succeeds, it backs up `/etc/apk/repositories` and adds that entry. An existing matching `community` or a custom configuration that cannot be safely matched is left as is. `--check` only reports the planned action.
 - Debian / Ubuntu: a system npm and **Node.js 22.12 or later** at `/usr/bin/node` are required. If the configured apt sources cannot provide them, set up both from a trusted source first. A Node version installed only in a user's nvm profile cannot run the service. On Ubuntu, dependencies may require the distribution's `universe` repository.
 
-Unpack the SHA-256 verified source archive in a private directory owned by root. Run the following from that directory as `root`:
+After downloading and unpacking the release source, run the following from the extracted source directory as `root`:
 
 ```sh
 sh scripts/install-web.sh
@@ -70,12 +74,10 @@ The temporary wizard binds only the selected address and issues a certificate fo
 
 ### Command-line installation
 
-Enable the matching `main` and `community` repositories on a fresh Alpine 3.24 x86_64 machine, then run the installer as `root`.
+Enable the matching `main` and `community` repositories on a fresh Alpine 3.24 x86_64 machine, then run the installer from the extracted source directory as `root`:
 
 ```sh
-cd /root/mail-aggregator
-chmod +x scripts/*.sh scripts/lib/*.sh scripts/platforms/*.sh
-./scripts/install.sh --quick
+sh scripts/install.sh --quick
 ```
 
 Quick mode installs and initializes Dovecot, Maildir, imapsync, and Mail Aggregator. Use the interactive installer to select the local mailbox user, ports, language, and initial password:

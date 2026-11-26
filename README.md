@@ -46,6 +46,10 @@ Mail Aggregator 管理同步，不取代 Dovecot。邮件本体保存在 Maildir
 
 ## 快速安装
 
+### 获取正式版源码
+
+从 [GitHub Releases](https://github.com/GGgood-svg/mail-aggregator/releases/latest) 选择版本并下载 **Source code (tar.gz)**。在服务器上直接下载、解压的可复制命令，以及电脑中转、已有实例升级、备份和恢复步骤，见[完整部署教程](./DEPLOYMENT.md)。用于签名更新的 Alpine 运行包不包含首次安装向导。
+
 ### 网页安装向导（全新 Linux 主机）
 
 适用范围：**Alpine 3.21 及更新的 3.x（OpenRC）**、**Debian 12/13（systemd）**、**Ubuntu 22.04 / 24.04 / 26.04 及安装器识别的更新 Ubuntu 版本（systemd）**，架构为 `x86_64` 或 `aarch64`。软件源还需提供兼容的 Dovecot 2.3 或 2.4。优先使用仍在维护的发行版。
@@ -53,7 +57,7 @@ Mail Aggregator 管理同步，不取代 Dovecot。邮件本体保存在 Maildir
 - Alpine：如果只启用了本机分支的 `main`，向导会检查同镜像、同分支的 `community`，成功后备份 `/etc/apk/repositories` 并补上这一项。已有同分支 `community` 或无法安全判断的自定义软件源会保留原样。`--check` 只报告，不改配置。
 - Debian / Ubuntu：需要系统 npm 和 `/usr/bin/node` 的 **Node.js 22.12 或更新版本**。如果当前 apt 源没有合适版本，请先从可信来源准备系统 Node.js 和 npm；只给登录账号安装的 nvm 版本不能供服务使用。Ubuntu 的依赖可能需要发行版的 `universe` 源。
 
-将已核对 SHA-256 的安装包解压到 root 的私有目录。在解压目录以 `root` 运行：
+按上一步获取源码后，在解压出的源码目录以 `root` 运行：
 
 ```sh
 sh scripts/install-web.sh
@@ -70,12 +74,10 @@ sh scripts/install-web.sh
 
 ### 命令行安装
 
-在全新的 Alpine 3.24 x86_64 机器上启用同一分支的 `main` 和 `community` 软件仓库，再以 `root` 执行：
+在全新的 Alpine 3.24 x86_64 机器上启用同一分支的 `main` 和 `community` 软件仓库，再从解压出的源码目录以 `root` 执行：
 
 ```sh
-cd /root/mail-aggregator
-chmod +x scripts/*.sh scripts/lib/*.sh scripts/platforms/*.sh
-./scripts/install.sh --quick
+sh scripts/install.sh --quick
 ```
 
 `--quick` 会安装并初始化 Dovecot、Maildir、imapsync 和 Mail Aggregator。希望选择本地邮箱用户、端口、语言和初始密码时使用：
