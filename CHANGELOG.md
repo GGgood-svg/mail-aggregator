@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.2
+
+- Add a separate, off-by-default Dovecot package and configuration removal option to Web uninstall. It checks installer ownership and the package removal plan before stopping services.
+- Make sign-in, account forms and settings fit phone screens. Keep wide account and sync tables in keyboard-accessible scroll areas and wrap long restore messages.
+- Switch the mailbox to a stacked list and reader on tablets and narrow windows so messages and attachments do not get clipped.
+
+- Let administrators choose a security profile at installation. Trusted LAN permits backup, restore and update installation over direct HTTP from the same private IPv4 subnet. Strict limits those operations to HTTPS or direct local access. Upgrades retain the configured profile; old configurations without a profile remain strict.
+- On Trusted LAN, an administrator who enables two-step verification can sign in with an authenticator code and is asked for a fresh code when confirming these sensitive operations. Setting up the authenticator, handling recovery codes, and public OAuth callbacks still use their protected connections.
+
+- Bundle the official Ed25519 release public key with the trusted source installer. On Alpine 3.24 x86_64 with Node.js 24 and OpenRC, installs and manual upgrades pin it when no key is present. Existing pins and the host installation opt-in are preserved.
+
 ## v0.2.0
 
 - Add a temporary HTTPS setup wizard for supported fresh Linux installations. It selects a LAN address automatically when there is a single choice and can enable the matching Alpine community repository for required packages. The administrator set in the wizard can sign in as soon as installation completes.

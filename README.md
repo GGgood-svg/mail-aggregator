@@ -114,7 +114,7 @@ rc-service mail-aggregator status
 
 ### 应用更新
 
-主管理员可在「设置 → 应用更新」检查 GitHub Releases，默认每天检查正式版。Alpine 3.24 x86_64 / Node.js 24 / OpenRC 可在手工安装执行器、固定公钥并启用本机安装后，设置维护时段或立即安装。详见[部署、更新与回退说明](./APP_UPDATES.md)。
+主管理员可在「设置 → 应用更新」检查 GitHub Releases，默认每天检查正式版。Alpine 3.24 x86_64 / Node.js 24 / OpenRC 从 v0.2.1 起通过可信源码新装或手工升级会自动固定缺失的官方公钥；管理员另行启用本机安装后，可以设置维护时段或立即安装。详见[部署、更新与回退说明](./APP_UPDATES.md)。
 
 主管理员可在「个人安全」开启双重验证。使用前请查看[恢复码与本机接管指引](./TOTP_SECURITY.md)。
 
@@ -159,6 +159,15 @@ https://mail.example.com/api/oauth/callback/microsoft
 ```
 
 应用专用密码/授权码走普通 IMAP 登录，不需要 OAuth 回调，因此可信内网测试时可直接使用服务器 IP。
+
+## 安装时选安全档位
+
+安全档位只决定敏感操作的连接和确认要求。监听地址和反向代理仍按原配置。网页安装向导会要求选择；终端安装可用 `--custom` 交互选择，或按场景传 `--security-profile trusted-lan` 或 `--security-profile strict`。未指定的终端新装与旧配置使用严格档；升级保留已经选过的档位。
+
+- **可信局域网**：同一私有 IPv4 子网直连可下载备份和快照、确认恢复和安装更新。确认当前密码；已开启两步验证的主管理员还需输入新的六位验证码。
+- **严格**：这些操作须通过 HTTPS 或本机连接。没有证书可用下面的 SSH 转发，从浏览器访问 `127.0.0.1`。
+
+两步验证确认操作者身份，HTTP 流量仍是明文。配置验证器、管理和使用恢复码请走 HTTPS 或 SSH 转发；公网 OAuth 回调仍需 HTTPS。切换档位及服务器重启方法见[部署教程](./DEPLOYMENT.md#31-可信局域网直接访问)。
 
 ## HTTPS 反向代理
 
@@ -228,7 +237,9 @@ sudo /opt/mail-aggregator/scripts/restore.sh backup.tar.gz backup.tar.gz.sha256
 sudo ./scripts/uninstall.sh
 ```
 
-该脚本卸载应用，并交互询问是否删除应用数据和程序目录；不会删除 Dovecot、imapsync 或 Maildir。Web 设置页另有明确区分的“程序卸载”和“彻底卸载”模式，彻底卸载会删除 Dovecot、本地邮箱用户及其 Maildir，操作不可撤销。
+该脚本卸载应用，并交互询问是否删除应用数据和程序目录；不会删除 Dovecot、imapsync 或 Maildir。网页「彻底卸载」额外删除安装器创建并能核对归属的 Maildir，默认保留 Dovecot。
+
+如果系统能确认 Dovecot 的软件包与配置由本安装器全新安装，网页会提供「同时卸载 Dovecot 软件和配置」。勾选后输入 `PURGE-DOVECOT` 并确认；执行器会先校验配置和软件包卸载计划，再移除相应服务、软件包及 `/etc/dovecot` 配置。复用或旧版安装、外部修改过的配置，以及会影响其他软件的卸载计划都会被保留。imapsync 和本地系统账号保留。以主机卸载回执中的 `state`、`maildir` 和 `dovecot` 为准。
 
 ## 开发与测试
 

@@ -9,6 +9,7 @@ const JOB_MS = 2 * 60 * 60_000;
 const MAX_LINE = 8192;
 const TOKEN = /^[0-9a-f]{64}$/;
 const LANGUAGES = new Set(['zh-CN', 'en-US', 'ja-JP', 'ko-KR', 'es-ES', 'fr-FR', 'de-DE']);
+const SECURITY_PROFILES = new Set(['strict', 'trusted-lan']);
 const validWebPort = port => Number.isInteger(port) && port >= 1024 && port <= 65535 && port !== WIZARD_PORT;
 const validData = (data, ...keys) => Boolean(data && Object.getPrototypeOf(data) === Object.prototype
   && Object.keys(data).length === keys.length && keys.every(key => Object.hasOwn(data, key)));
@@ -19,10 +20,10 @@ const response = (status, body) => ({ status, body });
 const fail = (status, error) => response(status, { error });
 
 function installOptions(data) {
-  if (!validData(data, 'username', 'password', 'webPort', 'language') || !validWebPort(data.webPort)
-      || !LANGUAGES.has(data.language)) return null;
+  if (!validData(data, 'username', 'password', 'webPort', 'language', 'securityProfile') || !validWebPort(data.webPort)
+      || !LANGUAGES.has(data.language) || !SECURITY_PROFILES.has(data.securityProfile)) return null;
   const credentials = adminCredentials(data);
-  return credentials && { ...credentials, webPort: data.webPort, language: data.language };
+  return credentials && { ...credentials, webPort: data.webPort, language: data.language, securityProfile: data.securityProfile };
 }
 
 class InstallSession {

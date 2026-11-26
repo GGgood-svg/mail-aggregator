@@ -1,8 +1,9 @@
 /* global Api, I18n */
 'use strict';
-function initAppUpdate() {
+function initAppUpdate({ totpRequired = false } = {}) {
   const el = name => document.getElementById(`app-update${name ? `-${name}` : ''}`);
   const base = '/api/system/app-update';
+  const credentials = () => ({ currentPassword: el('password').value, totpCode: totpRequired ? el('totp').value.trim() : undefined });
   const t = source => window.I18n?.t(source) || source;
   let latest, working = false, dirty = false;
   el('').hidden = false;
@@ -133,16 +134,16 @@ function initAppUpdate() {
     working = true; controls();
     el('message').textContent = '';
     try { const data = await work(); if (onDone) onDone(); show(data); }
-    catch (error) { el('message').textContent = error.details?.code ? label(error.details.code) : error.message; }
-    finally { el('password').value = ''; working = false; controls(); }
+    catch (error) { el('message').textContent = error.details?.code ? label(error.details.code, error.message) : error.message; }
+    finally { el('password').value = el('totp').value = ''; working = false; controls(); }
   }
   async function refresh() {
     if (working || document.hidden) return;
     try { show(await Api.get(base)); }
     catch (e) { el('status').textContent = e.details?.code ? label(e.details.code) : e.message; }
   }
-  el('form').addEventListener('input', ev => { if (ev.target !== el('password') && ev.target !== holdUntil) dirty = true; controls(); });
-  const changeAuto = changes => act(() => Api.put(`${base}/settings`, { ...changes, currentPassword: el('password').value }));
+  el('form').addEventListener('input', ev => { if (ev.target !== el('password') && ev.target !== el('totp') && ev.target !== holdUntil) dirty = true; controls(); });
+  const changeAuto = changes => act(() => Api.put(`${base}/settings`, { ...changes, ...credentials() }));
   pause.addEventListener('click', () => {
     const at = new Date(holdUntil.value).getTime();
     if (!Number.isFinite(at) || at <= Date.now()) { el('message').textContent = label('invalid_hold_time'); return; }
@@ -156,13 +157,13 @@ function initAppUpdate() {
     const mode = el('mode').value, timezone = el('zone').value.trim();
     if (mode === 'auto' && !window.confirm(`${t('确认开启自动安装，维护时段时区')}: ${timezone}？`)) return;
     act(() => Api.put(`${base}/settings`, { mode, channel: el('channel').value, start: el('start').value,
-      end: el('end').value, timezone, currentPassword: el('password').value }), () => { dirty = false; });
+      end: el('end').value, timezone, ...credentials() }), () => { dirty = false; });
   });
   el('check').addEventListener('click', () => act(() => Api.post(`${base}/check`, {})));
   el('install').addEventListener('click', () => {
     const tag = latest?.candidate?.tag;
     if (!tag || !window.confirm(`${t('确认安装并重启 Web')}: ${tag}？`)) return;
-    act(() => Api.post(`${base}/install`, { tag, currentPassword: el('password').value }));
+    act(() => Api.post(`${base}/install`, { tag, ...credentials() }));
   });
   controls();
   refresh();

@@ -36,7 +36,7 @@ async function main() {
     const bindHost = security.resolveBindHost(requestedHost, '127.0.0.1');
     if (bindHost !== requestedHost || security.validateHttpSecurityConfig({ bindHost,
       trustProxy: security.parseTrustProxy(config.MAIL_AGG_TRUST_PROXY), cookieSecure: security.parseCookieSecure(config.MAIL_AGG_COOKIE_SECURE),
-      requireHttps: security.parseBoolean(config.MAIL_AGG_REQUIRE_HTTPS),
+      requireHttps: security.parseBoolean(config.MAIL_AGG_REQUIRE_HTTPS), securityProfile: config.MAIL_AGG_SECURITY_PROFILE,
     }).length) throw new Error('invalid Web configuration');
     return;
   }

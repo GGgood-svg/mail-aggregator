@@ -10,6 +10,9 @@ const zh = {
   checks: '服务器检查', check: '重新检查', username: '网页管理员用户名', password: '网页管理员密码', confirm: '再次输入密码',
   passwordHelp: '至少 10 个字符，最多 72 个 UTF-8 字节。这个密码用于登录邮件面板。',
   ack: '确认这是一台未装过 Mail Aggregator 或 Dovecot 的服务器。', install: '开始安装', trusted: '安装后，邮件面板使用局域网 HTTP。仅在可信局域网访问。',
+  securityProfile: '敏感操作安全档位', chooseSecurity: '请选择安全档位',
+  securityLan: '可信局域网（适合家用）', securityStrict: '严格（敏感操作使用 HTTPS 或本机转发）',
+  securityHelp: '可信局域网允许同一私有 IPv4 子网直连下载备份、恢复和安装更新。仍需当前密码；开启两步验证后还需一次性验证码。HTTP 不加密，不要把面板端口转发到公网。',
   runningTitle: '正在安装', runningHelp: '可以刷新或关闭这一页。安装会在服务器上继续，稍后用同一浏览器回来查看。',
   accountInfo: '进邮件面板请用上一步设置的管理员用户名和密码，不需要再注册。', imapTitle: '独立的 Dovecot 密码 · mailuser',
   reveal: '显示一次', panel: '打开邮件面板 ↗', finish: '完成并关闭向导', closeHelp: '安装结束后，向导最多继续开放 5 分钟。',
@@ -44,6 +47,9 @@ const en = {
   checks: 'Server checks', check: 'Check again', username: 'Web administrator username', password: 'Web administrator password', confirm: 'Confirm password',
   passwordHelp: 'Use at least 10 characters and at most 72 UTF-8 bytes. Use this password to sign in to the mail panel.',
   ack: 'I confirm this server has no Mail Aggregator or Dovecot installation.', install: 'Install', trusted: 'After setup, the mail panel uses HTTP on your LAN. Use a trusted network.',
+  securityProfile: 'Sensitive operation profile', chooseSecurity: 'Choose a security profile',
+  securityLan: 'Trusted LAN (for home networks)', securityStrict: 'Strict (HTTPS or a local tunnel for sensitive operations)',
+  securityHelp: 'Trusted LAN allows backup, restore and update installation from the same private IPv4 subnet. Confirm your password and, if enabled, a one-time code. HTTP is unencrypted. Do not forward the panel port to the Internet.',
   runningTitle: 'Installing', runningHelp: 'You can refresh or close this page. Installation continues on the server. Return in the same browser to see the result.',
   accountInfo: 'Sign in with the administrator username and password you chose. There is no extra registration step.', imapTitle: 'Separate Dovecot password · mailuser',
   reveal: 'Show once', panel: 'Open mail panel ↗', finish: 'Finish and close wizard', closeHelp: 'The wizard stays open for at most five minutes after installation ends.',
@@ -113,7 +119,7 @@ function showChecks() {
     items.push(row);
   }
   el('checks').replaceChildren(...items);
-  el('install').disabled = busy || !matching || !status.checks.every(item => item.ok);
+  el('install').disabled = busy || !matching || !status.checks.every(item => item.ok) || !el('security-profile').value;
   el('check').disabled = busy;
 }
 
@@ -186,6 +192,7 @@ async function check() {
 
 el('toggle-language').addEventListener('click', () => { locale = locale === 'zh' ? 'en' : 'zh'; translate(); });
 el('web-port').addEventListener('input', showChecks);
+el('security-profile').addEventListener('change', showChecks);
 el('check').addEventListener('click', check);
 el('pair-form').addEventListener('submit', async event => {
   event.preventDefault();
@@ -209,7 +216,7 @@ el('install-form').addEventListener('submit', async event => {
   showChecks();
   try {
     render(await api('install', { username: el('username').value, password,
-      webPort: Number(el('web-port').value), language: el('language').value }));
+      webPort: Number(el('web-port').value), language: el('language').value, securityProfile: el('security-profile').value }));
     el('password').value = el('confirm').value = '';
     alertUser();
     if (status.phase === 'installing') pollSoon();

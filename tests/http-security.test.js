@@ -8,6 +8,7 @@ const {
   parseBoolean,
   isLoopbackAddress,
   isLoopbackBindHost,
+  operationTransport,
   resolveBindHost,
   validateHttpSecurityConfig,
   requireHttpsMiddleware,
@@ -62,6 +63,34 @@ test('HTTPS deployment settings reject spoofable or incomplete proxy configurati
   assert.deepEqual(validateHttpSecurityConfig({ bindHost: '127.0.0.1', trustProxy: 'loopback', cookieSecure: true, requireHttps: true }), []);
   assert.equal(validateHttpSecurityConfig({ bindHost: '0.0.0.0', trustProxy: 1, cookieSecure: true, requireHttps: true }).length, 1);
   assert.equal(validateHttpSecurityConfig({ bindHost: '127.0.0.1', trustProxy: false, cookieSecure: 'auto', requireHttps: true }).length, 2);
+  assert.equal(validateHttpSecurityConfig({ bindHost: '0.0.0.0', trustProxy: false, securityProfile: 'trusted-lan' }).length, 0);
+  assert.equal(validateHttpSecurityConfig({ bindHost: '0.0.0.0', trustProxy: false, securityProfile: 'anything' }).length, 1);
+});
+
+test('trusted LAN uses the peer and subnet of the receiving socket, with no forwarded plain access', () => {
+  const interfaces = () => ({ eth0: [{ address: '192.168.50.150', netmask: '255.255.255.128', internal: false }],
+    eth1: [{ address: '192.168.50.23', netmask: '255.255.255.0', internal: false }] });
+  const request = ({ profile = 'trusted-lan', trustProxy = false, peer = '192.168.50.192', local = '192.168.50.150',
+    headers = {}, secure = false, host = '192.168.50.150' } = {}) => ({ secure, ip: '192.168.50.188', headers,
+    socket: { remoteAddress: peer, localAddress: local }, get: name => name === 'host' ? host : headers[name],
+    app: { get: key => key === 'security profile' ? profile : trustProxy },
+  });
+  const check = options => operationTransport(request(options), interfaces);
+  assert.equal(check(), 'lan');
+  assert.equal(check({ peer: '::ffff:192.168.50.192', local: '::ffff:192.168.50.150' }), 'lan');
+  assert.equal(check({ profile: 'strict' }), 'blocked');
+  assert.equal(check({ peer: '192.168.50.100' }), 'blocked');
+  assert.equal(check({ peer: '10.1.2.3' }), 'blocked');
+  assert.equal(check({ peer: '203.0.113.4' }), 'blocked');
+  assert.equal(check({ peer: 'fd00::1', local: 'fd00::2' }), 'blocked');
+  assert.equal(check({ local: '192.168.50.151' }), 'blocked');
+  for (const name of ['forwarded', 'via', 'x-forwarded-for', 'x-forwarded-proto', 'x-real-ip']) {
+    assert.equal(check({ headers: { [name]: '192.168.50.188' } }), 'blocked');
+  }
+  assert.equal(check({ peer: '127.0.0.1', host: '127.0.0.1:8080', profile: 'strict' }), 'loopback');
+  assert.equal(check({ peer: '127.0.0.1', host: 'public.example', profile: 'strict' }), 'blocked');
+  assert.equal(check({ peer: '127.0.0.1', host: 'localhost', trustProxy: 'loopback' }), 'blocked');
+  assert.equal(check({ secure: true, peer: '203.0.113.4', profile: 'strict', trustProxy: 'loopback' }), 'https');
 });
 
 test('HTTPS middleware blocks plain requests without redirecting to an attacker-controlled host', () => {

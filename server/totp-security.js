@@ -202,15 +202,21 @@ function createTotpSecurity(root, clock = Date.now) {
     const item = challenges.get(sid);
     return item && item.expires > clock() && item.ip === ip ? item : null;
   }
-  function finishLogin(user, sid, ip, value) {
+  function finishLogin(user, sid, ip, value, allowRecovery = true) {
     const item = pending(sid, ip), entry = row(user.id);
     if (!item || !entry?.secret || item.id !== user.id || item.sessionVersion !== user.session_version || item.generation !== entry.generation) {
       throw fault('totp_login_expired', 401);
     }
-    const next = resolveCode(user, entry, value, true);
+    const next = resolveCode(user, entry, value, allowRecovery);
     persist(user.id, next);
     challenges.delete(sid);
     return entry.generation;
+  }
+  function confirmOperation(user, value) {
+    const entry = row(user.id);
+    if (!entry?.secret) return;
+    if (value === undefined || value === '') throw fault('totp_operation_code_required', 403);
+    persist(user.id, resolveCode(user, entry, value, false));
   }
   function change(user, value, disable = false) {
     const entry = row(user.id);
@@ -225,7 +231,7 @@ function createTotpSecurity(root, clock = Date.now) {
     if (!row(user.id)?.secret) throw fault('totp_not_enabled');
     persist(user.id, { generation: token(), secret: null, hashes: [], lastStep: -1 });
   }
-  return { status, begin, enable, beginLogin, pending, finishLogin, change, offlineDisable };
+  return { status, begin, enable, beginLogin, pending, finishLogin, confirmOperation, change, offlineDisable };
 }
 
 module.exports = { createTotpSecurity, matchingStep, hotp, base32, fault };

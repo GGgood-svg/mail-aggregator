@@ -132,7 +132,7 @@ function main(ip) {
     console.log(`开始安装。步骤记录（仅 root）：${log}`);
     rootLog('accepted');
     let verified = false, failure = null;
-    const work = spawn('/bin/sh', [path.join(project, 'scripts/install.sh'), '--web-fresh', String(options.webPort), options.language, ip],
+    const work = spawn('/bin/sh', [path.join(project, 'scripts/install.sh'), '--web-fresh', String(options.webPort), options.language, ip, options.securityProfile],
       { cwd: project, env: rootEnv, detached: true, stdio: ['pipe', 'ignore', 'ignore', 'pipe'] });
     job = work;
     work.stdin.on('error', () => {});

@@ -186,6 +186,7 @@
 <script src="/js/mail-rules.js"></script>
 <script src="/js/mail-result-order.js"></script>
 <script>
+const compactMail = window.matchMedia('(max-width: 1050px)');
 const mailState = {
   folder: 'INBOX', page: 1, pageSize: 30, total: null, totalPages: 1,
   selectedUid: null, requestId: 0, collapsedGroups: new Set(), groupsInitialized: false,
@@ -650,7 +651,7 @@ function renderMessagePage(data, list, autoRead = true) {
     row.querySelector('.message-star').addEventListener('click', () => applyMailFlags([ref], 'flagged', !ref.flagged).catch(showError));
     row.querySelector('.message-open').addEventListener('click', () => openReader(ref));
   });
-  if (autoRead && !same && mailState.view === 'folder' && data.inspectedCandidates === undefined && !mailState.readerAnchor && !mailState.selectedUid && mailState.visible.length && window.matchMedia('(min-width: 761px)').matches) {
+  if (autoRead && !same && mailState.view === 'folder' && data.inspectedCandidates === undefined && !mailState.readerAnchor && !mailState.selectedUid && mailState.visible.length && !compactMail.matches) {
     const first = mailState.visible[0];
     mailState.selectedUid = first.uid; mailState.selectedFolder = first.folder; mailState.selectedValidity = first.uidValidity;
     list.querySelector('.message-item').classList.add('active');
@@ -761,7 +762,7 @@ function openReader(ref) {
       listTop: document.getElementById('message-list').scrollTop, screenY: window.scrollY };
     if (history.state?.mailReader !== readerHistoryKey) history.pushState({ mailReader: readerHistoryKey }, '');
     document.querySelector('.mail-layout').classList.add('reader-open');
-    if (window.matchMedia('(max-width: 760px)').matches) document.querySelector('.mail-layout').scrollIntoView({ block: 'start' });
+    if (compactMail.matches) document.querySelector('.mail-layout').scrollIntoView({ block: 'start' });
   }
   mailState.selectedUid = ref.uid; mailState.selectedFolder = ref.folder; mailState.selectedValidity = ref.uidValidity;
   document.querySelectorAll('.message-item').forEach(item => item.classList.toggle('active', sameRef(mailState.visible[Number(item.dataset.index)], ref)));

@@ -12,6 +12,7 @@ ISSUES=0
 CONFIG_FILE="/etc/mail-aggregator/config"
 DOVECOT_USER="mailuser"; DOVECOT_HOST="127.0.0.1"; DOVECOT_PORT="143"; WEB_PORT="8080"; WEB_LANGUAGE="zh-CN"
 MAIL_AGG_BIND_HOST="127.0.0.1"; MAIL_AGG_TRUST_PROXY="false"; MAIL_AGG_COOKIE_SECURE="auto"; MAIL_AGG_REQUIRE_HTTPS="false"
+MAIL_AGG_SECURITY_PROFILE="strict"
 if [ -r "$CONFIG_FILE" ]; then . "$CONFIG_FILE"; fi
 
 pass() { echo "  ✅ $1"; }
@@ -135,6 +136,10 @@ pass "Dovecot 用户: $DOVECOT_USER"
 pass "Dovecot 地址: $DOVECOT_HOST:$DOVECOT_PORT"
 pass "Web 端口: $WEB_PORT"
 pass "语言: $WEB_LANGUAGE"
+case "$MAIL_AGG_SECURITY_PROFILE" in
+  strict|trusted-lan) info "敏感操作安全档位: $MAIL_AGG_SECURITY_PROFILE" ;;
+  *) fail 'MAIL_AGG_SECURITY_PROFILE 必须为 strict 或 trusted-lan' ;;
+esac
 case "$MAIL_AGG_BIND_HOST" in
   localhost|127.*|::1)
     if [ "$MAIL_AGG_REQUIRE_HTTPS" = "true" ]; then pass "Web 仅回环监听，并强制通过 HTTPS 反向代理访问"; else pass "Web 仅本机监听"; fi

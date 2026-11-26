@@ -51,7 +51,7 @@ async function fixture(t) {
   app.use((req, _, next) => { req.user = { id: 1 }; req.sessionID = req.get('x-session') || 'sid-A'; next(); });
   app.post('/revoke', (req, res) => { withStateLock(root, () => state.revoked.add(req.sessionID), { allowDuringRestore: true }); res.json({ ok: true }); });
   app.use('/restore', module.exports.createRestoreRouter({ db: { prepare: () => ({ get: () => ({ count: 0 }) }) }, dirs, version: 'fixture',
-    scheduler: { stop() {}, start() { state.starts++; } }, hasRunningSyncs: () => false, passwordGuard: (_, __, next) => next(), isSecureRequest: () => true,
+    scheduler: { stop() {}, start() { state.starts++; } }, hasRunningSyncs: () => false, passwordGuard: (_, __, next) => next(),
     stopMailTasks: async () => { state.stoppedTasks++; } }));
   app.use((error, req, res, next) => res.status(error.statusCode || 500).json({ error: error.message }));
   const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');

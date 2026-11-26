@@ -54,7 +54,7 @@ const Api = (() => {
     put: (url, body) => request('PUT', url, body),
     patch: (url, body) => request('PATCH', url, body),
     del: (url) => request('DELETE', url),
-    download: async (url, body) => {
+    download: async (url, body, fallbackFilename = 'mail-aggregator-backup.tar.gz') => {
       const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -64,19 +64,16 @@ const Api = (() => {
         body: JSON.stringify(body || {}),
         credentials: 'same-origin',
       });
-      if (res.status === 401) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || '登录或密码验证失败');
-      }
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `下载失败 (${res.status})`);
+        const error = new Error(data.error || `下载失败 (${res.status})`);
+        error.details = data;
+        error.status = res.status;
+        throw error;
       }
-      const disposition = res.headers.get('content-disposition') || '';
-      const match = disposition.match(/filename="?([^";]+)"?/i);
       return {
         blob: await res.blob(),
-        filename: match ? match[1] : 'mail-aggregator-backup.tar.gz',
+        filename: downloadFilename(res.headers.get('content-disposition'), fallbackFilename),
         sha256: res.headers.get('X-Backup-SHA256') || '',
       };
     },

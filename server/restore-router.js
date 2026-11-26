@@ -38,7 +38,6 @@ function createRestoreRouter({
   scheduler,
   hasRunningSyncs,
   passwordGuard,
-  isSecureRequest,
   stopMailTasks = async () => {},
   withMaintenance = work => work(),
   onRestored = () => {},
@@ -56,9 +55,6 @@ function createRestoreRouter({
   }
 
   router.post('/inspect', asyncRoute(async (req, res) => {
-    if (!isSecureRequest(req)) {
-      return res.status(400).json({ error: '远程恢复必须使用 HTTPS；HTTP 仅允许服务器本机访问' });
-    }
     if (!req.is(['application/gzip', 'application/x-gzip', 'application/octet-stream'])) {
       req.resume();
       return res.status(415).json({ error: '请上传 .tar.gz 备份文件' });
@@ -124,9 +120,6 @@ function createRestoreRouter({
   }));
 
   router.post('/apply', passwordGuard, asyncRoute(async (req, res) => withMaintenance(async () => {
-    if (!isSecureRequest(req)) {
-      return res.status(400).json({ error: '远程恢复必须使用 HTTPS；HTTP 仅允许服务器本机访问' });
-    }
     const item = pending.get(String(req.body && req.body.restoreId || ''));
     if (!item || item.owner !== req.sessionID || item.expiresAt < Date.now()) {
       return res.status(404).json({ error: '恢复预检已过期，请重新上传备份' });
@@ -229,9 +222,6 @@ function createRestoreRouter({
   })));
 
   router.get('/snapshot/:id', (req, res) => {
-    if (!isSecureRequest(req)) {
-      return res.status(400).json({ error: '远程快照下载必须使用 HTTPS' });
-    }
     const item = downloads.get(req.params.id);
     if (!item || item.owner !== req.sessionID || item.expiresAt < Date.now() || !fs.existsSync(item.path)) {
       return res.status(404).json({ error: '恢复前快照下载已过期' });
@@ -241,9 +231,6 @@ function createRestoreRouter({
   });
 
   router.get('/snapshots', (req, res) => {
-    if (!isSecureRequest(req)) {
-      return res.status(400).json({ error: '远程快照查看必须使用 HTTPS' });
-    }
     const rows = fs.readdirSync(dirs.restorePoints, { withFileTypes: true })
       .filter((entry) => entry.isFile() && /^pre-restore-[A-Za-z0-9-]+\.tar\.gz$/.test(entry.name))
       .map((entry) => {
@@ -259,10 +246,7 @@ function createRestoreRouter({
     res.json(rows);
   });
 
-  router.get('/snapshots/:filename', (req, res) => {
-    if (!isSecureRequest(req)) {
-      return res.status(400).json({ error: '远程快照下载必须使用 HTTPS' });
-    }
+  function downloadSavedSnapshot(req, res) {
     const filename = String(req.params.filename || '');
     if (!/^pre-restore-[A-Za-z0-9-]+\.tar\.gz$/.test(filename)) {
       return res.status(400).json({ error: '快照文件名不合法' });
@@ -276,7 +260,14 @@ function createRestoreRouter({
       res.set('X-Backup-SHA256', fs.readFileSync(checksumPath, 'utf8').slice(0, 64));
     }
     res.download(target, filename);
+  }
+  router.get('/snapshots/:filename', (req, res) => {
+    if (res.locals.operationTransport === 'lan') {
+      return res.status(403).json({ error: '局域网下载已有快照需要重新验证当前密码。', code: 'snapshot_confirmation_required' });
+    }
+    return downloadSavedSnapshot(req, res);
   });
+  router.post('/snapshots/:filename', passwordGuard, downloadSavedSnapshot);
 
   return router;
 }

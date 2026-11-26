@@ -98,13 +98,24 @@ rc-service mail-aggregator status
 
 After a fresh command-line installation, the Web interface listens on `0.0.0.0:8080` by default. Open `http://server-lan-ip:8080` from the same trusted LAN to create the first administrator. This uses plain HTTP; use an HTTPS reverse proxy for Internet access.
 
+### Choose a security profile
+
+The web wizard asks you to choose a profile. On the command line use `--custom` or pass `--security-profile trusted-lan` or `--security-profile strict`. Existing installations keep their choice; configurations without a profile are strict. A profile does not change the web listener or any HTTPS-only proxy settings.
+
+- **Trusted LAN:** direct HTTP from the same private IPv4 subnet can export backups, download snapshots, restore, and install updates. Confirm the administrator password. If two-step verification is enabled, also enter a fresh authenticator code.
+- **Strict:** those actions require HTTPS or direct loopback access. If you do not have an HTTPS certificate, use SSH forwarding to the server's loopback address.
+
+Two-step verification does not encrypt HTTP. Use HTTPS or SSH forwarding for authenticator enrollment and recovery codes. For Internet access and public OAuth callbacks, configure HTTPS.
+
 ### Application updates
 
-The primary administrator can check GitHub releases under **Settings → Application updates**. Stable daily checks are on by default. Signed installation requires an eligible Alpine host, a pinned public key, and host opt-in. See [setup, upgrade, and rollback](./APP_UPDATES.md).
+The primary administrator can check GitHub releases under **Settings → Application updates**. Stable daily checks are on by default. Starting with v0.2.1, the trusted source installer automatically pins the bundled official release key on eligible Alpine hosts that do not already have a key. Signed installation still requires host opt-in. See [setup, upgrade, and rollback](./APP_UPDATES.md).
 
 The primary administrator can enable two-step verification under **Personal security**. See the [recovery codes and console recovery guide](./TOTP_SECURITY.md) (Chinese).
 
 ## Users and isolation
+
+In Settings, **Fully uninstall** removes the app and an installer-owned Maildir while keeping Dovecot by default. The optional **Also uninstall Dovecot and its configuration** checkbox requires `PURGE-DOVECOT` and is available only when the installer can verify that it originally installed and configured Dovecot on this host. The uninstall worker also verifies that the package removal will not affect unrelated software. Check the host receipt for the final result.
 
 The first account is the primary administrator. It can create standard users or operational administrators; public registration is disabled. Standard users can access only their own mail accounts, sync jobs, logs, and mailbox folders. Operational administrators can manage users and inspect system status, while global settings, OAuth client credentials, full backup/restore, service control, and uninstall remain restricted to the primary administrator.
 

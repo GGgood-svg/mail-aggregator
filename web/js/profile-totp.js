@@ -86,7 +86,7 @@ async function initProfileTotp() {
   window.addEventListener('pagehide', () => { clearEnrollment(); clearCodes(); password.value = ''; render(); });
   try {
     state = await Api.get('/api/auth/totp');
-    if (!state.secure) el('message').textContent = t('totp_secure_transport');
+    if (!state.secure) el('message').textContent = t('setupTransport');
   } catch (error) { el('message').textContent = TotpText.failure(error); }
   render();
 }

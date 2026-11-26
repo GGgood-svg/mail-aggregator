@@ -90,10 +90,10 @@ sh scripts/install-web.sh --check &&
 ```
 
 1. 向导自动探测私有局域网 IPv4。只有一个时直接使用，多个时在终端选择，通常不需要 `--listen`。保持终端开启，用同一局域网的浏览器打开终端显示的 HTTPS 地址（默认端口 `8090`）。在浏览器中核对临时证书的 SHA-256 指纹，再进入页面。
-2. 输入终端显示的**一次性安装口令**（15 分钟内有效），然后在向导设置 Web 管理员账号、密码、面板端口和语言，开始安装。
+2. 输入终端显示的**一次性安装口令**（15 分钟内有效），然后在向导设置 Web 管理员账号、密码、面板端口和语言，选定第 3.1 节的安全档位，再开始安装。
 3. 安装完成后点「显示一次」保存单独生成的 `mailuser` Dovecot 密码，再打开邮件面板（默认 `http://服务器局域网IP:8080/`）。**直接用向导中设置的管理员账号和密码登录。** 一次性安装口令只用于向导，`mailuser` 密码只用于本机 IMAP。最后点「完成并关闭向导」。
 
-**也可用终端安装。** 在同一源码目录运行以下命令；需要自定义邮箱用户、端口、语言或本地 Dovecot 密码时用 `--custom` 代替 `--quick`。只希望通过 SSH 转发访问时，加 `--local-http`。
+**也可用终端安装。** 在同一源码目录运行以下命令；需要交互选择安全档位、自定义邮箱用户、端口、语言或本地 Dovecot 密码时用 `--custom` 代替 `--quick`。只希望通过 SSH 转发访问时，加 `--local-http`。
 
 ```sh
 sh scripts/install.sh --quick
@@ -122,9 +122,19 @@ rc-service mail-aggregator status
 
 在同一局域网，用浏览器打开 `http://服务器局域网IP:8080/`；选了其他端口就按实际端口访问。安装完成后如果服务器 IP 变化，用新 IP 打开原端口即可，不需要重装。
 
-### 3.2 只监听本机：SSH 转发
+**可信局域网**适合只在同一私有 IPv4 子网使用的机器。备份导出、已有快照下载、确认恢复和应用更新安装可以直接走局域网 HTTP，仍要求当前主管理员密码，已开启两步验证时还需新的验证码。恢复预检只检查归档；刚完成恢复后，该会话可以直接下载此次恢复生成的快照。HTTP 不加密，端口不要转发到公网。
 
-采用 `--local-http` 时，**在电脑上**执行下列命令，保持终端打开。如果电脑的 `18080` 被占用，只换前一个端口和浏览器地址。
+**严格**保留 HTTPS 或本机访问的要求。无证书也可用下一节的 SSH 转发。选档不会改变监听地址，也不会关闭已有的强制 HTTPS 代理配置。终端安装可用 `--security-profile strict|trusted-lan` 指定其中一档；例如：
+
+```sh
+sh scripts/install.sh --quick --security-profile trusted-lan
+```
+
+已升级到支持安全档位的安装可由 root 编辑 `/etc/mail-aggregator/config`：增加或修改一行 `MAIL_AGG_SECURITY_PROFILE=trusted-lan`，改回 `strict` 即恢复严格档。Alpine 执行 `rc-service mail-aggregator restart`；Debian 或 Ubuntu 执行 `systemctl restart mail-aggregator`。未配置此项的旧安装保留严格规则。
+
+### 3.2 用 SSH 转发访问本机地址
+
+`--local-http` 和默认局域网监听均可用 SSH 本机转发，适合严格档操作或首次设置两步验证。**在电脑上**执行下列命令，保持终端打开。如果电脑的 `18080` 被占用，只换前一个端口和浏览器地址。
 
 ```sh
 ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:18080:127.0.0.1:8080 deploy@server.example.com
@@ -391,18 +401,11 @@ GitHub 超时或限流时会保留上次结果，并显示本次检查失败。�
 
 此流程不适用于安装 v0.2.0。以后发布了明确支持从当前版本自动升级的签名包，再按此流程操作。本段限 **Alpine 3.24 x86_64、Node.js 24、OpenRC**。至少准备两个可信签名版本，在隔离服务器上演练一次真实升级、一次故障自动回退。确认发布页面候选适用于当前版本、平台与 Node ABI。验包信任从已验证的公钥开始；不要直接拿候选附件里随包提供的公钥作为信任来源。
 
-1. 从发布方的独立可信渠道取得 Ed25519 **公钥**及 SPKI SHA-256 指纹。把路径换成实际公钥文件；先读出公钥类型，再算指纹并逐字比对。Alpine 若缺少 `openssl` 命令，先执行 `apk add openssl`。
+1. 从官方 GitHub 仓库下载可信的 v0.2.1 或更高版本源码包。支持本机更新的服务器新装时会自动固定官方公钥；未固定公钥的 v0.2.0 安装需要手动升级一次。
+2. 在维护时段完成备份、等待任务结束，从可信源码目录运行。安装器把缺失的公钥固定在 `/etc/mail-aggregator/update-public.pem`，并打印它的指纹（见[应用更新说明](./APP_UPDATES.md)）。已有公钥会保留。
 
    ```sh
-   trusted_key=/root/trusted-update-public.pem
-   openssl pkey -pubin -in "$trusted_key" -noout -text
-   openssl pkey -pubin -in "$trusted_key" -outform DER | openssl dgst -sha256
-   ```
-
-2. 在维护时段完成备份、等待任务结束，从可信引导版本的源码目录运行。安装器将公钥固定在 `/etc/mail-aggregator/update-public.pem`；核对它打印的指纹。已有不同公钥时要按受信的手工流程轮换。
-
-   ```sh
-   sh ./scripts/install.sh --app-only --trust-update-key /root/trusted-update-public.pem
+   sh ./scripts/install.sh --app-only
    ```
 
 3. 仅在签名版本和隔离演练都准备好后，由服务器 root 开启本机能力：
@@ -413,7 +416,7 @@ GitHub 超时或限流时会保留上次结果，并显示本次检查失败。�
    rc-service mail-aggregator-updater status
    ```
 
-4. 在 HTTPS 或本机入口登录主管理员。默认用正式版，选择「自动安装」，验证当前管理员密码，保存时区（例如 `Asia/Shanghai`）与维护时段（例如 `03:00–05:00`）。`23:00–01:00` 是跨午夜窗口。需要手动指定版本时，点「立即安装」并确认密码；请求提交后仍会等待任务空闲。
+4. 用 HTTPS、本机转发，或已选可信局域网档时从同一私有 IPv4 子网登录主管理员。通过局域网 HTTP 操作且已启用两步验证时，还要确认新的六位验证码。默认用正式版，选择「自动安装」，验证当前管理员密码，保存时区（例如 `Asia/Shanghai`）与维护时段（例如 `03:00–05:00`）。`23:00–01:00` 是跨午夜窗口。需要手动指定版本时，点「立即安装」并确认密码；请求提交后仍会等待任务空闲。
 
 后台可提前下载、验签、解包与检查容量。应用繁忙时约 15 分钟再查一次，时段结束就顺延到下一个窗口。切换时会短暂重启 Web；到更新页查看候选版本、下次尝试、推迟原因和回退结果。校验失败直接停止安装。切换后新版未就绪时，执行器恢复旧程序和升级前数据库；同一个失败包不会循环安装。已开放写入的新版不会被自动用旧快照覆盖。
 
@@ -433,7 +436,7 @@ rc-service mail-aggregator-updater stop && \
 
 ### 9.3 仓库维护者：让正式自动更新可用
 
-参照 [应用更新发布说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.0/APP_UPDATES.md) 配置受保护的 `app-release-signing` 环境和环境密钥 `APP_UPDATE_SIGNING_KEY_B64`。从默认分支历史中的受保护版本标签运行 **Signed application release**；标签、`package.json` 和依赖锁文件中的版本需一致。首次发布保留 `policy: manual`，用清单中 `from_versions` 指定的真实版本实测切换和回退，确认只改应用与可回退的数据库状态后，再为适用升级路径签发 `automatic` 包。公钥与指纹单独交付。测试演练用的标签和密钥不能作为生产发行使用。
+参照 [应用更新发布说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.0/APP_UPDATES.md) 配置受保护的 `app-release-signing` 环境和环境密钥 `APP_UPDATE_SIGNING_KEY_B64`。从默认分支历史中的受保护版本标签运行 **Signed application release**；标签、`package.json` 和依赖锁文件中的版本需一致。首次发布保留 `policy: manual`，用清单中 `from_versions` 指定的真实版本实测切换和回退，确认只改应用与可回退的数据库状态后，再为适用升级路径签发 `automatic` 包。官方公钥随可信源码包一起交付，并公开指纹。测试演练用的标签和密钥不能作为生产发行使用。
 
 ## 10. 运行维护与故障定位
 
@@ -471,7 +474,7 @@ df -i /var/lib/mail-aggregator /home/mailuser/Maildir /var/log
 
 自定义邮件、日志或备份卷时替换成实际路径。将数据库、Maildir 或日志挂在独立卷的部署，应在开机和维护后确认挂载；不要把回落到系统盘当作容量正常。首页「运维诊断」可导出脱敏信息，发给其他人前仍应检查是否包含你的路径和主机名。
 
-普通卸载前先完成应用和邮件备份、等任务结束，然后以 root 运行安装目录的卸载脚本。询问是否删除应用数据时答 `N` 可保留它；此脚本保留 Dovecot、imapsync 和 Maildir。需要重装时同时保留可信源码包和配置。Web 的「彻底卸载」会删除邮箱和 Maildir，不用于普通重装。
+普通卸载前先完成应用和邮件备份、等任务结束，然后以 root 运行安装目录的卸载脚本。询问是否删除应用数据时答 `N` 可保留它；此脚本保留 Dovecot、imapsync 和 Maildir。需要重装时同时保留可信源码包和配置。Web 的「彻底卸载」会额外删除确认由安装器创建的 Maildir，默认保留 Dovecot。若安装器记录了 Dovecot 的全新安装，并且配置和软件包预检均通过，可再勾选「同时卸载 Dovecot 软件和配置」，使用 `PURGE-DOVECOT` 确认。沿用已有 Dovecot 的 `--app-only` 安装不提供这个选项。这两种删除邮件的方式都不适合普通重装。
 
 ```sh
 /opt/mail-aggregator/scripts/uninstall.sh

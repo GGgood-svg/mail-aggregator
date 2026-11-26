@@ -1,5 +1,5 @@
 #reader-navigation[hidden], #mail-conversation-toolbar[hidden], #search-order-toolbar[hidden] { display: none; }
-@media (max-width: 760px) {
+@media (max-width: 1050px) {
   .mail-layout.reader-open .mail-folders,
   .mail-layout.reader-open .mail-list-pane { display: none; }
   #reader-navigation { position: sticky; top: 0; z-index: 1; background: var(--panel); }

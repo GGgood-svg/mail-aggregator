@@ -60,12 +60,14 @@
         <button class="btn" id="filter-btn" type="button">筛选</button>
         <button class="btn secondary" id="clear-filter-btn" type="button">清除</button>
       </div>
-      <table>
-        <thead>
-          <tr><th>账号</th><th>开始时间</th><th>状态</th><th>耗时</th><th>复制</th><th>跳过</th><th>本地邮件数</th><th>错误</th><th></th></tr>
-        </thead>
-        <tbody id="jobs-body"></tbody>
-      </table>
+      <div class="table-scroll table-scroll-wide" role="region" aria-labelledby="sync-tab" tabindex="0">
+        <table>
+          <thead>
+            <tr><th>账号</th><th>开始时间</th><th>状态</th><th>耗时</th><th>复制</th><th>跳过</th><th>本地邮件数</th><th>错误</th><th></th></tr>
+          </thead>
+          <tbody id="jobs-body"></tbody>
+        </table>
+      </div>
       <div class="empty" id="empty" style="display:none;">暂无同步记录</div>
       <div id="pagination" style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:14px;"></div>
     </div>

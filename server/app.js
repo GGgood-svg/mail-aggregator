@@ -55,7 +55,7 @@ const {
   parseTrustProxy,
   parseCookieSecure,
   parseBoolean,
-  isLoopbackAddress,
+  operationTransportGuard,
   resolveBindHost,
   validateHttpSecurityConfig,
   requireHttpsMiddleware,
@@ -82,11 +82,15 @@ if (REQUESTED_BIND_HOST && BIND_HOST !== REQUESTED_BIND_HOST) {
 const TRUST_PROXY = parseTrustProxy(process.env.MAIL_AGG_TRUST_PROXY);
 const COOKIE_SECURE = parseCookieSecure(process.env.MAIL_AGG_COOKIE_SECURE);
 const REQUIRE_HTTPS = parseBoolean(process.env.MAIL_AGG_REQUIRE_HTTPS, false);
+const SECURITY_PROFILE = process.env.MAIL_AGG_SECURITY_PROFILE ?? 'strict';
+const maintenanceTransport = operationTransportGuard();
+const maintenancePassword = currentPasswordGuard('primary', { confirmLanFactor: true });
 const HTTP_SECURITY_ERRORS = validateHttpSecurityConfig({
   bindHost: BIND_HOST,
   trustProxy: TRUST_PROXY,
   cookieSecure: COOKIE_SECURE,
   requireHttps: REQUIRE_HTTPS,
+  securityProfile: SECURITY_PROFILE,
 });
 if (HTTP_SECURITY_ERRORS.length) {
   throw new Error(`Web 安全配置无效：${HTTP_SECURITY_ERRORS.join('；')}`);
@@ -118,6 +122,7 @@ if (!needsRestartReconciliation) reconcileAfterRestart();
 
 const app = express();
 app.disable('x-powered-by');
+app.set('security profile', SECURITY_PROFILE);
 if (TRUST_PROXY !== false) app.set('trust proxy', TRUST_PROXY);
 const updates = appUpdate({ version: APP_VERSION, root: DIRS.root, socket: process.env.MAIL_AGG_UPDATE_SOCKET });
 const operations = createOperations({ dirs: DIRS, db, canWrite: () => !updatePending(),
@@ -220,14 +225,13 @@ const mailRouter = createMailRouter({ automaticPreviewBlocked: updatePending });
 const mailTasks = mailRouter.mailTasks;
 app.use('/api/mail', requireAuth, requireCsrf, mailRouter);
 app.use('/api/users', requireAuth, requireAdmin, requireCsrf, usersRouter);
-app.use('/api/system/restore', requireAuth, requirePrimaryAdmin, requireCsrf, createRestoreRouter({
+app.use('/api/system/restore', requireAuth, requirePrimaryAdmin, requireCsrf, maintenanceTransport, createRestoreRouter({
   db,
   dirs: DIRS,
   version: APP_VERSION,
   scheduler,
   hasRunningSyncs: () => currentRunningCount() > 0 || currentConnectionTestCount() > 0,
-  passwordGuard: currentPasswordGuard('primary'),
-  isSecureRequest: (req) => req.secure || isLoopbackAddress(req.ip),
+  passwordGuard: maintenancePassword,
   stopMailTasks: () => mailTasks.interruptAll(),
   withMaintenance: async work => {
     const lock = process.env.MAIL_AGG_HOST_MAINTENANCE_LOCK;
@@ -555,17 +559,15 @@ const updateRoute = op => asyncRoute(async (req, res) => {
 });
 const updateAuth = [requireAuth, requirePrimaryAdmin];
 const updateWrite = [...updateAuth, requireCsrf];
-const secureUpdate = (req, res, next) => req.secure || (isLoopbackAddress(req.ip) && !req.get('X-Forwarded-For'))
-  ? next() : res.status(403).json({ error: '请通过 HTTPS 或本机访问安装更新' });
-const verifyUpdatePassword = currentPasswordGuard('primary');
+const updateTransport = operationTransportGuard(403);
 app.get('/api/system/app-update', ...updateAuth, updateRoute('status'));
 app.get('/api/system/app-update/history', ...updateAuth, updateRoute('history'));
 app.post('/api/system/app-update/check', ...updateWrite, updateRoute('check'));
 app.put('/api/system/app-update/settings', ...updateWrite, (req, res, next) => {
   if (req.body?.mode !== 'auto' && !Object.hasOwn(req.body || {}, 'skipTag') && !Object.hasOwn(req.body || {}, 'holdUntil')) return next();
-  return secureUpdate(req, res, () => verifyUpdatePassword(req, res, next));
+  return updateTransport(req, res, () => maintenancePassword(req, res, next));
 }, updateRoute('settings'));
-app.post('/api/system/app-update/install', ...updateWrite, secureUpdate, verifyUpdatePassword, updateRoute('install'));
+app.post('/api/system/app-update/install', ...updateWrite, updateTransport, maintenancePassword, updateRoute('install'));
 
 app.get('/api/system-updates', requireAuth, requireAdmin, async (req, res) => {
   try {
@@ -575,10 +577,7 @@ app.get('/api/system-updates', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/system/backup', requireAuth, requirePrimaryAdmin, requireCsrf, currentPasswordGuard('primary'), asyncRoute(async (req, res) => {
-  if (!req.secure && !isLoopbackAddress(req.ip)) {
-    return res.status(400).json({ error: '远程备份下载必须使用 HTTPS；HTTP 仅允许服务器本机访问' });
-  }
+app.post('/api/system/backup', requireAuth, requirePrimaryAdmin, requireCsrf, maintenanceTransport, maintenancePassword, asyncRoute(async (req, res) => {
   if (!maintenanceLock.acquire('backup')) {
     return res.status(409).json({ error: '系统正在执行备份或恢复，请稍后再试' });
   }
@@ -638,16 +637,18 @@ app.post('/api/system/restart', requireAuth, requirePrimaryAdmin, requireCsrf, s
   }, 300);
 }));
 
-app.get('/api/system/uninstall', requireAuth, requirePrimaryAdmin, (req, res) => {
-  res.json({ available: uninstallHost.available() });
-});
+app.get('/api/system/uninstall', requireAuth, requirePrimaryAdmin, asyncRoute(async (req, res) => {
+  const dovecotEligible = await uninstallHost.dovecotEligible();
+  assertCurrentUser(req, null, 'primary');
+  res.set('Cache-Control', 'no-store').json({ available: uninstallHost.available(), dovecotEligible });
+}));
 app.get('/api/system/uninstall/:id', requireAuth, requirePrimaryAdmin, asyncRoute(async (req, res) => {
   res.set('Cache-Control', 'no-store').json(await uninstallHost.status(req.params.id));
 }));
 app.post('/api/system/uninstall', requireAuth, requirePrimaryAdmin, requireCsrf, currentPasswordGuard('primary'), asyncRoute(async (req, res) => {
   const { mode, confirmation } = req.body || {};
-  if (!['remove-app', 'purge'].includes(mode)) return res.status(400).json({ error: '卸载模式无效' });
-  const expected = mode === 'purge' ? 'PURGE' : 'REMOVE';
+  const expected = new Map([['remove-app', 'REMOVE'], ['purge', 'PURGE'], ['purge-dovecot', 'PURGE-DOVECOT']]).get(mode);
+  if (!expected) return res.status(400).json({ error: '卸载模式无效' });
   if (confirmation !== expected) return res.status(400).json({ error: `当前卸载模式必须输入 ${expected}` });
   if (maintenanceLock.current() || require('./state-lock').stateWritesBlocked(DIRS.root)) {
     return res.status(409).json({ error: '另一项维护正在进行，请稍后重试' });

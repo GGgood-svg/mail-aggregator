@@ -71,10 +71,12 @@ test('installer previews LAN for fresh apps and preserves the exposure of upgrad
 
   assert.match(preview(['--quick'], '0.0.0.0'), /^Dovecot host: 127\.0\.0\.1$/m);
   write('etc/dovecot/dovecot.conf', '# Existing Dovecot');
-  preview(['--app-only'], '0.0.0.0');
+  assert.match(preview(['--app-only'], '0.0.0.0'), /^Security profile: strict$/m);
+  assert.match(preview(['--app-only', '--security-profile', 'trusted-lan'], '0.0.0.0'), /^Security profile: trusted-lan$/m);
+  assert.match(preview(['--custom'], '0.0.0.0', false, '\n'.repeat(7) + 'trusted-lan\n\n'), /^Security profile: trusted-lan$/m);
   preview(['--full', '--local-http'], '127.0.0.1');
   preview(['--full', '--https-proxy'], '127.0.0.1', true);
-  preview(['--custom'], '0.0.0.0', false, '\n'.repeat(8));
+  preview(['--custom'], '0.0.0.0', false, '\n'.repeat(9));
 
   const oldData = path.join(fixture, 'var/lib/mail-aggregator');
   fs.mkdirSync(oldData, { recursive: true });
@@ -90,8 +92,10 @@ test('installer previews LAN for fresh apps and preserves the exposure of upgrad
   preview(['--app-only'], '127.0.0.1', true);
   preview(['--app-only', '--local-http'], '127.0.0.1');
   preview(['--app-only', '--lan-http'], '0.0.0.0');
-  write('etc/mail-aggregator/config', 'MAIL_AGG_BIND_HOST=192.0.2.17\n');
-  preview(['--custom'], '192.0.2.17', false, '\n'.repeat(8));
+  write('etc/mail-aggregator/config', 'MAIL_AGG_BIND_HOST=192.0.2.17\nMAIL_AGG_SECURITY_PROFILE=trusted-lan\n');
+  assert.match(preview(['--app-only'], '192.0.2.17'), /^Security profile: trusted-lan$/m);
+  assert.match(preview(['--app-only', '--security-profile', 'strict'], '192.0.2.17'), /^Security profile: strict$/m);
+  preview(['--custom'], '192.0.2.17', false, '\n'.repeat(9));
 });
 
 test('installer exposes an explicit app-only mode and rejects conflicting full modes', () => {

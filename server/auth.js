@@ -7,7 +7,7 @@ const { createAdminSetup } = require('./admin-setup');
 const { db, DIRS } = require('./db');
 const { LoginRateLimiter, normalizedClientIp } = require('./login-rate-limit');
 const { createTotpSecurity, fault } = require('./totp-security');
-const { isLoopbackAddress } = require('./http-security');
+const { isDirectLoopback, operationTransport } = require('./http-security');
 
 const router = express.Router();
 
@@ -128,7 +128,8 @@ router.post('/login', asyncRoute(async (req, res) => {
     let factor;
     try { factor = totp.status(user); } catch (error) { return sendTotpError(res, error); }
     if (factor.enabled) {
-      if (!protectedTotpTransport(req)) return res.status(403).json({ error: 'totp_secure_transport', code: 'totp_secure_transport' });
+      const transport = operationTransport(req);
+      if (transport === 'blocked') return res.status(403).json({ error: 'totp_secure_transport', code: 'totp_secure_transport' });
       return await new Promise((resolve, reject) => req.session.regenerate(error => {
         if (error) return reject(error);
         try {
@@ -139,7 +140,7 @@ router.post('/login', asyncRoute(async (req, res) => {
           });
           // This CSRF token binds step two to the same anonymous browser session.
           req.session.csrfToken = crypto.randomBytes(24).toString('hex');
-          res.set('Cache-Control', 'no-store').status(202).json({ requiresTotp: true, csrfToken: req.session.csrfToken });
+          res.set('Cache-Control', 'no-store').status(202).json({ requiresTotp: true, authenticatorOnly: transport === 'lan', csrfToken: req.session.csrfToken });
           resolve();
         } catch (failure) { reject(failure); }
       })).catch(error => sendTotpError(res, error));
@@ -155,12 +156,7 @@ router.post('/login', asyncRoute(async (req, res) => {
 }));
 
 function protectedTotpTransport(req) {
-  if (req.secure) return true;
-  if (!isLoopbackAddress(req.socket?.remoteAddress) || ['Forwarded', 'Via', 'X-Forwarded-For', 'X-Forwarded-Host', 'X-Forwarded-Proto', 'X-Real-IP'].some(header => req.get(header))) return false;
-  try {
-    const hostname = new URL(`http://${req.get('Host')}`).hostname.replace(/^\[|\]$/g, '');
-    return hostname === 'localhost' || isLoopbackAddress(hostname);
-  } catch (_) { return false; }
+  return req.secure || isDirectLoopback(req);
 }
 function requireTotpTransport(req, res, next) {
   res.set('Cache-Control', 'no-store');
@@ -172,14 +168,17 @@ function sendTotpError(res, error) {
   res.status(error.statusCode || 409).json({ error: error.code, code: error.code });
 }
 
-router.post('/login/totp', requireTotpTransport, requireCsrf, asyncRoute(async (req, res) => {
+router.post('/login/totp', requireCsrf, asyncRoute(async (req, res) => {
+  const transport = operationTransport(req);
+  res.set('Cache-Control', 'no-store');
+  if (transport === 'blocked') return sendTotpError(res, fault('totp_secure_transport', 403));
   try {
     const ip = normalizedClientIp(req);
     const { user, generation } = locked(() => {
       const candidate = ip && totp.pending(req.sessionID, ip);
       const user = candidate && db.prepare('SELECT * FROM admin_users WHERE id=? AND enabled=1').get(candidate.id);
       if (!user) throw fault('totp_login_expired', 401);
-      const generation = totp.finishLogin(user, req.sessionID, ip, req.body?.code);
+      const generation = totp.finishLogin(user, req.sessionID, ip, req.body?.code, transport !== 'lan');
       return { user, generation };
     });
     issueSession(req, user, (error, csrfToken) => {
@@ -281,11 +280,18 @@ router.get('/me', (req, res) => {
     if (!req.session.csrfToken) {
       req.session.csrfToken = crypto.randomBytes(24).toString('hex');
     }
+    const primaryAdmin = Boolean(user.role === 'admin' && user.mail_access_all);
+    const transport = primaryAdmin ? operationTransport(req) : null;
     res.json({
       id: user.id,
       username: user.username,
       role: user.role,
-      primaryAdmin: Boolean(user.role === 'admin' && user.mail_access_all),
+      primaryAdmin,
+      maintenance: primaryAdmin ? {
+        profile: req.app.get('security profile') || 'strict',
+        transport,
+        totpRequired: transport === 'lan' && totp.status(user).enabled,
+      } : undefined,
       csrfToken: req.session.csrfToken,
       secureTransport: Boolean(req.secure),
     });
@@ -383,11 +389,23 @@ async function verifyCurrentPassword(req, password, lockOptions) {
   } finally { reservation.release(); }
 }
 
-function currentPasswordGuard(role = null) {
+function currentPasswordGuard(role = null, { confirmLanFactor = false } = {}) {
   return asyncRoute(async (req, res, next) => {
     const verification = await verifyCurrentPassword(req, req.body?.currentPassword);
     if (!verification.ok) return res.status(verification.status).json({ error: verification.error, code: verification.code });
-    assertCurrentUser(req, verification.user, role);
+    if (confirmLanFactor && res.locals.operationTransport === 'lan') {
+      try {
+        locked(() => totp.confirmOperation(assertCurrentUser(req, verification.user, role), req.body?.totpCode));
+      } catch (error) {
+        const messages = {
+          totp_operation_code_required: '请输入验证器的六位验证码。',
+          totp_invalid_code: '验证码无效或已用过，请等下一组后再试。',
+          totp_rate_limited: '验证码错误次数过多，请稍后重试。',
+        };
+        if (!Object.hasOwn(messages, error.code)) throw error;
+        return res.status(error.code === 'totp_rate_limited' ? 429 : 403).json({ error: messages[error.code], code: error.code });
+      }
+    } else assertCurrentUser(req, verification.user, role);
     // next() enters the short state-lock section synchronously. Password work
     // is already complete, and no request can interleave before lock acquisition.
     return next();
