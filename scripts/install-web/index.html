@@ -46,6 +46,13 @@
             </select>
           </div>
         </div>
+        <label for="security-profile" data-t="securityProfile">敏感操作安全档位</label>
+        <select id="security-profile" required aria-describedby="security-help">
+          <option value="" data-t="chooseSecurity">请选择安全档位</option>
+          <option value="trusted-lan" data-t="securityLan">可信局域网（适合家用）</option>
+          <option value="strict" data-t="securityStrict">严格（敏感操作使用 HTTPS 或本机转发）</option>
+        </select>
+        <p class="hint" id="security-help" data-t="securityHelp">可信局域网允许同一私有 IPv4 子网直连下载备份、恢复和安装更新。仍需当前密码；开启两步验证后还需一次性验证码。HTTP 不加密，不要把面板端口转发到公网。</p>
         <div class="check-box">
           <div class="row"><strong data-t="checks">服务器检查</strong><button id="check" type="button" class="secondary small" data-t="check">重新检查</button></div>
           <ul id="checks" aria-live="polite"></ul>

@@ -230,7 +230,13 @@
           <div class="form-group"><label for="app-update-zone">维护时段时区</label><input id="app-update-zone" type="text" maxlength="80" placeholder="Asia/Shanghai"></div>
           <p class="hint">安装会短暂重启 Web。同步、邮件任务或备份恢复忙碌时，更新会顺延。</p>
         </div>
-        <div class="form-group" id="app-update-auth" hidden><label for="app-update-password">当前 Web 管理员密码</label><input id="app-update-password" type="password" autocomplete="current-password"></div>
+        <div id="app-update-auth" hidden>
+          <div class="form-group"><label for="app-update-password">当前 Web 管理员密码</label><input id="app-update-password" type="password" autocomplete="current-password"></div>
+          <div class="form-group" data-maintenance-totp hidden>
+            <label for="app-update-totp" data-totp="operationCode"></label>
+            <input id="app-update-totp" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+          </div>
+        </div>
         <button type="submit" id="app-update-save" class="btn secondary">保存更新设置</button>
         <button type="button" id="app-update-check" class="btn secondary">检查更新</button>
         <button type="button" id="app-update-install" class="btn" hidden>立即安装</button>
@@ -238,6 +244,8 @@
       <p class="hint" id="app-update-message" role="status"></p>
     </section>
     <div id="msg" style="margin-top:12px; font-size:13px;"></div>
+    <p class="hint" id="maintenance-profile" hidden></p>
+    <a id="maintenance-factor-link" class="hint" href="/profile.html" data-totp="setupFactor" hidden></a>
 
     <div class="panel" style="max-width:520px; margin-top:24px;">
       <h2>安全备份导出</h2>
@@ -245,6 +253,10 @@
       <div class="form-group">
         <label>当前 Web 管理员密码</label>
         <input type="password" id="backup-password" autocomplete="current-password">
+      </div>
+      <div class="form-group" data-maintenance-totp hidden>
+        <label for="backup-totp" data-totp="operationCode"></label>
+        <input id="backup-totp" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
       </div>
       <button class="btn secondary" id="backup-btn" type="button">生成并下载备份</button>
       <div id="backup-msg" style="margin-top:10px;font-size:13px"></div>
@@ -268,6 +280,10 @@
           <label>当前 Web 管理员密码</label>
           <input type="password" id="restore-password" autocomplete="current-password">
         </div>
+        <div class="form-group" data-maintenance-totp hidden>
+          <label for="restore-totp" data-totp="operationCode"></label>
+          <input id="restore-totp" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+        </div>
         <div class="form-group">
           <label>输入 <code>RESTORE</code> 确认</label>
           <input type="text" id="restore-confirmation" autocomplete="off" placeholder="RESTORE">
@@ -278,6 +294,23 @@
       <div class="hint" style="margin-top:14px;">服务器会保留最近7天的恢复前快照：</div>
       <div id="restore-points-list" style="margin-top:8px;font-size:13px;"></div>
     </div>
+
+    <dialog id="snapshot-confirm" class="panel" aria-labelledby="snapshot-confirm-title">
+      <form id="snapshot-confirm-form">
+        <h2 id="snapshot-confirm-title">下载恢复前快照</h2>
+        <div class="form-group">
+          <label for="snapshot-password">当前 Web 管理员密码</label>
+          <input id="snapshot-password" type="password" autocomplete="current-password" required autofocus>
+        </div>
+        <div class="form-group" data-maintenance-totp hidden>
+          <label for="snapshot-totp" data-totp="operationCode"></label>
+          <input id="snapshot-totp" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+        </div>
+        <p id="snapshot-error" class="err" role="alert"></p>
+        <button class="btn" id="snapshot-submit" type="submit">确认并下载</button>
+        <button class="btn secondary" id="snapshot-cancel" type="button">取消</button>
+      </form>
+    </dialog>
 
     <section class="panel" id="backup-pair-planning" style="max-width:760px;margin-top:24px;" aria-labelledby="backup-pair-title">
       <h2 id="backup-pair-title">配对备份恢复规划</h2>
@@ -352,6 +385,7 @@ sudo node /opt/mail-aggregator/server/cli-backup-pair.js rehearse-account \
 <script src="/js/api.js"></script>
 <script src="/js/branding.js"></script>
 <script src="/js/i18n.js"></script>
+<script src="/js/totp-i18n.js"></script>
 <script src="/js/sync-availability-ui.js"></script>
 <script src="/js/app-update.js"></script>
 <script src="/js/notification-history.js"></script>
@@ -379,13 +413,34 @@ function renderProviderLimits(settings) {
   }
 }
 
+let maintenance = {};
+function showMaintenance(info) {
+  if (!info) return;
+  maintenance = info;
+  const profile = document.getElementById('maintenance-profile');
+  profile.hidden = false;
+  profile.textContent = `${TotpText.t('operationProfile')}：${TotpText.t(info.profile === 'trusted-lan' ? 'lanProfile' : 'strictProfile')}`;
+  if (info.transport === 'blocked') profile.textContent += ` · ${TotpText.t('blockedOperationHint')}`;
+  if (info.transport === 'lan') {
+    profile.textContent += ` · ${TotpText.t('lanOperationHint')}`;
+    if (info.totpRequired) profile.textContent += ` ${TotpText.t('operationCodeHint')}`;
+    else document.getElementById('maintenance-factor-link').hidden = false;
+  }
+  for (const group of document.querySelectorAll('[data-maintenance-totp]')) group.hidden = !info.totpRequired;
+}
+function maintenanceCode(id) {
+  return maintenance.totpRequired ? document.getElementById(id).value.trim() : undefined;
+}
+
 async function load() {
   applyBranding();
-  await requireLogin();
+  const me = await requireLogin();
+  if (!me) return;
   await I18n.ready;
   renderNav('settings');
   document.getElementById('provider-concurrency-label').textContent = syncUi('providerLimit');
-  initAppUpdate();
+  showMaintenance(me.maintenance);
+  initAppUpdate(maintenance);
   initNotificationHistory();
   try {
     const s = await Api.get('/api/settings');
@@ -665,7 +720,7 @@ document.getElementById('backup-btn').addEventListener('click', async () => {
   msg.className = '';
   msg.textContent = '正在创建一致性数据库快照并打包…';
   try {
-    const result = await Api.download('/api/system/backup', { currentPassword: password });
+    const result = await Api.download('/api/system/backup', { currentPassword: password, totpCode: maintenanceCode('backup-totp') });
     const url = URL.createObjectURL(result.blob);
     const link = document.createElement('a');
     link.href = url;
@@ -696,6 +751,7 @@ document.getElementById('backup-btn').addEventListener('click', async () => {
     msg.className = 'err';
     msg.textContent = error.message;
   } finally {
+    document.getElementById('backup-totp').value = '';
     button.disabled = false;
   }
 });
@@ -724,17 +780,42 @@ function formatBytes(bytes) {
   return `${(value / 1024 / 1024 / 1024).toFixed(2)} GiB`;
 }
 
-async function downloadRestorePoint(filename) {
-  const result = await Api.downloadGet(
-    `/api/system/restore/snapshots/${encodeURIComponent(filename)}`,
-    filename
-  );
+async function downloadRestorePoint(filename, confirmation) {
+  const route = `/api/system/restore/snapshots/${encodeURIComponent(filename)}`;
+  const result = confirmation ? await Api.download(route, confirmation, filename) : await Api.downloadGet(route, filename);
   const url = URL.createObjectURL(result.blob);
   const link = document.createElement('a');
   link.href = url; link.download = result.filename;
   document.body.appendChild(link); link.click(); link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+const snapshotDialog = document.getElementById('snapshot-confirm');
+const snapshotForm = document.getElementById('snapshot-confirm-form');
+const snapshotError = document.getElementById('snapshot-error');
+const snapshotSubmit = document.getElementById('snapshot-submit');
+let selectedSnapshot;
+document.getElementById('snapshot-cancel').addEventListener('click', () => snapshotDialog.close());
+snapshotDialog.addEventListener('close', () => {
+  snapshotForm.reset(); snapshotError.textContent = ''; selectedSnapshot = null;
+});
+snapshotForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!selectedSnapshot || snapshotSubmit.disabled) return;
+  snapshotSubmit.disabled = true;
+  snapshotError.textContent = '';
+  try {
+    await downloadRestorePoint(selectedSnapshot, {
+      currentPassword: document.getElementById('snapshot-password').value,
+      totpCode: maintenanceCode('snapshot-totp'),
+    });
+    snapshotDialog.close();
+  } catch (error) { snapshotError.textContent = error.message; }
+  finally {
+    document.getElementById('snapshot-totp').value = '';
+    snapshotSubmit.disabled = false;
+  }
+});
 
 async function loadRestorePoints() {
   const container = document.getElementById('restore-points-list');
@@ -754,10 +835,18 @@ async function loadRestorePoints() {
       button.className = 'btn small secondary';
       button.type = 'button';
       button.textContent = '下载';
-      button.addEventListener('click', () => downloadRestorePoint(point.filename).catch((error) => {
-        const msg = document.getElementById('restore-msg');
-        msg.className = 'err'; msg.textContent = error.message;
-      }));
+      button.addEventListener('click', () => {
+        if (maintenance.transport === 'lan') {
+          if (snapshotSubmit.disabled) return;
+          selectedSnapshot = point.filename;
+          snapshotDialog.showModal();
+          return;
+        }
+        downloadRestorePoint(point.filename).catch(error => {
+          const msg = document.getElementById('restore-msg');
+          msg.className = 'err'; msg.textContent = error.message;
+        });
+      });
       row.append(label, button);
       container.appendChild(row);
     }
@@ -820,6 +909,7 @@ document.getElementById('restore-apply-btn').addEventListener('click', async () 
     const result = await Api.post('/api/system/restore/apply', {
       restoreId: pendingRestoreId,
       currentPassword: document.getElementById('restore-password').value,
+      totpCode: maintenanceCode('restore-totp'),
       confirmation: document.getElementById('restore-confirmation').value,
     });
     pendingRestoreId = null;
@@ -848,6 +938,7 @@ document.getElementById('restore-apply-btn').addEventListener('click', async () 
     }
     msg.className = 'err'; msg.textContent = error.message;
   } finally {
+    document.getElementById('restore-totp').value = '';
     button.disabled = false;
   }
 });

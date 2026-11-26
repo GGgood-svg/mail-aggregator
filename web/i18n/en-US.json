@@ -256,6 +256,7 @@
     "确认": "Confirm",
     "执行安全恢复": "Run safe restore",
     "下载恢复前快照": "Download pre-restore snapshot",
+    "确认并下载": "Confirm and download",
     "服务器会保留最近7天的恢复前快照：": "The server keeps pre-restore snapshots for 7 days:",
     "服务控制": "Service control",
     "重启 Mail Aggregator": "Restart Mail Aggregator",

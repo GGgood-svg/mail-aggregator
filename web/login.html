@@ -47,13 +47,21 @@ let waitingForTotp = false;
 const submit = document.getElementById('submit-btn');
 const totpCode = document.getElementById('login-totp-code');
 const error = document.getElementById('error-msg');
-function totpStep(active) {
+function totpStep(active, authenticatorOnly = false) {
   waitingForTotp = active;
   document.getElementById('password-step').hidden = active;
   document.getElementById('login-totp-step').hidden = !active;
   document.getElementById('login-totp-back').disabled = false;
   document.getElementById('password').value = '';
   totpCode.value = '';
+  totpCode.maxLength = authenticatorOnly ? 6 : 40;
+  totpCode.inputMode = authenticatorOnly ? 'numeric' : 'text';
+  const hint = document.querySelector('#login-totp-step p.hint');
+  const caption = document.querySelector('label[for="login-totp-code"]');
+  hint.dataset.totp = authenticatorOnly ? 'lanLoginHint' : 'loginHint';
+  caption.dataset.totp = authenticatorOnly ? 'authenticatorCode' : 'loginCode';
+  hint.textContent = TotpText.t(hint.dataset.totp);
+  caption.textContent = TotpText.t(caption.dataset.totp);
   submit.textContent = active ? TotpText.t('verify') : I18n.t('登录');
   if (!active) setCsrfToken(null);
   (active ? totpCode : document.getElementById('username')).focus();
@@ -66,6 +74,7 @@ async function init() {
   // 业务逻辑——如果是首次建管理员,标题要覆盖成"创建管理员账号",这个优先级
   // 高于branding里配置的login_title,所以要保证在applyBranding()之后执行。
   await applyBranding();
+  await I18n.ready;
 
   const status = await Api.get('/api/auth/setup-status');
   if (status.needsSetup) {
@@ -83,7 +92,7 @@ submit.addEventListener('click', async () => {
   try {
     if (waitingForTotp) {
       const code = totpCode.value.trim();
-      if (!code) { error.textContent = TotpText.t('loginCode'); return; }
+      if (!code || (totpCode.maxLength === 6 && !/^\d{6}$/.test(code))) { error.textContent = TotpText.t(totpCode.maxLength === 6 ? 'authenticatorCode' : 'loginCode'); return; }
       await Api.post('/api/auth/login/totp', { code });
     } else {
       const username = document.getElementById('username').value.trim();
@@ -92,7 +101,7 @@ submit.addEventListener('click', async () => {
       const result = await Api.post(isSetupMode ? '/api/auth/setup' : '/api/auth/login', { username, password });
       if (result.requiresTotp) {
         setCsrfToken(result.csrfToken);
-        totpStep(true);
+        totpStep(true, result.authenticatorOnly);
         return;
       }
     }

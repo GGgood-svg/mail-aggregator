@@ -126,6 +126,28 @@ test('attempt limits survive new sessions and reload, and code changes revoke ch
   assert.deepEqual(totp.status(user), { enabled: false, generation: disabled.generation, remainingCodes: 0 });
 });
 
+test('LAN operations and sign-ins share replay protection and cannot use recovery codes', t => {
+  const root = folder(t);
+  let now = START;
+  let totp = security.createTotpSecurity(root, () => now);
+  assert.doesNotThrow(() => totp.confirmOperation(user));
+  const { seed } = totp.begin(user, 'setup');
+  const { codes, generation } = totp.enable(user, 'setup', codeAt(seed, now));
+  now += SECOND;
+  totp.beginLogin(user, 'lan', '192.168.50.20');
+  assert.throws(() => totp.finishLogin(user, 'lan', '192.168.50.20', codes[0], false), { code: 'totp_invalid_code' });
+  assert.equal(totp.status(user).remainingCodes, 10);
+  assert.equal(totp.finishLogin(user, 'lan', '192.168.50.20', codeAt(seed, now), false), generation);
+  assert.throws(() => totp.confirmOperation(user), { code: 'totp_operation_code_required' });
+  assert.throws(() => totp.confirmOperation(user, codeAt(seed, now)), { code: 'totp_invalid_code' });
+  assert.throws(() => totp.confirmOperation(user, codes[0]), { code: 'totp_invalid_code' });
+  now += SECOND;
+  totp.confirmOperation(user, codeAt(seed, now));
+  totp = security.createTotpSecurity(root, () => now);
+  assert.throws(() => totp.confirmOperation(user, codeAt(seed, now)), { code: 'totp_invalid_code' });
+  assert.equal(totp.status(user).remainingCodes, 10);
+});
+
 async function http(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mail-totp-http-')), previous = process.env.MAIL_AGG_DATA_DIR;
   process.env.MAIL_AGG_DATA_DIR = root;

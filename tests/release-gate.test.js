@@ -50,8 +50,8 @@ test('publishing fails closed on a moved tag, missing CI matrix job, mismatched 
 });
 
 test('OpenRC and update preflight parse the same installer configuration', () => {
-  const config = parseWebConfig(`# installation\nexport MAIL_AGG_BIND_HOST='127.0.0.1' # inline comment\nPORT="8181"\nWEB_PORT=8080\n`);
-  assert.deepEqual(config, { MAIL_AGG_BIND_HOST:'127.0.0.1',PORT:'8181',WEB_PORT:'8080' });
+  const config = parseWebConfig(`# installation\nexport MAIL_AGG_BIND_HOST='127.0.0.1' # inline comment\nPORT="8181"\nWEB_PORT=8080\nMAIL_AGG_SECURITY_PROFILE=trusted-lan\n`);
+  assert.deepEqual(config, { MAIL_AGG_BIND_HOST:'127.0.0.1',PORT:'8181',WEB_PORT:'8080',MAIL_AGG_SECURITY_PROFILE:'trusted-lan' });
   assert.match(shellExports(config), /export PORT='8181'/);
   assert.throws(() => parseWebConfig('PORT="unterminated'),/Invalid runtime configuration/);
 });

@@ -1,3 +1,5 @@
+const os = require('node:os');
+const { isIPv4 } = require('node:net');
 const { normalizeHost, isValidHost } = require('./validation');
 
 const CSP = [
@@ -46,6 +48,63 @@ function isLoopbackAddress(value) {
   return ipv4.split('.').every((part) => Number(part) >= 0 && Number(part) <= 255);
 }
 
+function isDirectRequest(req) {
+  return !Object.keys(req.headers || {}).some(name => /^x-forwarded(?:-|$)/i.test(name)
+    || ['forwarded', 'via', 'x-real-ip'].includes(name.toLowerCase()));
+}
+
+function isDirectLoopback(req) {
+  if (!isDirectRequest(req) || !isLoopbackAddress(req.socket?.remoteAddress)) return false;
+  try {
+    const url = new URL(`http://${req.get('host')}`);
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) return false;
+    return isLoopbackBindHost(url.hostname.replace(/^\[|\]$/g, ''));
+  } catch (_) { return false; }
+}
+
+function ipv4(value) {
+  const address = String(value || '').toLowerCase().replace(/^::ffff:/, '');
+  return isIPv4(address) ? address.split('.').reduce((result, octet) => (result << 8) | Number(octet), 0) >>> 0 : null;
+}
+
+function privateIPv4(value) {
+  return value !== null && (value >>> 24 === 10 || value >>> 20 === 0xac1 || value >>> 16 === 0xc0a8);
+}
+
+function operationTransport(req, networkInterfaces = os.networkInterfaces) {
+  if (req.secure) return 'https';
+  if (req.app.get('trust proxy')) return 'blocked';
+  if (isDirectLoopback(req)) return 'loopback';
+  if (req.app.get('security profile') !== 'trusted-lan' || !isDirectRequest(req)) return 'blocked';
+  const peer = ipv4(req.socket?.remoteAddress);
+  const local = ipv4(req.socket?.localAddress);
+  if (!privateIPv4(peer) || !privateIPv4(local)) return 'blocked';
+  try {
+    // Use the interface that actually accepted this connection, not a forwarded
+    // address or another interface's subnet. Re-read it after an IP change.
+    const sameSubnet = Object.values(networkInterfaces()).flat().some(entry => {
+      if (!entry || entry.internal || ipv4(entry.address) !== local) return false;
+      const mask = ipv4(entry.netmask);
+      return mask !== null && mask !== 0 && (peer & mask) === (local & mask);
+    });
+    return sameSubnet ? 'lan' : 'blocked';
+  } catch (_) { return 'blocked'; }
+}
+
+function operationTransportGuard(status = 400) {
+  return (req, res, next) => {
+    const transport = operationTransport(req);
+    if (transport !== 'blocked') {
+      res.locals.operationTransport = transport;
+      return next();
+    }
+    const error = req.app.get('security profile') === 'trusted-lan'
+      ? '请从同一私有 IPv4 子网直连，或通过 HTTPS、SSH 本机转发操作。'
+      : '当前为严格档，请通过 HTTPS 或 SSH 本机转发执行此操作。';
+    return res.status(status).json({ error, code: 'operation_transport_required' });
+  };
+}
+
 function resolveBindHost(value, fallback = '127.0.0.1') {
   if (value === undefined || value === null || String(value).trim() === '') return fallback;
   const host = normalizeHost(value);
@@ -57,8 +116,11 @@ function isLoopbackBindHost(value) {
   return host === 'localhost' || isLoopbackAddress(host);
 }
 
-function validateHttpSecurityConfig({ bindHost, trustProxy, cookieSecure, requireHttps }) {
+function validateHttpSecurityConfig({ bindHost, trustProxy, cookieSecure, requireHttps, securityProfile = 'strict' }) {
   const errors = [];
+  if (securityProfile !== 'strict' && securityProfile !== 'trusted-lan') {
+    errors.push('MAIL_AGG_SECURITY_PROFILE 必须是 strict 或 trusted-lan');
+  }
   if (trustProxy !== false && !isLoopbackBindHost(bindHost)) {
     errors.push('启用可信代理时，MAIL_AGG_BIND_HOST 必须是本机回环地址，避免客户端伪造转发协议头');
   }
@@ -108,6 +170,9 @@ module.exports = {
   parseBoolean,
   isLoopbackAddress,
   isLoopbackBindHost,
+  isDirectLoopback,
+  operationTransport,
+  operationTransportGuard,
   resolveBindHost,
   validateHttpSecurityConfig,
   requireHttpsMiddleware,

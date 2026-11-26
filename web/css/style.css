@@ -128,6 +128,9 @@ h2 { font-size: 16px; margin: 0 0 12px; color: var(--text); }
   margin-bottom: 20px;
 }
 
+#snapshot-confirm { color: var(--text); width: min(430px, calc(100vw - 40px)); margin: auto; }
+#snapshot-confirm::backdrop { background: #0008; }
+
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--panel-border); }
 th { color: var(--text-dim); font-weight: 500; font-size: 12px; }

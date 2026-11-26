@@ -4,7 +4,7 @@
 
 在主管理员的「设置 → 应用更新」选择策略。首次使用默认每天检查正式版。可关闭定时检查，或选择「正式版和预览版」以纳入 `beta`、`rc`。切回正式版不会降级。检查网络失败会保留上次结果并标明失败。Dovecot 和 imapsync 的检查仍在原来的系统信息页面。
 
-「立即安装」提交页面上指定的版本。自动安装按所设时区和时段执行，建议 `03:00–05:00`。例如 `23:00–01:00` 会跨午夜。下载与验包可以提前进行。到切换时仍有同步、写邮件、规则任务或备份恢复，执行器会恢复接收任务，并在约 15 分钟后复查。超过时段就等下一次。手动请求可在「关闭定时检查」模式运行，任务空闲后开始安装。两种安装都只接受已签名且明确支持从当前版本升级的包。启用自动安装或提交立即安装须通过 HTTPS 或本机访问，并验证当前 Web 管理员密码。空间不足时更新会顺延。配置或就绪检查失败时，页面会显示原因及安装结果。
+「立即安装」提交页面上指定的版本。自动安装按所设时区和时段执行，建议 `03:00–05:00`。例如 `23:00–01:00` 会跨午夜。下载与验包可以提前进行。到切换时仍有同步、写邮件、规则任务或备份恢复，执行器会恢复接收任务，并在约 15 分钟后复查。超过时段就等下一次。手动请求可在「关闭定时检查」模式运行，任务空闲后开始安装。两种安装都只接受已签名且明确支持从当前版本升级的包。启用自动安装或提交立即安装须验证当前 Web 管理员密码。严格档要求 HTTPS 或本机转发；可信局域网档可从同一私有 IPv4 子网直连，已开两步验证时还需新的六位验证码。空间不足时更新会顺延。配置或就绪检查失败时，页面会显示原因及安装结果。
 
 主管理员可读取 `GET /api/system/app-update`，提交 `POST /api/system/app-update/check`、`PUT /api/system/app-update/settings`、`POST /api/system/app-update/install`。写操作均要求 CSRF；立即安装返回 `202`，表示请求入队。
 
@@ -56,4 +56,4 @@ sudo sh ./scripts/install.sh --recover-application
 
 在默认分支手动运行 **Signed application release**。工作流从标签运行测试、在 Alpine 3.24 x86_64 版本环境编译依赖和打包，后续受保护作业校验产物后签发。`policy` 默认为 `manual`。只有保持宿主和数据文件格式兼容、并用来自 `from_versions` 的准确旧版本在真实 OpenRC 上完成成功切换与故障回退后，才选 `automatic`。SQLite 内的可回退迁移允许自动升级；修改凭据文件、Maildir、外部服务或宿主配置的迁移应标为 `manual`。发布后不要换包或重指标签；修复请发布新版本。
 
-The **Settings → Application updates** panel checks stable releases daily by default. It can include previews and, after host opt-in on the supported Alpine profile, install a supported signed release when idle. The Web update API requires a primary administrator. Installation and automatic mode also require the current password and HTTPS or direct loopback. See the setup and recovery commands above. GitHub is the fixed release source. Debian and Ubuntu support version checks and manual upgrades.
+The **Settings → Application updates** panel checks stable releases daily by default. It can include previews and, after host opt-in on the supported Alpine profile, install a supported signed release when idle. The Web update API requires a primary administrator. Installation and automatic mode require the current password. On the trusted LAN profile a direct connection from the same private IPv4 subnet is supported; enter a fresh authenticator code if enabled. The strict profile requires HTTPS or direct loopback. See the setup and recovery commands above. GitHub is the fixed release source. Debian and Ubuntu support version checks and manual upgrades.

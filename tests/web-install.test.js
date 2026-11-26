@@ -9,7 +9,7 @@ const os = require('node:os');
 const { InstallSession, installOptions, receiveLines } = require('../scripts/install-web/protocol');
 const { isPrivateIp, hasLanAddress, listeningPorts, hasCapacity } = require('../scripts/install-web/host');
 
-const form = { username: '示例-Admin', password: 'fictional + $ setup pass', webPort: 8080, language: 'zh-CN' };
+const form = { username: '示例-Admin', password: 'fictional + $ setup pass', webPort: 8080, language: 'zh-CN', securityProfile: 'trusted-lan' };
 
 function fixture() {
   let now = 0, available = true;
@@ -51,6 +51,11 @@ test('preflight is refreshed at submission, and invalid options or sessions cann
   assert.equal(active.op('install', form, { session: pairing.cookie }).status, 403);
   assert.equal(send('install', { ...form, webPort: 8090 }).status, 400);
   assert.equal(send('install', { ...form, language: 'xx-XX' }).status, 400);
+  assert.equal(send('install', { ...form, securityProfile: '' }).status, 400);
+  assert.equal(send('install', { ...form, securityProfile: 'other' }).status, 400);
+  const { securityProfile: _, ...missingProfile } = form;
+  assert.equal(send('install', missingProfile).status, 400);
+  assert.equal(installOptions({ ...form, securityProfile: 'strict' }).securityProfile, 'strict');
   assert.equal(send('install', { ...form, command: 'unexpected' }).status, 400);
   assert.equal(send('preflight', { webPort: 8080 }).body.checks[0].ok, true);
   makeUnavailable();
@@ -72,6 +77,7 @@ test('refresh uses the same job and progress, and the separate IMAP password can
   assert.equal(send('finish', {}).status, 409);
   assert.equal(send('reveal', {}).status, 409);
   assert.equal(starts.length, 1);
+  assert.equal(starts[0].options.securityProfile, 'trusted-lan');
   assert.match(starts[0].password, /^[a-f0-9]{32}$/);
   assert.notEqual(starts[0].password, form.password);
   wizard.complete(true);

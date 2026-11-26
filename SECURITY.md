@@ -12,6 +12,10 @@ Do not put mailbox credentials, OAuth tokens, backup archives, session cookies, 
 
 Include the affected version, deployment platform, reproduction steps, impact, and any relevant sanitized logs. You should receive an acknowledgement through GitHub; please allow time for a fix before public disclosure.
 
+## Web security profiles
+
+Strict requires a protected connection for backup and restore or update installation. Trusted LAN lets directly connected clients on the same private IPv4 subnet use these operations over HTTP after password confirmation; an administrator with two-step verification must also confirm a fresh authenticator code. HTTP still exposes traffic to the local network. Do not port-forward the HTTP listener. Recovery codes and authenticator setup require HTTPS or SSH loopback access. No profile changes release signature verification or OAuth callback requirements.
+
 ## Sensitive artifacts
 
 Mail Aggregator backup archives contain plaintext mailbox credentials and OAuth tokens. Store them encrypted and offline. Never attach a backup, the `data/` directory, `.pass`/`.secret` files, or `/etc/mail-aggregator/config` to an issue.

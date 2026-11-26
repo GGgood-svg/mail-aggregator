@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const FILE = '/etc/mail-aggregator/config';
 const KEYS = new Set(['DOVECOT_USER', 'DOVECOT_HOST', 'DOVECOT_PORT', 'WEB_PORT', 'WEB_LANGUAGE', 'PORT',
   'MAIL_AGG_BIND_HOST', 'MAIL_AGG_TRUST_PROXY', 'MAIL_AGG_COOKIE_SECURE', 'MAIL_AGG_REQUIRE_HTTPS',
-  'MAIL_AGG_REQUIRED_MOUNTS', 'MAIL_AGG_MAIL_STORAGE_PATH']);
+  'MAIL_AGG_SECURITY_PROFILE', 'MAIL_AGG_REQUIRED_MOUNTS', 'MAIL_AGG_MAIL_STORAGE_PATH']);
 
 // The deployment file is data, not a privileged shell script. Quoted values,
 // adjacent comments after whitespace and optional export are supported.

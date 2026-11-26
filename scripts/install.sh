@@ -37,6 +37,8 @@ APP_ONLY=0
 SHOW_CONFIG=0
 FRESH_APP_INSTALL=0
 WEB_EXPOSURE_OVERRIDE=""
+SECURITY_PROFILE_OVERRIDE=""
+MAIL_AGG_SECURITY_PROFILE="strict"
 CLEANUP_SOURCE=0
 UPDATE_TRUST_KEY=''
 CLEANUP_ARCHIVE=""
@@ -66,15 +68,17 @@ wizard_exit() {
 }
 
 usage() {
-  echo "Usage: $0 [--quick|--custom|--full|--app-only] [--lan-http|--local-http|--https-proxy] [--dovecot-user USER] [--default-dovecot-password PASSWORD] [--dovecot-host HOST] [--dovecot-port PORT] [--web-port PORT] [--language LOCALE] [--trust-update-key PUBLIC.pem] [--show-config] [--cleanup-source --cleanup-archive FILE]"
+  echo "Usage: $0 [--quick|--custom|--full|--app-only] [--lan-http|--local-http|--https-proxy] [--security-profile strict|trusted-lan] [--dovecot-user USER] [--default-dovecot-password PASSWORD] [--dovecot-host HOST] [--dovecot-port PORT] [--web-port PORT] [--language LOCALE] [--trust-update-key PUBLIC.pem] [--show-config] [--cleanup-source --cleanup-archive FILE]"
   echo "       $0 --recover-application"
-  echo "  Fresh installs default to --lan-http (0.0.0.0:8080, trusted LAN only). Upgrades keep the existing Web access mode unless changed explicitly."
+  echo "  Fresh installs default to --lan-http (0.0.0.0:8080) and the strict security profile. Upgrades preserve both choices."
+  echo "  trusted-lan allows sensitive operations from the same private IPv4 subnet with password confirmation and a one-time code if enabled."
 }
 valid_user() { echo "$1" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' && ! echo " root daemon bin nobody " | grep -q " $1 "; }
 valid_port() { case "$1" in ''|*[!0-9]*) return 1;; esac; [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null; }
 valid_language() {
   case "$1" in zh-CN|en-US|ja-JP|ko-KR|es-ES|fr-FR|de-DE) return 0;; *) return 1;; esac
 }
+valid_security_profile() { case "$1" in strict|trusted-lan) return 0;; *) return 1;; esac; }
 generate_initial_password() {
   # POSIX/BusyBox-compatible: 16 random bytes rendered as 32 lowercase hex
   # characters. The result is printed once at the end of a fresh full install.
@@ -142,6 +146,7 @@ MAIL_AGG_BIND_HOST=$MAIL_AGG_BIND_HOST
 MAIL_AGG_TRUST_PROXY=$MAIL_AGG_TRUST_PROXY
 MAIL_AGG_COOKIE_SECURE=$MAIL_AGG_COOKIE_SECURE
 MAIL_AGG_REQUIRE_HTTPS=$MAIL_AGG_REQUIRE_HTTPS
+MAIL_AGG_SECURITY_PROFILE=$MAIL_AGG_SECURITY_PROFILE
 EOF
   chmod 600 "$CONFIG_FILE"
 }
@@ -220,12 +225,14 @@ fi
 if [ "${1:-}" = --web-fresh ]; then
   # Internal entry point. All input is rechecked while holding the same lock
   # as manual install, uninstall, recovery and update. Credentials use stdin.
-  [ "$#" -eq 4 ] && [ "${MAIL_AGG_MAINTENANCE_HELD:-}" = 1 ] && [ "$(id -u)" = 0 ] || exit 74
+  [ "$#" -eq 5 ] && [ "${MAIL_AGG_MAINTENANCE_HELD:-}" = 1 ] && [ "$(id -u)" = 0 ] || exit 74
   WIZARD_FRESH=1
   INSTALL_APT_MINIMAL=1
   wizard_options="$2"
   wizard_language="$3"
   wizard_ip="$4"
+  wizard_security_profile="$5"
+  valid_security_profile "$wizard_security_profile" || exit 74
   wizard_project=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
   valid_language "$wizard_language" || exit 74
   /usr/bin/node "$wizard_project/scripts/install-web/host.js" check "$wizard_options" "$wizard_ip" || exit 74
@@ -237,7 +244,7 @@ if [ "${1:-}" = --web-fresh ]; then
   unset WIZARD_IMAP
   trap 'wizard_exit "$?"' EXIT
   trap 'exit 1' HUP INT TERM
-  set -- --full --lan-http --web-port "$wizard_options" --language "$wizard_language"
+  set -- --full --lan-http --web-port "$wizard_options" --language "$wizard_language" --security-profile "$wizard_security_profile"
 fi
 load_install_defaults
 ARG_COUNT=$#
@@ -251,6 +258,11 @@ while [ $# -gt 0 ]; do
     --lan-http) WEB_EXPOSURE_OVERRIDE=lan ;;
     --local-http) WEB_EXPOSURE_OVERRIDE=local ;;
     --https-proxy) WEB_EXPOSURE_OVERRIDE=proxy ;;
+    --security-profile)
+      shift
+      valid_security_profile "${1:-}" || fail_step '参数校验' '安全档位无效。' '请选择 strict 或 trusted-lan。'
+      SECURITY_PROFILE_OVERRIDE="$1"
+      ;;
     --force-dovecot-init) FORCE_DOVECOT_INIT=1 ;;
     --default-dovecot-password)
       shift
@@ -292,15 +304,25 @@ if [ "$CUSTOM" = "1" ]; then
     WEB_EXPOSURE_OVERRIDE="$input"
     set_web_exposure "$WEB_EXPOSURE_OVERRIDE"
   fi
+  if [ -z "$SECURITY_PROFILE_OVERRIDE" ]; then
+    echo 'strict：敏感操作使用 HTTPS 或 SSH 本机转发。trusted-lan：允许同一私有 IPv4 子网直连；HTTP 不加密。'
+    printf '安全档位 strict/trusted-lan [%s]: ' "$MAIL_AGG_SECURITY_PROFILE"; read -r input
+    if [ -n "$input" ]; then
+      valid_security_profile "$input" || fail_step '参数校验' '安全档位无效。' '请选择 strict 或 trusted-lan。'
+      SECURITY_PROFILE_OVERRIDE="$input"
+    fi
+  fi
   echo "Dovecot: $DOVECOT_USER @ $DOVECOT_HOST:$DOVECOT_PORT; Web: $MAIL_AGG_BIND_HOST:$WEB_PORT; Language: $WEB_LANGUAGE"
   printf '确认安装？ [Y/n]: '; read -r input; [ "$input" = "n" ] || [ "$input" = "N" ] && exit 0
 fi
 valid_user "$DOVECOT_USER" || fail_step "参数校验" "Dovecot 用户名不合法: $DOVECOT_USER" "仅允许小写字母、数字、_、-，且不能使用系统保留账号。"
 valid_port "$DOVECOT_PORT" || fail_step "参数校验" "Dovecot 端口不合法: $DOVECOT_PORT" "端口必须在 1-65535。"
+if [ -n "$SECURITY_PROFILE_OVERRIDE" ]; then MAIL_AGG_SECURITY_PROFILE="$SECURITY_PROFILE_OVERRIDE"; fi
+valid_security_profile "$MAIL_AGG_SECURITY_PROFILE" || fail_step '参数校验' '已保存的安全档位无效。' '请用 --security-profile strict 或 --security-profile trusted-lan 指定档位。'
 valid_port "$WEB_PORT" || fail_step "参数校验" "Web 端口不合法: $WEB_PORT" "端口必须在 1-65535。"
 valid_language "$WEB_LANGUAGE" || fail_step "参数校验" "语言不支持: $WEB_LANGUAGE" "支持 zh-CN、en-US、ja-JP、ko-KR、es-ES、fr-FR、de-DE。"
 if [ "$SHOW_CONFIG" = "1" ]; then
-  echo "Dovecot user: $DOVECOT_USER"; echo "Dovecot host: $DOVECOT_HOST"; echo "Dovecot port: $DOVECOT_PORT"; echo "Web port: $WEB_PORT"; echo "Web bind: $MAIL_AGG_BIND_HOST"; echo "Require HTTPS: $MAIL_AGG_REQUIRE_HTTPS"; echo "Language: $WEB_LANGUAGE"; exit 0
+  echo "Dovecot user: $DOVECOT_USER"; echo "Dovecot host: $DOVECOT_HOST"; echo "Dovecot port: $DOVECOT_PORT"; echo "Web port: $WEB_PORT"; echo "Web bind: $MAIL_AGG_BIND_HOST"; echo "Require HTTPS: $MAIL_AGG_REQUIRE_HTTPS"; echo "Security profile: $MAIL_AGG_SECURITY_PROFILE"; echo "Language: $WEB_LANGUAGE"; exit 0
 fi
 detect_platform
 manual_update_guard
@@ -858,7 +880,7 @@ fi
 
 # Write inside the upgrade rollback boundary and before starting the service.
 # A fresh app needs its Web settings even if Dovecot is already configured.
-if [ "$FRESH_APP_INSTALL" = "1" ] || [ -n "$WEB_EXPOSURE_OVERRIDE" ] || [ -f "$CONFIG_FILE" ] ||
+if [ "$FRESH_APP_INSTALL" = "1" ] || [ -n "$WEB_EXPOSURE_OVERRIDE" ] || [ -n "$SECURITY_PROFILE_OVERRIDE" ] || [ -f "$CONFIG_FILE" ] ||
    { [ "$FULL" = "1" ] && [ "$NEED_DOVECOT_INIT" = "1" ]; }; then
   write_config
 fi
@@ -1193,6 +1215,7 @@ if [ "$CLEANUP_SOURCE" = "1" ]; then
   echo "安装源清理完成。"
 fi
 echo " Mail Aggregator 安装完成"
+echo " 安全档位: $MAIL_AGG_SECURITY_PROFILE"
 echo ""
 echo " Dovecot: $DOVECOT_HOST:$DOVECOT_PORT"
 case "$MAIL_AGG_REQUIRE_HTTPS:$MAIL_AGG_BIND_HOST" in
