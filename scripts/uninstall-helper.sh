@@ -126,7 +126,9 @@ case "${1:-}" in
         record busy recovery_pending
         exit 0
     fi
-    if [ "$mode" = purge-dovecot ] && ! /usr/bin/node "$DOVECOT_TOOL" plan; then
+    # Reject unowned configuration without waiting for the package manager.
+    # The full plan can exceed the Web handshake, so run it after the receipt.
+    if [ "$mode" = purge-dovecot ] && ! /usr/bin/node "$DOVECOT_TOOL" eligible; then
         record failed dovecot_unverified
         exit 0
     fi
@@ -146,6 +148,7 @@ case "${1:-}" in
     [ -f "$RECEIPTS/$id.ready" ] && [ ! -e "$RECEIPTS/$id.cancel" ] || exit 1
     if [ "$mode" = purge-dovecot ]; then
         phase=dovecot_unverified
+        record running checking_dovecot
         /usr/bin/node "$DOVECOT_TOOL" plan
     fi
     phase=stop_failed
