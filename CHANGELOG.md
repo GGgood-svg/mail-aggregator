@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.2.0
 
+- Add a temporary HTTPS setup wizard for supported fresh Linux installations. It selects a LAN address automatically when there is a single choice and can enable the matching Alpine community repository for required packages. The administrator set in the wizard can sign in as soon as installation completes.
 - Listen on `0.0.0.0:8080` by default on fresh installations for trusted LAN access, including app-only installs. Keep existing Web access settings on upgrade and offer `--local-http` for loopback access.
-- Add GitHub application update checks, a preview channel, and optional idle-only installation of signed Alpine 3.24 packages in a maintenance window.
+- Add GitHub application update checks and an opt-in preview channel. For this release, install manually; automatic installation of future signed Alpine 3.24 packages requires separate host enablement and release verification.
 - Preserve the old application and a verified SQLite snapshot until the new service passes readiness; recover an interrupted cutover and block repeats of a failed release.
 - Serialize application switch, backup restore and uninstall in the installed maintenance paths; run CLI restore as the service user so Web can read its restore points.
 - Settle sync jobs, account status, and notification intents together, and distinguish an unconfirmed interruption from a confirmed result. Report capacity barriers and retry times, including independent log volumes. Allow the primary administrator to set different queue limits for built-in mail providers.
