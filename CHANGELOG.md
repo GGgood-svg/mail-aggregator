@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.1
+
+- Bundle the official Ed25519 release public key with the trusted source installer. On Alpine 3.24 x86_64 with Node.js 24 and OpenRC, installs and manual upgrades pin it when no key is present. Existing pins and the host installation opt-in are preserved.
+
 ## v0.2.0
 
 - Add a temporary HTTPS setup wizard for supported fresh Linux installations. It selects a LAN address automatically when there is a single choice and can enable the matching Alpine community repository for required packages. The administrator set in the wizard can sign in as soon as installation completes.

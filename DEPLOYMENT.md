@@ -391,18 +391,11 @@ GitHub 超时或限流时会保留上次结果，并显示本次检查失败。�
 
 此流程不适用于安装 v0.2.0。以后发布了明确支持从当前版本自动升级的签名包，再按此流程操作。本段限 **Alpine 3.24 x86_64、Node.js 24、OpenRC**。至少准备两个可信签名版本，在隔离服务器上演练一次真实升级、一次故障自动回退。确认发布页面候选适用于当前版本、平台与 Node ABI。验包信任从已验证的公钥开始；不要直接拿候选附件里随包提供的公钥作为信任来源。
 
-1. 从发布方的独立可信渠道取得 Ed25519 **公钥**及 SPKI SHA-256 指纹。把路径换成实际公钥文件；先读出公钥类型，再算指纹并逐字比对。Alpine 若缺少 `openssl` 命令，先执行 `apk add openssl`。
+1. 从官方 GitHub 仓库下载可信的 v0.2.1 或更高版本源码包。支持本机更新的服务器新装时会自动固定官方公钥；未固定公钥的 v0.2.0 安装需要手动升级一次。
+2. 在维护时段完成备份、等待任务结束，从可信源码目录运行。安装器把缺失的公钥固定在 `/etc/mail-aggregator/update-public.pem`，并打印它的指纹（见[应用更新说明](./APP_UPDATES.md)）。已有公钥会保留。
 
    ```sh
-   trusted_key=/root/trusted-update-public.pem
-   openssl pkey -pubin -in "$trusted_key" -noout -text
-   openssl pkey -pubin -in "$trusted_key" -outform DER | openssl dgst -sha256
-   ```
-
-2. 在维护时段完成备份、等待任务结束，从可信引导版本的源码目录运行。安装器将公钥固定在 `/etc/mail-aggregator/update-public.pem`；核对它打印的指纹。已有不同公钥时要按受信的手工流程轮换。
-
-   ```sh
-   sh ./scripts/install.sh --app-only --trust-update-key /root/trusted-update-public.pem
+   sh ./scripts/install.sh --app-only
    ```
 
 3. 仅在签名版本和隔离演练都准备好后，由服务器 root 开启本机能力：
@@ -433,7 +426,7 @@ rc-service mail-aggregator-updater stop && \
 
 ### 9.3 仓库维护者：让正式自动更新可用
 
-参照 [应用更新发布说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.0/APP_UPDATES.md) 配置受保护的 `app-release-signing` 环境和环境密钥 `APP_UPDATE_SIGNING_KEY_B64`。从默认分支历史中的受保护版本标签运行 **Signed application release**；标签、`package.json` 和依赖锁文件中的版本需一致。首次发布保留 `policy: manual`，用清单中 `from_versions` 指定的真实版本实测切换和回退，确认只改应用与可回退的数据库状态后，再为适用升级路径签发 `automatic` 包。公钥与指纹单独交付。测试演练用的标签和密钥不能作为生产发行使用。
+参照 [应用更新发布说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.0/APP_UPDATES.md) 配置受保护的 `app-release-signing` 环境和环境密钥 `APP_UPDATE_SIGNING_KEY_B64`。从默认分支历史中的受保护版本标签运行 **Signed application release**；标签、`package.json` 和依赖锁文件中的版本需一致。首次发布保留 `policy: manual`，用清单中 `from_versions` 指定的真实版本实测切换和回退，确认只改应用与可回退的数据库状态后，再为适用升级路径签发 `automatic` 包。官方公钥随可信源码包一起交付，并公开指纹。测试演练用的标签和密钥不能作为生产发行使用。
 
 ## 10. 运行维护与故障定位
 

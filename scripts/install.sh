@@ -693,10 +693,20 @@ if ! id "$APP_USER" >/dev/null 2>&1; then
 fi
 
 APP_STAGE="${APP_DIR}.deploy"
-install_maintenance_tools
+UPDATE_PLATFORM=0
+case "$PLATFORM_ID:$VERSION_ID:$SERVICE_MANAGER:$(uname -m):$(node -p 'process.versions.node.split(".")[0]')" in
+  alpine:3.24:openrc:x86_64:24|alpine:3.24.*:openrc:x86_64:24)
+    UPDATE_PLATFORM=1
+    if [ -z "$UPDATE_TRUST_KEY" ] && [ ! -e "$CONFIG_DIR/update-public.pem" ] && [ ! -L "$CONFIG_DIR/update-public.pem" ]; then
+      UPDATE_TRUST_KEY="$PROJECT_ROOT/scripts/updater/official-public.pem"
+    fi
+    ;;
+esac
 if [ -n "$UPDATE_TRUST_KEY" ]; then
-  node "$PROJECT_ROOT/scripts/updater/trust-key.js" "$UPDATE_TRUST_KEY" "$CONFIG_DIR/update-public.pem" --check
+  node "$PROJECT_ROOT/scripts/updater/trust-key.js" "$UPDATE_TRUST_KEY" "$CONFIG_DIR/update-public.pem" --check \
+    || fail_step 'update trust' '无法预检发布公钥。' '请确认源码来自可信安装包；已有公钥不会被替换。'
 fi
+install_maintenance_tools
 rm -rf "$APP_STAGE"
 mkdir -p "$APP_STAGE"
 cp -r "$PROJECT_ROOT"/server "$PROJECT_ROOT"/web "$PROJECT_ROOT"/config \
@@ -1026,8 +1036,7 @@ if [ "$WIZARD_FRESH" = 1 ]; then
     || fail_step '9/9' 'Web 未确认首位管理员已创建' '检查启动日志和数据库。'
 fi
 
-case "$PLATFORM_ID:$VERSION_ID:$(uname -m):$(node -p 'process.versions.node.split(".")[0]')" in
-  alpine:3.24*:x86_64:24)
+if [ "$UPDATE_PLATFORM" = 1 ]; then
     # Install trusted executor outside the application. Its eligibility marker
     # and public key are operator-owned and are never put in an app backup.
     if [ -n "$UPDATE_TRUST_KEY" ]; then
@@ -1046,9 +1055,7 @@ case "$PLATFORM_ID:$VERSION_ID:$(uname -m):$(node -p 'process.versions.node.spli
     if [ "$WIZARD_FRESH" = 1 ]; then WIZARD_UPDATER_ATTEMPTED=1; fi
     rc-update add mail-aggregator-updater default
     service_start mail-aggregator-updater
-
-    ;;
-esac
+fi
 
 echo "  正在验证各组件状态(以下检查仅用于展示信息,不会修改任何东西):"
 echo ""

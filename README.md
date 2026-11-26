@@ -114,7 +114,7 @@ rc-service mail-aggregator status
 
 ### 应用更新
 
-主管理员可在「设置 → 应用更新」检查 GitHub Releases，默认每天检查正式版。Alpine 3.24 x86_64 / Node.js 24 / OpenRC 可在手工安装执行器、固定公钥并启用本机安装后，设置维护时段或立即安装。详见[部署、更新与回退说明](./APP_UPDATES.md)。
+主管理员可在「设置 → 应用更新」检查 GitHub Releases，默认每天检查正式版。Alpine 3.24 x86_64 / Node.js 24 / OpenRC 从 v0.2.1 起通过可信源码新装或手工升级会自动固定缺失的官方公钥；管理员另行启用本机安装后，可以设置维护时段或立即安装。详见[部署、更新与回退说明](./APP_UPDATES.md)。
 
 主管理员可在「个人安全」开启双重验证。使用前请查看[恢复码与本机接管指引](./TOTP_SECURITY.md)。
 

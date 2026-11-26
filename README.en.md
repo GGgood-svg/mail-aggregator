@@ -100,7 +100,7 @@ After a fresh command-line installation, the Web interface listens on `0.0.0.0:8
 
 ### Application updates
 
-The primary administrator can check GitHub releases under **Settings → Application updates**. Stable daily checks are on by default. Signed installation requires an eligible Alpine host, a pinned public key, and host opt-in. See [setup, upgrade, and rollback](./APP_UPDATES.md).
+The primary administrator can check GitHub releases under **Settings → Application updates**. Stable daily checks are on by default. Starting with v0.2.1, the trusted source installer automatically pins the bundled official release key on eligible Alpine hosts that do not already have a key. Signed installation still requires host opt-in. See [setup, upgrade, and rollback](./APP_UPDATES.md).
 
 The primary administrator can enable two-step verification under **Personal security**. See the [recovery codes and console recovery guide](./TOTP_SECURITY.md) (Chinese).
 
