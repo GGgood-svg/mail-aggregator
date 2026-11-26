@@ -76,7 +76,7 @@ jobs:
               sh scripts/updater/build-release.sh release-out "$RELEASE_TAG" "$RELEASE_COMMIT" "$FROM_VERSIONS" "$RELEASE_POLICY"
               chmod -R a+rX release-out
             '
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: alpine-runtime
           path: release-out/*
