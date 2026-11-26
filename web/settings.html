@@ -61,6 +61,15 @@
         <div class="hint">VM 内存有限时建议保持 1~2,避免多个 imapsync 同时跑爆内存</div>
       </div>
       <div class="form-group">
+        <label id="provider-concurrency-label" for="max_concurrent_per_provider" data-i18n-skip></label>
+        <input type="number" id="max_concurrent_per_provider" min="1" max="4" value="4">
+        <details id="provider-limits-details" hidden>
+          <summary id="provider-limits-summary" data-i18n-skip></summary>
+          <p class="hint" id="provider-limits-hint" data-i18n-skip></p>
+          <div id="provider-limits"></div>
+        </details>
+      </div>
+      <div class="form-group">
         <label>单次同步超时（分钟）</label>
         <input type="number" id="sync_timeout_minutes" min="5" max="1440">
         <div class="hint">默认 120 分钟；超时后先请求退出，10 秒后仍未结束则强制终止</div>
@@ -157,12 +166,21 @@
     </div>
 
     <div class="panel" style="max-width:520px;">
-      <h2>同步失败通知</h2>
-      <div class="form-group"><label><input type="checkbox" id="notification_enabled"> 启用同步失败通知</label></div>
+      <h2>事件通知</h2>
+      <div class="form-group"><label><input type="checkbox" id="notification_enabled"> 启用通知</label></div>
       <div class="form-group"><label>通知方式</label><select id="notification_provider"><option value="webhook">HTTPS Webhook</option><option value="telegram">Telegram</option></select></div>
-      <div id="webhook-fields"><div class="form-group"><label>Webhook 地址</label><input type="url" id="notification_webhook_url" placeholder="https://example.com/mail-alert"><div class="hint">会发送 JSON 事件，不会包含邮箱密码或授权码。</div></div></div>
+      <div id="webhook-fields"><div class="form-group"><label>Webhook 地址</label><input type="url" id="notification_webhook_url" placeholder="https://example.com/mail-alert"><div class="hint">会发送 JSON 事件，不会包含邮箱密码或授权码。</div></div>
+        <div class="form-group"><label class="checkbox-row"><input type="checkbox" id="notification_webhook_deduplication"> 接收端会按事件编号去重</label><div class="hint">仅在接收端能用 Idempotency-Key 或 eventId 识别并忽略重复事件时勾选。否则，结果不确定的投递会标记为需核对，不自动重试。</div></div>
+      </div>
       <div id="telegram-fields" style="display:none"><div class="form-group"><label>Telegram Bot Token</label><input type="password" id="notification_telegram_token" autocomplete="new-password"></div><div class="form-group"><label>Telegram Chat ID</label><input type="text" id="notification_telegram_chat_id"></div></div>
       <div class="form-group"><label>通知冷却时间（分钟）</label><input type="number" min="1" max="1440" id="notification_cooldown" value="30"><div class="hint">同一账号连续失败时，在冷却时间内仅发送一次通知。</div></div>
+      <fieldset style="margin:0 0 15px;border:1px solid var(--panel-border);padding:8px 12px"><legend>订阅事件</legend>
+        <label class="checkbox-row"><input type="checkbox" id="notification-subscribe-sync" checked> 同步失败与恢复</label>
+        <label class="checkbox-row"><input type="checkbox" id="notification-subscribe-capacity"> 存储容量告警与恢复</label>
+        <label class="checkbox-row"><input type="checkbox" id="notification-subscribe-restore"> 配置恢复结果</label>
+        <label class="checkbox-row"><input type="checkbox" id="notification-subscribe-update"> 应用更新结果</label>
+        <p class="hint">仅通知订阅后的结果。应用更新通知需要本机更新执行器。</p>
+      </fieldset>
       <button class="btn secondary" id="notification-save-btn" type="button">保存通知设置</button><div id="notification-msg" style="margin-top:10px;font-size:13px"></div>
     </div>
 
@@ -196,11 +214,34 @@
     </div>
 
     <button class="btn" id="save-btn">保存设置</button>
+    <section class="panel" style="max-width:720px;margin-top:24px;" id="app-update" hidden>
+      <h2>应用更新</h2>
+      <p id="app-update-status" class="hint" role="status">正在读取应用更新状态…</p>
+      <p><a id="app-update-notes" href="https://github.com/GGgood-svg/mail-aggregator/releases" target="_blank" rel="noopener noreferrer">GitHub 发布说明</a></p>
+      <p class="hint" id="app-update-notes-preview" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:12em;overflow:auto;" hidden></p>
+      <form id="app-update-form">
+        <div class="form-group"><label for="app-update-mode">更新方式</label>
+          <select id="app-update-mode"><option value="off">关闭定时检查</option><option value="check">仅检查</option><option value="auto">自动安装</option></select></div>
+        <div class="form-group"><label for="app-update-channel">更新渠道</label>
+          <select id="app-update-channel"><option value="stable">正式版</option><option value="preview">正式版和预览版</option></select></div>
+        <div id="app-update-window" hidden>
+          <div class="form-group"><label for="app-update-start">维护时段开始</label><input id="app-update-start" type="time" value="03:00"></div>
+          <div class="form-group"><label for="app-update-end">维护时段结束</label><input id="app-update-end" type="time" value="05:00"></div>
+          <div class="form-group"><label for="app-update-zone">维护时段时区</label><input id="app-update-zone" type="text" maxlength="80" placeholder="Asia/Shanghai"></div>
+          <p class="hint">安装会短暂重启 Web。同步、邮件任务或备份恢复忙碌时，更新会顺延。</p>
+        </div>
+        <div class="form-group" id="app-update-auth" hidden><label for="app-update-password">当前 Web 管理员密码</label><input id="app-update-password" type="password" autocomplete="current-password"></div>
+        <button type="submit" id="app-update-save" class="btn secondary">保存更新设置</button>
+        <button type="button" id="app-update-check" class="btn secondary">检查更新</button>
+        <button type="button" id="app-update-install" class="btn" hidden>立即安装</button>
+      </form>
+      <p class="hint" id="app-update-message" role="status"></p>
+    </section>
     <div id="msg" style="margin-top:12px; font-size:13px;"></div>
 
     <div class="panel" style="max-width:520px; margin-top:24px;">
       <h2>安全备份导出</h2>
-      <div class="hint" style="color:var(--warn);margin-bottom:12px;">备份包含账号数据库、邮箱密码/授权码和通知密钥，不包含邮件正文、日志、缓存或会话签名。下载后请离线加密保存，绝不要上传到公共仓库。</div>
+      <div class="hint" style="color:var(--warn);margin-bottom:12px;">备份包含账号数据库和邮箱密码或授权码，不包含邮件正文、日志、缓存或会话签名。通知设置和密钥保留在本机，不随备份导出或恢复。下载后请离线加密保存，切勿上传到公共仓库。</div>
       <div class="form-group">
         <label>当前 Web 管理员密码</label>
         <input type="password" id="backup-password" autocomplete="current-password">
@@ -238,6 +279,44 @@
       <div id="restore-points-list" style="margin-top:8px;font-size:13px;"></div>
     </div>
 
+    <section class="panel" id="backup-pair-planning" style="max-width:760px;margin-top:24px;" aria-labelledby="backup-pair-title">
+      <h2 id="backup-pair-title">配对备份恢复规划</h2>
+      <p class="hint">先在服务器上校验配对归档，再选择生成的规划报告。报告仅在浏览器中读取，网页不会校验归档或恢复生产邮件。</p>
+      <details>
+        <summary>如何生成规划报告和演练副本</summary>
+        <p class="hint">请替换示例中的备份目录、口令文件及账号编号。报告包含邮箱目录和账号名称，请私下保存。</p>
+        <pre class="log" style="white-space:pre;overflow:auto;">umask 077
+sudo env MAIL_AGG_DATA_DIR=/var/lib/mail-aggregator \
+  node /opt/mail-aggregator/server/cli-backup-pair.js plan \
+  /root/mail-aggregator-backups/backup-set-ID /root/maildir-backup.key &gt; recovery-plan.json
+
+sudo install -d -m 700 /root/mail-aggregator-rehearsals
+sudo node /opt/mail-aggregator/server/cli-backup-pair.js rehearse-account \
+  /root/mail-aggregator-backups/backup-set-ID /root/mail-aggregator-rehearsals \
+  /root/maildir-backup.key 7</pre>
+      </details>
+      <div class="form-group" style="margin-top:12px;">
+        <label for="backup-pair-file">选择本机规划报告（JSON）</label>
+        <input id="backup-pair-file" type="file" accept=".json,application/json">
+      </div>
+      <button class="btn secondary" id="backup-pair-clear" type="button" hidden>清除报告</button>
+      <p id="backup-pair-status" role="status" class="hint"></p>
+      <div id="backup-pair-report" hidden>
+        <dl id="backup-pair-details" data-i18n-skip></dl>
+        <div class="dashboard-table">
+          <table>
+            <thead><tr><th>账号编号</th><th>账号名称</th><th>归档目录</th><th>备份覆盖范围</th><th>归档邮件数</th><th>与当前配置对照</th></tr></thead>
+            <tbody id="backup-pair-accounts" data-i18n-skip></tbody>
+          </table>
+        </div>
+        <div id="backup-pair-pagination" style="margin-top:12px;" hidden>
+          <button class="btn secondary small" id="backup-pair-previous" type="button">上一页</button>
+          <span id="backup-pair-page" aria-live="polite" data-i18n-skip></span>
+          <button class="btn secondary small" id="backup-pair-next" type="button">下一页</button>
+        </div>
+      </div>
+    </section>
+
     <div class="panel" style="max-width:520px; margin-top:24px;">
       <h2>服务控制</h2>
       <div class="hint" style="margin-bottom:12px;">只会重启 mail-aggregator 这一个服务,不影响 Dovecot 和其它服务。需要提前在系统上配置好对应的最小 sudo 权限(见 README),否则点击会失败,这时候手动执行 <code>rc-service mail-aggregator restart</code> 即可。</div>
@@ -248,7 +327,7 @@
     <div class="panel danger-panel" style="max-width:520px; margin-top:24px;">
       <h2>卸载 Mail Aggregator</h2>
       <div class="hint" style="color:var(--warn); margin-bottom:12px;">
-        卸载操作不可通过网页撤销。程序卸载会删除 Mail Aggregator 和运行数据，但保留 Dovecot 与邮件；彻底卸载会额外删除 Dovecot、本地邮箱用户和 Maildir 中的全部邮件。
+        卸载操作不可通过网页撤销。程序卸载会删除应用、账号和凭据，保留邮件。彻底卸载只额外删除能确认由安装器创建的本地 Maildir；不会移除共享邮件服务。
       </div>
       <div class="form-group">
         <label>当前 Web 管理员密码</label>
@@ -273,17 +352,48 @@
 <script src="/js/api.js"></script>
 <script src="/js/branding.js"></script>
 <script src="/js/i18n.js"></script>
+<script src="/js/sync-availability-ui.js"></script>
+<script src="/js/app-update.js"></script>
+<script src="/js/notification-history.js"></script>
+<script src="/js/backup-pair-planning.js"></script>
 <script>
+function renderProviderLimits(settings) {
+  const details = document.getElementById('provider-limits-details');
+  const list = document.getElementById('provider-limits');
+  list.replaceChildren();
+  const providers = settings.provider_concurrency_options;
+  details.hidden = !Array.isArray(providers) || !providers.length;
+  if (details.hidden) return;
+  document.getElementById('provider-limits-summary').textContent = syncUi('providerLimits');
+  document.getElementById('provider-limits-hint').textContent = syncUi('providerLimitHint');
+  for (const { key, label } of providers) {
+    const group = document.createElement('div'); group.className = 'form-group';
+    const control = document.createElement('select');
+    control.id = `sync-provider-limit-${key}`; control.dataset.provider = key;
+    const caption = document.createElement('label'); caption.htmlFor = control.id;
+    caption.textContent = label;
+    control.add(new Option(syncUi('providerDefault'), ''));
+    for (const value of [1, 2, 3, 4]) control.add(new Option(String(value), String(value)));
+    control.value = settings.provider_concurrency_overrides?.[key] ?? '';
+    group.append(caption, control); list.append(group);
+  }
+}
+
 async function load() {
   applyBranding();
   await requireLogin();
   await I18n.ready;
   renderNav('settings');
+  document.getElementById('provider-concurrency-label').textContent = syncUi('providerLimit');
+  initAppUpdate();
+  initNotificationHistory();
   try {
     const s = await Api.get('/api/settings');
     document.getElementById('dovecot_host').value = s.dovecot_host || '127.0.0.1';
     document.getElementById('dovecot_port').value = s.dovecot_port || 143;
     document.getElementById('max_concurrent_syncs').value = s.max_concurrent_syncs || 1;
+    document.getElementById('max_concurrent_per_provider').value = s.max_concurrent_per_provider || 4;
+    renderProviderLimits(s);
     document.getElementById('sync_timeout_minutes').value = s.sync_timeout_minutes || 120;
     document.getElementById('log_retention_days').value = s.log_retention_days || 90;
     document.getElementById('max_job_log_mb').value = s.max_job_log_mb || 16;
@@ -376,12 +486,18 @@ function updateNotificationFields() {
   document.getElementById('webhook-fields').style.display = telegram ? 'none' : 'block';
   document.getElementById('telegram-fields').style.display = telegram ? 'block' : 'none';
 }
+let webhookDeduplicationEdited = false;
 async function loadNotifications() {
   try {
     const n = await Api.get('/api/notifications/settings');
     document.getElementById('notification_enabled').checked = n.enabled;
     document.getElementById('notification_provider').value = n.provider || 'webhook';
+    if (!webhookDeduplicationEdited) document.getElementById('notification_webhook_deduplication').checked = n.webhookSupportsDeduplication === true;
     document.getElementById('notification_cooldown').value = n.cooldownMinutes || 30;
+    document.getElementById('notification-subscribe-sync').checked = n.subscriptions?.sync !== false;
+    document.getElementById('notification-subscribe-capacity').checked = n.subscriptions?.capacity === true;
+    document.getElementById('notification-subscribe-restore').checked = n.subscriptions?.restore === true;
+    document.getElementById('notification-subscribe-update').checked = n.subscriptions?.update === true;
     updateNotificationFields();
   } catch (_) { /* notification config is optional */ }
 }
@@ -421,6 +537,7 @@ document.getElementById('save-btn').addEventListener('click', async () => {
       dovecot_host: document.getElementById('dovecot_host').value.trim(),
       dovecot_port: document.getElementById('dovecot_port').value,
       max_concurrent_syncs: document.getElementById('max_concurrent_syncs').value,
+      max_concurrent_per_provider: document.getElementById('max_concurrent_per_provider').value,
       sync_timeout_minutes: document.getElementById('sync_timeout_minutes').value,
       log_retention_days: document.getElementById('log_retention_days').value,
       max_job_log_mb: document.getElementById('max_job_log_mb').value,
@@ -437,6 +554,10 @@ document.getElementById('save-btn').addEventListener('click', async () => {
       footer_text: document.getElementById('footer_text').value.trim(),
       dovecot_user: document.getElementById('dovecot_user').value.trim(),
     };
+    const providerLimits = [...document.querySelectorAll('#provider-limits select')];
+    if (providerLimits.length) payload.provider_concurrency_overrides = Object.fromEntries(
+      providerLimits.filter(control => control.value).map(control => [control.dataset.provider, Number(control.value)])
+    );
     const result = await Api.put('/api/settings', payload);
     if (result.needsRestart) {
       toast('已保存,端口修改需要重启服务才能生效');
@@ -485,19 +606,31 @@ document.getElementById('dovecot-change-btn').addEventListener('click', async ()
 });
 
 document.getElementById('notification_provider').addEventListener('change', updateNotificationFields);
+document.getElementById('notification_webhook_url').addEventListener('input', () => {
+  document.getElementById('notification_webhook_deduplication').checked = false;
+  webhookDeduplicationEdited = true;
+});
+document.getElementById('notification_webhook_deduplication').addEventListener('change', () => { webhookDeduplicationEdited = true; });
 document.getElementById('notification-save-btn').addEventListener('click', async () => {
   const msg = document.getElementById('notification-msg');
   try {
-    await Api.put('/api/notifications/settings', {
+    const saved = await Api.put('/api/notifications/settings', {
       enabled: document.getElementById('notification_enabled').checked,
       provider: document.getElementById('notification_provider').value,
       webhookUrl: document.getElementById('notification_webhook_url').value.trim(),
+      ...(webhookDeduplicationEdited && { webhookSupportsDeduplication: document.getElementById('notification_webhook_deduplication').checked }),
       telegramToken: document.getElementById('notification_telegram_token').value.trim(),
       telegramChatId: document.getElementById('notification_telegram_chat_id').value.trim(),
       cooldownMinutes: document.getElementById('notification_cooldown').value,
+      subscriptions: { sync: document.getElementById('notification-subscribe-sync').checked,
+        capacity: document.getElementById('notification-subscribe-capacity').checked,
+        restore: document.getElementById('notification-subscribe-restore').checked,
+        update: document.getElementById('notification-subscribe-update').checked },
     });
     msg.className = 'ok'; msg.textContent = '通知设置已保存。密钥不会回显。';
     document.getElementById('notification_telegram_token').value = '';
+    document.getElementById('notification_webhook_deduplication').checked = saved.webhookSupportsDeduplication === true;
+    webhookDeduplicationEdited = false;
   } catch (error) { msg.className = 'err'; msg.textContent = error.message; }
 });
 
@@ -658,6 +791,8 @@ document.getElementById('restore-inspect-btn').addEventListener('click', async (
       `账号：${result.accountCount} 个` ,
       `同步记录：${result.jobCount} 条`,
       `设置：${result.settingCount} 项`,
+      `${window.I18n.t('保存搜索')}：${result.savedSearchCount || 0}`,
+      `${window.I18n.t('整理规则')}：${result.ruleCount || 0}`,
       `SHA-256：${result.archiveSha256}`,
       '',
       ...(result.notes || []).map((note) => `• ${note}`),
@@ -695,6 +830,13 @@ document.getElementById('restore-apply-btn').addEventListener('click', async () 
     document.getElementById('restore-snapshot-btn').style.display = 'inline-block';
     msg.className = 'ok';
     msg.textContent = `${result.message}。建议立即下载恢复前快照，然后刷新页面检查账号和设置。`;
+    if (result.restored) {
+      const restored = result.restored;
+      msg.textContent += restored.savedSearchesPreserved ? ` ${window.I18n.t('旧备份保留当前搜索')}`
+        : ` ${window.I18n.t('已恢复搜索')}：${restored.savedSearches || 0}；${window.I18n.t('已跳过搜索')}：${restored.savedSearchesSkipped || 0}`;
+      msg.textContent += restored.rulesPreserved ? ` ${window.I18n.t('旧备份保留当前规则')}`
+        : ` ${window.I18n.t('已恢复规则')}：${restored.rules || 0}；${window.I18n.t('已跳过规则')}：${restored.rulesSkipped || 0}`;
+    }
     loadRestorePoints();
   } catch (error) {
     if (error.details && error.details.snapshotId) {
@@ -740,7 +882,7 @@ async function requestUninstall(mode) {
     return;
   }
   const warning = mode === 'purge'
-    ? '这会删除 Dovecot、本地邮箱用户和 Maildir 中的全部邮件，且无法恢复。确定继续吗？'
+    ? '这会删除应用和运行数据，以及能确认由安装器创建的本地 Maildir。Maildir 的删除不可恢复。确定继续吗？'
     : '这会停止并删除 Mail Aggregator 及其运行数据，但保留 Dovecot 和邮件。确定继续吗？';
   if (!confirm(warning)) return;
   document.getElementById('uninstall-app-btn').disabled = true;
@@ -748,8 +890,25 @@ async function requestUninstall(mode) {
   try {
     const result = await Api.post('/api/system/uninstall', { currentPassword: password, mode, confirmation });
     msg.className = 'ok';
-    msg.textContent = result.message;
-    setTimeout(() => { window.location.href = '/login.html'; }, 3000);
+    document.getElementById('uninstall-password').value = '';
+    const receipt = `主机回执：sudo cat /var/lib/mail-aggregator-operations/uninstall/${result.id}.json`;
+    msg.textContent = `${result.message} ${receipt}`;
+    let attempts = 0;
+    const poll = async () => {
+      try {
+        const status = await Api.get(`/api/system/uninstall/${result.id}`);
+        if (status?.state === 'completed') { msg.textContent = `卸载已完成。${receipt}`; return; }
+        if (['failed', 'interrupted'].includes(status?.state)) {
+          msg.className = 'err'; msg.textContent = `卸载未完成（${status.code}）。${receipt}`;
+          document.getElementById('uninstall-app-btn').disabled = false;
+          document.getElementById('purge-btn').disabled = false;
+          return;
+        }
+        if (++attempts < 30) { setTimeout(poll, 1000); return; }
+      } catch (_) { /* This service can disappear before the host has finished. */ }
+      msg.className = 'hint'; msg.textContent = `网页无法确认最终结果。${receipt}`;
+    };
+    setTimeout(poll, 400);
   } catch (error) {
     msg.className = 'err';
     msg.textContent = error.message;
@@ -760,8 +919,18 @@ async function requestUninstall(mode) {
 
 document.getElementById('uninstall-app-btn').addEventListener('click', () => requestUninstall('remove-app'));
 document.getElementById('purge-btn').addEventListener('click', () => requestUninstall('purge'));
+function checkUninstallCapability() {
+  return Api.get('/api/system/uninstall').then(result => {
+    if (result?.available) return;
+    document.getElementById('uninstall-app-btn').disabled = true;
+    document.getElementById('purge-btn').disabled = true;
+    document.getElementById('uninstall-msg').textContent = '尚未安装宿主卸载组件，请在服务器上手工升级。';
+  }).catch(() => {});
+}
+
 
 load();
+if (window.location.pathname.endsWith('/settings.html')) checkUninstallCapability();
 </script>
 </body>
 </html>

@@ -41,13 +41,16 @@ test.after(() => {
 });
 
 function dependencies(overrides = {}) {
+  let hash = '{BLF-CRYPT}old-hash';
   return {
     localDovecot: () => ({ user: 'mailuser', host: '127.0.0.1', port: 143 }),
     imapLoginTest: async () => true,
     generateDovecotHash: async () => '{BLF-CRYPT}new-hash',
-    runHelper: async (args) => args[0] === 'get-hash'
-      ? { ok: true, stdout: '{BLF-CRYPT}new-hash' }
-      : { ok: true, stdout: 'OK' },
+    runHelper: async (args) => {
+      if (args[0] === 'get-hash') return { ok: true, stdout: hash };
+      hash = args[0] === 'set-password' ? '{BLF-CRYPT}new-hash' : '{BLF-CRYPT}old-hash';
+      return { ok: true, stdout: 'OK' };
+    },
     saveGlobalLocalSecret: () => {},
     clearTargetPasswordOverrides: () => {},
     setSetting: () => {},
@@ -58,23 +61,27 @@ function dependencies(overrides = {}) {
 
 integrationTest('local secret write failure rolls Dovecot back before returning', async () => {
   const helperCalls = [];
+  let hash = '{BLF-CRYPT}old-hash';
   const result = await changeDovecotPassword('old-password', 'new-password', dependencies({
     saveGlobalLocalSecret() { throw new Error('disk full'); },
     async runHelper(args) {
       helperCalls.push(args);
+      if (args[0] === 'get-hash') return { ok: true, stdout: hash };
+      hash = args[0] === 'set-password' ? '{BLF-CRYPT}new-hash' : '{BLF-CRYPT}old-hash';
       return { ok: true, stdout: 'OK' };
     },
   }));
 
   assert.equal(result.ok, false);
   assert.match(result.error, /已回滚 Dovecot 密码/);
-  assert.deepEqual(helperCalls.map((args) => args[0]), ['set-password', 'restore-backup']);
+  assert.deepEqual(helperCalls.map((args) => args[0]), ['get-hash', 'set-password', 'get-hash', 'get-hash', 'restore-backup', 'get-hash']);
 });
 
 integrationTest('failed helper write returns without committing the local secret', async () => {
   let secretWrites = 0;
   const result = await changeDovecotPassword('old-password', 'new-password', dependencies({
-    runHelper: async () => ({ ok: false, message: 'reload failed; previous users file restored' }),
+    runHelper: async args => args[0] === 'get-hash' ? { ok: true, stdout: '{BLF-CRYPT}old-hash' }
+      : { ok: false, message: 'reload failed; previous users file restored' },
     saveGlobalLocalSecret() { secretWrites++; },
   }));
 
@@ -107,4 +114,31 @@ integrationTest('target password override cleanup failure stops before changing 
   assert.equal(result.ok, false);
   assert.match(result.error, /尚未修改 Dovecot/);
   assert.equal(helperCalls, 0);
+});
+
+integrationTest('helper timeout after replacing users file restores and verifies the original password', async () => {
+  let hash = '{BLF-CRYPT}old-hash', restored = 0, secretWrites = 0;
+  const result = await changeDovecotPassword('old-password', 'new-password', dependencies({
+    runHelper: async args => {
+      if (args[0] === 'get-hash') return { ok: true, stdout: hash };
+      if (args[0] === 'set-password') { hash = '{BLF-CRYPT}new-hash'; return { ok: false, message: 'timeout' }; }
+      restored++; hash = '{BLF-CRYPT}old-hash'; return { ok: true, stdout: 'OK' };
+    },
+    imapLoginTest: async (_h, _p, _u, password) => password === 'old-password' && hash === '{BLF-CRYPT}old-hash',
+    saveGlobalLocalSecret() { secretWrites++; },
+  }));
+  assert.equal(result.ok, false); assert.match(result.error, /已确认原密码和配置可用/);
+  assert.equal(restored, 1); assert.equal(secretWrites, 0); assert.equal(hash, '{BLF-CRYPT}old-hash');
+});
+
+integrationTest('helper timeout does not overwrite an unrelated external edit or claim a verified rollback', async () => {
+  let hash = '{BLF-CRYPT}old-hash', restored = 0;
+  const result = await changeDovecotPassword('old-password', 'new-password', dependencies({
+    runHelper: async args => {
+      if (args[0] === 'get-hash') return { ok: true, stdout: hash };
+      if (args[0] === 'set-password') { hash = '{BLF-CRYPT}external-edit'; return { ok: false, message: 'timeout' }; }
+      restored++; return { ok: true, stdout: 'OK' };
+    },
+  }));
+  assert.equal(result.ok, false); assert.match(result.error, /无法确认回滚/); assert.equal(restored, 0);
 });

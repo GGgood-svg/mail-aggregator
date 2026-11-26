@@ -2,10 +2,20 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { AsyncLocalStorage } = require('node:async_hooks');
+const { track } = require('./update-activity');
 const context = new AsyncLocalStorage();
+const lockPath = root => path.join(path.resolve(root), '.state-write.lock');
 
-function withStateLock(root, work) {
-  const filename = path.join(path.resolve(root), '.state-write.lock');
+function currentStateLockId(root) {
+  const owner = context.getStore();
+  return owner?.active && owner.filename === lockPath(root) ? owner.id : null;
+}
+
+function withStateLock(root, work, { allowDuringRestore = false } = {}) {
+  if (!allowDuringRestore && require('./maintenance-lock').current() === 'restore') {
+    throw Object.assign(new Error('系统正在恢复，请稍后修改配置'), { statusCode: 409 });
+  }
+  const filename = lockPath(root);
   const inherited = context.getStore();
   if (inherited?.filename === filename && inherited.active) return work();
   const token = { filename, active: true, id: crypto.randomBytes(16).toString('hex') };
@@ -37,17 +47,22 @@ function withStateLock(root, work) {
   });
 }
 
-function stateRoute(handler) {
-  return (req, res, next) => {
+function stateRoute(handler, options) {
+  return track((req, res, next) => {
     try {
-      const result = withStateLock(require('./db').DIRS.root, () => handler(req, res, next));
-      if (result && typeof result.catch === 'function') result.catch(next);
+      const result = withStateLock(require('./db').DIRS.root, () => handler(req, res, next), options);
+      if (result && typeof result.catch === 'function') return result.catch(next);
+      return result;
     } catch (error) { next(error); }
-  };
+  });
 }
 function stateWritesBlocked(root) {
-  const filename = path.join(path.resolve(root), '.state-write.lock');
-  const owner = context.getStore();
-  return !(owner?.filename === filename && owner.active) && fs.existsSync(filename);
+  return !currentStateLockId(root) && fs.existsSync(lockPath(root));
 }
-module.exports = { withStateLock, stateRoute, stateWritesBlocked };
+function asyncRoute(handler) {
+  return track((req, res, next) => {
+    try { return Promise.resolve(handler(req, res, next)).catch(next); }
+    catch (error) { return next(error); }
+  });
+}
+module.exports = { withStateLock, stateRoute, stateWritesBlocked, currentStateLockId, lockPath, asyncRoute };

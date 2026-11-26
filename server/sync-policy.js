@@ -85,11 +85,16 @@ function escapeRegex(value) {
   return value.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
 }
 
+function folderRuleLists(account) {
+  return { include: normalizeFolderRules(account.folder_includes), exclude: normalizeFolderRules(account.folder_excludes) };
+}
+
 function applySyncPolicy(args, account, { justFolders = false } = {}) {
-  for (const folder of normalizeFolderRules(account.folder_includes)) {
+  const { include, exclude } = folderRuleLists(account);
+  for (const folder of include) {
     args.push('--include', `^${escapeRegex(folder)}$`);
   }
-  for (const folder of normalizeFolderRules(account.folder_excludes)) {
+  for (const folder of exclude) {
     args.push('--exclude', `^${escapeRegex(folder)}$`);
   }
   if (justFolders) return args;
@@ -110,5 +115,6 @@ module.exports = {
   DELETION_MODES,
   normalizeFolderRules,
   normalizeSyncPolicy,
+  folderRuleLists,
   applySyncPolicy,
 };

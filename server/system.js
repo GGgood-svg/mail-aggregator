@@ -3,6 +3,7 @@ const net = require('net');
 const { execFile } = require('child_process');
 const { db } = require('./db');
 const { summarizeScheduler } = require('./scheduler-status');
+const { programVersion } = require('./diagnostics');
 
 function checkTcpPort(host, port, timeoutMs = 2000) {
   return new Promise((resolve) => {
@@ -22,18 +23,9 @@ function checkTcpPort(host, port, timeoutMs = 2000) {
   });
 }
 
-function findImapsyncVersion() {
-  return new Promise((resolve) => {
-    execFile('imapsync', ['--version'], { timeout: 5000 }, (err, stdout, stderr) => {
-      if (err) {
-        resolve({ available: false, version: null });
-        return;
-      }
-      const out = (stdout || stderr || '').trim();
-      const match = out.match(/imapsync\s+([\d.]+)/i);
-      resolve({ available: true, version: match ? match[1] : out.split('\n')[0] });
-    });
-  });
+async function findImapsyncVersion() {
+  const version = await programVersion('imapsync');
+  return { available: Boolean(version), version };
 }
 
 function getDiskUsage(mountPoint = '/') {
@@ -63,10 +55,10 @@ function getDiskUsage(mountPoint = '/') {
   });
 }
 
-async function getSystemStatus(localImapHost, localImapPort, schedulerStatus) {
+async function getSystemStatus(localImapHost, localImapPort, schedulerStatus, known) {
   const [dovecotUp, imapsync, disk] = await Promise.all([
-    checkTcpPort(localImapHost, localImapPort),
-    findImapsyncVersion(),
+    known ? known.reachable : checkTcpPort(localImapHost, localImapPort),
+    known ? { available: Boolean(known.imapsync), version: known.imapsync } : findImapsyncVersion(),
     getDiskUsage('/'),
   ]);
 
@@ -139,7 +131,7 @@ function compatibilityForDovecot(version) {
   if (!match) return { code: 'unknown', label: 'Unknown', automaticUpgrade: false };
   const major = `${match[1]}.${match[2]}`;
   if (major === '2.3') return { code: 'supported', label: 'Supported', automaticUpgrade: true, adapter: '2.3' };
-  if (major === '2.4') return { code: 'major_migration', label: 'Major Migration', automaticUpgrade: false };
+  if (major === '2.4') return { code: 'fresh_install', label: 'Fresh install supported', automaticUpgrade: false, adapter: '2.4' };
   return { code: 'unknown', label: 'Unknown', automaticUpgrade: false };
 }
 
@@ -158,8 +150,8 @@ async function getUpdateStatus() {
   const isAlpine = fsExists('/etc/alpine-release');
   const [dovecotRepo, imapsyncRepo] = isAlpine
     ? await Promise.all([
-        packageCandidate('apk', ['policy', 'dovecot'], /dovecot-([^\s]+)/),
-        packageCandidate('apk', ['policy', 'imapsync'], /imapsync-([^\s]+)/),
+        packageCandidate('apk', ['policy', 'dovecot'], /^\s+(\d[^:\s]+):$/m),
+        packageCandidate('apk', ['policy', 'imapsync'], /^\s+(\d[^:\s]+):$/m),
       ])
     : await Promise.all([
         packageCandidate('apt-cache', ['policy', 'dovecot-imapd'], /Candidate:\s*([^\s]+)/),

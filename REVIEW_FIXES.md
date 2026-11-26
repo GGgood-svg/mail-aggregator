@@ -2,7 +2,26 @@
 
 The repair stage addresses the sixteen findings from the 2026-10-28 review.
 Subsequent work adds folder search, attachment downloads and EML export, as
-documented in MAIL_FEATURES.md. Outbound mail and full Maildir backup remain out of scope.
+documented in MAIL_FEATURES.md. The separate Maildir encryption/rehearsal tool
+added later is documented in MAILDIR_BACKUP.md; the original application backup
+still excludes Maildir. Outbound mail remains out of scope.
+
+## 2026-11-07 follow-up review
+
+This pass reproduced and repaired two gaps missed by the existing suite:
+retrying a failed second page requested page three, and an aborted ordinary
+folder search could still fetch message summaries after its search completed.
+It also added coverage and fixes for:
+
+- Late read-state responses from an old UIDVALIDITY affecting the newly rebuilt
+  mailbox's UI.
+- Empty folder refreshes leaving the previous message list and reader visible.
+- Already disconnected requests creating a client before cancellation handling.
+- Archive expansion limits counting only file contents. Both backup validators
+  now bound the entire decompressed tar stream, including metadata and padding;
+  application restore applies its own lower limit before extraction.
+
+See MAIL_ROADMAP.md for the updated order of release validation and further work.
 
 ## Behavior changes
 
@@ -70,8 +89,33 @@ Linux installation, root ownership after restore, real Dovecot/imapsync TLS,
 OAuth provider authorization, and incremental cache behavior still require the
 deployment acceptance checks in TESTING.md. Windows simulations are not a
 substitute for those checks. Broader architecture recommendations in the review
-(storage-level tenant isolation, encrypted Maildir backup, 2FA, asynchronous
-password hashing and observability) remain separate work.
+(storage-level tenant isolation, 2FA and observability) remain separate work.
+Encrypted Maildir backup and asynchronous password hashing now have local
+implementations; their deployment acceptance boundaries are documented separately.
 
 Protocol references: [imapsync SSL argument handling](https://github.com/imapsync/imapsync),
 [IO::Socket::SSL hostname verification and SNI](https://metacpan.org/pod/IO::Socket::SSL).
+
+## 2026-11-14 responsiveness changes
+
+- Replaced main-thread bcrypt in all Web authentication and user-management
+  paths with a shared, bounded worker pool. Queue overflow, worker failure and
+  a deadline covering queue time fail with HTTP 503. Password format and cost
+  remain compatible with existing hashes.
+- Removed the configuration lock from expensive password work. Revalidate
+  enabled status, roles, session versions, password snapshots and login limits
+  after awaiting results and before issuing sessions or committing changes.
+  Pending attempts count toward per-username/IP admission limits. Recheck the
+  persisted session after awaiting work; logout revokes pending actions and a
+  late response cannot recreate the destroyed session.
+- Replaced synchronous statfs/helper execution with bounded asynchronous
+  probes shared by sync admission, running syncs and health reports. Cache raw
+  observations briefly, re-read the reserve, and never use expired successes on
+  errors. Fail closed on timeout, capacity uncertainty and exhausted inodes.
+- Reserve sync slots before waiting, revalidate owner and target configuration,
+  support cancellation during preparation, suppress overlapping periodic checks
+  and ignore late results after completion. Coalesce scheduler ticks and check
+  its stop generation before enqueueing.
+- Added deterministic concurrency/failure regressions and production SQLite/HTTP
+  checks. The synthetic benchmark now exercises the actual production pool and
+  capacity checker; results and Linux acceptance gaps are in RESPONSIVENESS.md.

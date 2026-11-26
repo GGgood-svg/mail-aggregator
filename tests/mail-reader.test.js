@@ -186,7 +186,7 @@ test('read-only mail API exposes folders, newest-first list, and sanitized detai
       },
       async mailboxOpen(folder, options) {
         this.openedReadOnly.push(options.readOnly);
-        return { path: folder, exists: 2 };
+        return { path: folder, exists: 2, uidNext: 12 };
       },
       async fetchAll() {
         return [
@@ -259,7 +259,7 @@ test('UID pagination remains stable across insertions and expunges and detects m
   const app = express();
   app.use('/api/mail', createMailRouter({ mailAccessForRequest: () => ({ all: true }), createClient: () => ({
     async connect() {}, async logout() {},
-    async mailboxOpen() { return { exists: uids.length, uidValidity: validity }; },
+    async mailboxOpen() { return { exists: uids.length, uidValidity: validity, uidNext: uids.at(-1) + 1 }; },
     async search(query, options) {
       assert.equal(options.uid, true);
       const end = query.uid.endsWith('*') ? Infinity : Number(query.uid.split(':')[1]);
@@ -276,7 +276,9 @@ test('UID pagination remains stable across insertions and expunges and detects m
   const first = await fetch(base).then(res => res.json());
   assert.deepEqual(first.messages.map(m => m.uid), [40, 30]);
   uids = [10, 20, 40, 50]; // UID 30 expunged and UID 50 appended between pages.
-  const second = await fetch(`${base}&beforeUid=${first.nextBeforeUid}&uidValidity=7`).then(res => res.json());
+  const second = await fetch(`${base}&page=2&beforeUid=${first.nextBeforeUid}&uidValidity=7&knownTotal=${first.total}`).then(res => res.json());
+  assert.equal(second.total, 4);
+  assert.equal(second.totalPages, 2);
   assert.deepEqual(second.messages.map(m => m.uid), [20, 10]);
   assert.equal(second.hasMore, false);
   validity = '8';

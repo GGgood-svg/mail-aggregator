@@ -1,6 +1,7 @@
 const fs = require('fs');
 const zlib = require('zlib');
 const crypto = require('crypto');
+const { pipeline } = require('node:stream/promises');
 const { hashFile } = require('./backup');
 
 const BLOCK_SIZE = 512;
@@ -57,14 +58,17 @@ function isAllowedPath(entryPath, isDirectory) {
     || entryPath.startsWith('data/secrets/');
 }
 
-async function readTarInventory(archivePath) {
+async function readTarInventory(archivePath, { maxExpandedBytes = MAX_UNCOMPRESSED_BYTES, signal } = {}) {
+  if (!Number.isSafeInteger(maxExpandedBytes) || maxExpandedBytes < 1 || maxExpandedBytes > MAX_UNCOMPRESSED_BYTES) throw new Error('解压体积上限不合法');
   const source = fs.createReadStream(archivePath);
   const stream = zlib.createGunzip();
-  source.pipe(stream);
+  const pump = pipeline(source, stream, { signal });
+  pump.catch(() => {});
   let buffer = Buffer.alloc(0);
   let current = null;
   let paddingRemaining = 0;
   let totalBytes = 0;
+  let expandedBytes = 0;
   let entryCount = 0;
   let ended = false;
   const files = new Map();
@@ -81,6 +85,8 @@ async function readTarInventory(archivePath) {
 
   try {
     for await (const chunk of stream) {
+      expandedBytes += chunk.length;
+      if (expandedBytes > maxExpandedBytes) throw Object.assign(new Error('备份解压后体积超过安全上限'), { statusCode: 413 });
       if (ended && chunk.some((byte) => byte !== 0)) throw new Error('tar结束标记后仍有额外数据');
       if (ended) continue;
       buffer = buffer.length ? Buffer.concat([buffer, chunk]) : chunk;
@@ -143,6 +149,7 @@ async function readTarInventory(archivePath) {
         if (size === 0) finishCurrent();
       }
     }
+    await pump;
   } finally {
     const closePromises = [source, stream].map((item) => (
       item.closed ? Promise.resolve() : new Promise((resolve) => item.once('close', resolve))
@@ -151,11 +158,12 @@ async function readTarInventory(archivePath) {
     stream.destroy();
     source.destroy();
     await Promise.all(closePromises);
+    await pump.catch(() => {});
   }
 
   if (current || paddingRemaining || buffer.length) throw new Error('tar归档被截断');
   if (!ended) throw new Error('tar归档缺少结束标记');
-  return { files, manifestText, totalBytes };
+  return { files, manifestText, totalBytes, expandedBytes };
 }
 
 function verifyManifest(files, manifestText) {
@@ -188,12 +196,12 @@ function verifyManifest(files, manifestText) {
   return manifest;
 }
 
-async function verifyBackupArchive(archivePath, expectedArchiveSha256 = null) {
-  const archiveSha256 = await hashFile(archivePath);
+async function verifyBackupArchive(archivePath, expectedArchiveSha256 = null, options = {}) {
+  const archiveSha256 = await hashFile(archivePath, options);
   if (expectedArchiveSha256 && archiveSha256 !== String(expectedArchiveSha256).toLowerCase()) {
     throw new Error('压缩包SHA-256与校验文件不一致');
   }
-  const { files, manifestText, totalBytes } = await readTarInventory(archivePath);
+  const { files, manifestText, totalBytes, expandedBytes } = await readTarInventory(archivePath, options);
   const manifest = verifyManifest(files, manifestText);
   return {
     ok: true,
@@ -202,6 +210,7 @@ async function verifyBackupArchive(archivePath, expectedArchiveSha256 = null) {
     applicationVersion: manifest.applicationVersion,
     createdAt: manifest.createdAt,
     uncompressedBytes: totalBytes,
+    expandedBytes,
     databaseBytes: files.get('data/db/mail-aggregator.db').size,
   };
 }

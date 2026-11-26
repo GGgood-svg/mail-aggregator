@@ -24,10 +24,6 @@ DOVECOT_HOST="127.0.0.1"
 DOVECOT_PORT="143"
 WEB_PORT="8080"
 WEB_LANGUAGE="zh-CN"
-MAIL_AGG_BIND_HOST="127.0.0.1"
-MAIL_AGG_TRUST_PROXY="false"
-MAIL_AGG_COOKIE_SECURE="auto"
-MAIL_AGG_REQUIRE_HTTPS="false"
 CONFIG_DIR="/etc/mail-aggregator"
 CONFIG_FILE="$CONFIG_DIR/config"
 HELPER_INSTALL_PATH="/usr/local/sbin/mail-aggregator-dovecot-helper"
@@ -39,13 +35,40 @@ QUICK=0
 CUSTOM=0
 APP_ONLY=0
 SHOW_CONFIG=0
+FRESH_APP_INSTALL=0
+WEB_EXPOSURE_OVERRIDE=""
 CLEANUP_SOURCE=0
+UPDATE_TRUST_KEY=''
 CLEANUP_ARCHIVE=""
 FORCE_DOVECOT_INIT=0
 DEFAULT_DOVECOT_PASSWORD=""
+WIZARD_FRESH=0
+INSTALL_APT_MINIMAL=0
+WIZARD_COMPLETE=0
+WIZARD_WEB_ATTEMPTED=0
+WIZARD_UPDATER_ATTEMPTED=0
+WIZARD_DOVECOT_ATTEMPTED=0
+PROJECT_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+. "$PROJECT_ROOT/scripts/lib/install-platform.sh"
+. "$PROJECT_ROOT/scripts/lib/imapsync-install.sh"
+
+wizard_event() {
+  if [ "$WIZARD_FRESH" = 1 ]; then printf '%s\n' "$1" >&3 || true; fi
+}
+
+wizard_exit() {
+  wizard_rc=$1
+  if [ "$wizard_rc" -eq 0 ] && [ "$WIZARD_COMPLETE" = 1 ]; then return; fi
+  # Only services attempted by this fresh install are touched. Preserve files and data for diagnosis.
+  if [ "$WIZARD_UPDATER_ATTEMPTED" = 1 ]; then wizard_deactivate mail-aggregator-updater; fi
+  if [ "$WIZARD_WEB_ATTEMPTED" = 1 ]; then wizard_deactivate mail-aggregator; fi
+  if [ "$WIZARD_DOVECOT_ATTEMPTED" = 1 ]; then wizard_deactivate dovecot; fi
+}
 
 usage() {
-  echo "Usage: $0 [--quick|--custom|--full|--app-only] [--lan-http|--https-proxy] [--dovecot-user USER] [--default-dovecot-password PASSWORD] [--dovecot-host HOST] [--dovecot-port PORT] [--web-port PORT] [--language LOCALE] [--show-config] [--cleanup-source --cleanup-archive FILE]"
+  echo "Usage: $0 [--quick|--custom|--full|--app-only] [--lan-http|--local-http|--https-proxy] [--dovecot-user USER] [--default-dovecot-password PASSWORD] [--dovecot-host HOST] [--dovecot-port PORT] [--web-port PORT] [--language LOCALE] [--trust-update-key PUBLIC.pem] [--show-config] [--cleanup-source --cleanup-archive FILE]"
+  echo "       $0 --recover-application"
+  echo "  Fresh installs default to --lan-http (0.0.0.0:8080, trusted LAN only). Upgrades keep the existing Web access mode unless changed explicitly."
 }
 valid_user() { echo "$1" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' && ! echo " root daemon bin nobody " | grep -q " $1 "; }
 valid_port() { case "$1" in ''|*[!0-9]*) return 1;; esac; [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null; }
@@ -60,6 +83,7 @@ generate_initial_password() {
 
 fail_step() {
   STEP="$1"; REASON="$2"; HINT="$3"
+  [ "$#" -lt 4 ] || wizard_event "error:$4"
   echo "" >&2
   echo "[ERROR] 安装在 ${STEP} 失败:" >&2
   echo "  ${REASON}" >&2
@@ -71,7 +95,33 @@ fail_step() {
   exit 1
 }
 
-load_existing_config() {
+set_web_exposure() {
+  MAIL_AGG_TRUST_PROXY="false"
+  MAIL_AGG_COOKIE_SECURE="auto"
+  MAIL_AGG_REQUIRE_HTTPS="false"
+  case "$1" in
+    lan) MAIL_AGG_BIND_HOST="0.0.0.0" ;;
+    local) MAIL_AGG_BIND_HOST="127.0.0.1" ;;
+    proxy)
+      MAIL_AGG_BIND_HOST="127.0.0.1"
+      MAIL_AGG_TRUST_PROXY="loopback"
+      MAIL_AGG_COOKIE_SECURE="true"
+      MAIL_AGG_REQUIRE_HTTPS="true"
+      ;;
+    *) fail_step "参数校验" "未知 Web 访问模式: $1" "请选择 local、lan 或 proxy。" ;;
+  esac
+}
+
+load_install_defaults() {
+  # Older installations may have data or a service but no runtime config.
+  # Keep the loopback fallback unless this really is a fresh app install.
+  if [ ! -e "$CONFIG_FILE" ] && [ ! -e "$APP_DIR" ] && [ ! -e "$APP_PREVIOUS" ] && [ ! -e "$DATA_DIR" ] &&
+     [ ! -e /etc/init.d/mail-aggregator ] && [ ! -e /etc/systemd/system/mail-aggregator.service ]; then
+    FRESH_APP_INSTALL=1
+    set_web_exposure lan
+  else
+    set_web_exposure local
+  fi
   if [ -r "$CONFIG_FILE" ]; then
     # shellcheck disable=SC1090
     . "$CONFIG_FILE"
@@ -97,17 +147,9 @@ EOF
 }
 
 detect_platform() {
-  [ -r /etc/os-release ] || fail_step "platform detection" "无法读取 /etc/os-release" "仅支持 Alpine、Debian 和 Ubuntu。"
-  . /etc/os-release
-  PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-  case "$ID" in
-    alpine|debian|ubuntu) . "$PROJECT_ROOT/scripts/platforms/$ID.sh" ;;
-    *) fail_step "platform detection" "不支持的系统: $ID" "当前支持 Alpine 3.21+、Debian 12+、Ubuntu 22.04+。" ;;
-  esac
-  case "$ID:$VERSION_ID" in
-    alpine:3.2[1-9]*|alpine:3.[3-9][0-9]*|debian:12*|debian:13*|ubuntu:22.04*|ubuntu:24.04*|ubuntu:2[5-9].*) ;;
-    *) fail_step "platform detection" "当前系统版本不在支持矩阵中: ${PRETTY_NAME:-$ID}" "支持 Alpine 3.21+、Debian 12/13、Ubuntu 22.04+/24.04+。" ;;
-  esac
+  install_platform_load "$PROJECT_ROOT" || fail_step 'platform detection' \
+    "无法使用当前系统：${PRETTY_NAME:-${ID:-未知}} ${VERSION_ID:-} (${PLATFORM_ERROR})" \
+    '支持 Alpine 3.21+（3.x）、Debian 12/13、Ubuntu 22.04/24.04 及安装器支持的更新 Ubuntu 分支。'
   echo "OS: ${PRETTY_NAME:-$ID}"
   echo "Architecture: $(uname -m)"
   echo "Init: $SERVICE_MANAGER"
@@ -121,13 +163,83 @@ service_status() {
   if [ "$SERVICE_MANAGER" = "openrc" ]; then rc-service "$1" status; else systemctl is-active --quiet "$1"; fi
 }
 service_start() {
-  if [ "$SERVICE_MANAGER" = "openrc" ]; then rc-service "$1" start; else systemctl start "$1"; fi
+  if [ "$SERVICE_MANAGER" = "openrc" ]; then rc-service "$1" start 3>&-; else systemctl start "$1"; fi
 }
 service_restart() {
-  if [ "$SERVICE_MANAGER" = "openrc" ]; then rc-service "$1" restart; else systemctl restart "$1"; fi
+  if [ "$SERVICE_MANAGER" = "openrc" ]; then rc-service "$1" restart 3>&-; else systemctl restart "$1"; fi
+}
+service_stop() {
+  if [ "$SERVICE_MANAGER" = "openrc" ]; then rc-service "$1" stop 3>&-; else systemctl stop "$1"; fi
 }
 
-load_existing_config
+wizard_deactivate() {
+  service_stop "$1" >/dev/null 2>&1 || true
+  if [ "$SERVICE_MANAGER" = openrc ]; then
+    rc-update del "$1" default >/dev/null 2>&1 || true
+  else
+    systemctl disable "$1" >/dev/null 2>&1 || true
+  fi
+}
+
+install_wizard_dovecot_apt() (
+  # Package scripts may start Dovecot. Mask the previously absent unit until
+  # packages are installed, then clear any boot links created by the package.
+  systemctl mask --runtime dovecot.service || exit 1
+  finish_apt_dovecot() {
+    install_status=$?
+    trap - EXIT
+    systemctl unmask --runtime dovecot.service || install_status=1
+    if [ -e /lib/systemd/system/dovecot.service ] || [ -e /usr/lib/systemd/system/dovecot.service ]; then
+      systemctl disable --now dovecot.service || install_status=1
+    fi
+    exit "$install_status"
+  }
+  trap finish_apt_dovecot EXIT
+  trap 'exit 1' HUP INT TERM
+  platform_install dovecot-imapd || exit 1
+)
+
+. "$(dirname "$0")/lib/maintenance.sh"
+. "$(dirname "$0")/lib/manual-update.sh"
+case "${1:-}" in --help|-h|--show-config) ;; *) lock_mail_aggregator_maintenance /bin/sh "$0" "$@" ;; esac
+install_maintenance_tools() {
+  install -d -m 0755 /usr/local/lib/mail-aggregator-maintenance-data
+  install -m 0644 "$PROJECT_ROOT/scripts/lib/maintenance.sh" /usr/local/lib/mail-aggregator-maintenance.sh
+  for module in data release transaction web-config; do
+    install -m 0644 "$PROJECT_ROOT/scripts/updater/$module.js" "/usr/local/lib/mail-aggregator-maintenance-data/$module.js"
+  done
+}
+if [ "${1:-}" = --recover-application ]; then
+  [ "$#" -eq 1 ] || { usage; exit 2; }
+  detect_platform
+  install_maintenance_tools
+  manual_update_recover || fail_step 'recover' '无法完成手工升级恢复。' '请保留旧目录和恢复快照，检查服务日志。'
+  echo '手工升级恢复记录已处理。'
+  exit 0
+fi
+if [ "${1:-}" = --web-fresh ]; then
+  # Internal entry point. All input is rechecked while holding the same lock
+  # as manual install, uninstall, recovery and update. Credentials use stdin.
+  [ "$#" -eq 4 ] && [ "${MAIL_AGG_MAINTENANCE_HELD:-}" = 1 ] && [ "$(id -u)" = 0 ] || exit 74
+  WIZARD_FRESH=1
+  INSTALL_APT_MINIMAL=1
+  wizard_options="$2"
+  wizard_language="$3"
+  wizard_ip="$4"
+  wizard_project=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+  valid_language "$wizard_language" || exit 74
+  /usr/bin/node "$wizard_project/scripts/install-web/host.js" check "$wizard_options" "$wizard_ip" || exit 74
+  IFS= read -r WIZARD_ADMIN && IFS= read -r WIZARD_IMAP || exit 74
+  [ "${#WIZARD_IMAP}" -eq 32 ] || exit 74
+  case "$WIZARD_IMAP" in *[!a-f0-9]*) exit 74;; esac
+  exec </dev/null
+  DEFAULT_DOVECOT_PASSWORD="$WIZARD_IMAP"
+  unset WIZARD_IMAP
+  trap 'wizard_exit "$?"' EXIT
+  trap 'exit 1' HUP INT TERM
+  set -- --full --lan-http --web-port "$wizard_options" --language "$wizard_language"
+fi
+load_install_defaults
 ARG_COUNT=$#
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -136,14 +248,9 @@ while [ $# -gt 0 ]; do
     --app-only) APP_ONLY=1 ;;
     --install-dovecot) INSTALL_DOVECOT=1 ;;
     --full) FULL=1; INSTALL_DOVECOT=1 ;;
-    --lan-http)
-      MAIL_AGG_BIND_HOST="0.0.0.0"; MAIL_AGG_TRUST_PROXY="false"
-      MAIL_AGG_COOKIE_SECURE="auto"; MAIL_AGG_REQUIRE_HTTPS="false"
-      ;;
-    --https-proxy)
-      MAIL_AGG_BIND_HOST="127.0.0.1"; MAIL_AGG_TRUST_PROXY="loopback"
-      MAIL_AGG_COOKIE_SECURE="true"; MAIL_AGG_REQUIRE_HTTPS="true"
-      ;;
+    --lan-http) WEB_EXPOSURE_OVERRIDE=lan ;;
+    --local-http) WEB_EXPOSURE_OVERRIDE=local ;;
+    --https-proxy) WEB_EXPOSURE_OVERRIDE=proxy ;;
     --force-dovecot-init) FORCE_DOVECOT_INIT=1 ;;
     --default-dovecot-password)
       shift
@@ -157,6 +264,11 @@ while [ $# -gt 0 ]; do
     --show-config) SHOW_CONFIG=1 ;;
     --cleanup-source) CLEANUP_SOURCE=1 ;;
     --cleanup-archive) shift; CLEANUP_ARCHIVE="$1" ;;
+    --trust-update-key)
+      shift
+      [ -n "${1:-}" ] && UPDATE_TRUST_KEY=$(realpath "$1") && [ -f "$UPDATE_TRUST_KEY" ] ||
+        fail_step 'update trust' '需要已核对指纹的 Ed25519 公钥文件。' '参考 APP_UPDATES.md。'
+      ;;
     --help|-h) usage; exit 0 ;;
     *) fail_step "参数解析" "未知参数: $1" "运行 --help 查看支持的参数。" ;;
   esac
@@ -166,6 +278,7 @@ if [ "$ARG_COUNT" = "0" ]; then QUICK=1; FULL=1; INSTALL_DOVECOT=1; fi
 if [ "$APP_ONLY" = "1" ] && { [ "$FULL" = "1" ] || [ "$INSTALL_DOVECOT" = "1" ]; }; then
   fail_step "参数校验" "--app-only 不能与 --quick、--custom、--full 或 --install-dovecot 同时使用" "请选择仅部署应用或完整安装其中一种模式。"
 fi
+if [ -n "$WEB_EXPOSURE_OVERRIDE" ]; then set_web_exposure "$WEB_EXPOSURE_OVERRIDE"; fi
 if [ "$CUSTOM" = "1" ]; then
   printf '本地 Dovecot 用户名 [%s]: ' "$DOVECOT_USER"; read -r input; [ -n "$input" ] && DOVECOT_USER="$input"
   printf '本地 Dovecot 初始密码 [留空自动生成]: '; stty -echo; read -r input; stty echo; echo; [ -n "$input" ] && DEFAULT_DOVECOT_PASSWORD="$input"
@@ -174,14 +287,12 @@ if [ "$CUSTOM" = "1" ]; then
   printf 'Web 管理端口 [%s]: ' "$WEB_PORT"; read -r input; [ -n "$input" ] && WEB_PORT="$input"
   printf 'Web 语言 (zh-CN/en-US/ja-JP/ko-KR/es-ES/fr-FR/de-DE) [%s]: ' "$WEB_LANGUAGE"; read -r input; [ -n "$input" ] && WEB_LANGUAGE="$input"
   case "$MAIL_AGG_REQUIRE_HTTPS:$MAIL_AGG_BIND_HOST" in true:*) exposure_default=proxy;; *:127.*|*:localhost|*:::1) exposure_default=local;; *) exposure_default=lan;; esac
-  printf 'Web 访问模式 local/lan/proxy [%s]: ' "$exposure_default"; read -r input; exposure="${input:-$exposure_default}"
-  case "$exposure" in
-    local) MAIL_AGG_BIND_HOST="127.0.0.1"; MAIL_AGG_TRUST_PROXY="false"; MAIL_AGG_COOKIE_SECURE="auto"; MAIL_AGG_REQUIRE_HTTPS="false" ;;
-    lan) MAIL_AGG_BIND_HOST="0.0.0.0"; MAIL_AGG_TRUST_PROXY="false"; MAIL_AGG_COOKIE_SECURE="auto"; MAIL_AGG_REQUIRE_HTTPS="false" ;;
-    proxy) MAIL_AGG_BIND_HOST="127.0.0.1"; MAIL_AGG_TRUST_PROXY="loopback"; MAIL_AGG_COOKIE_SECURE="true"; MAIL_AGG_REQUIRE_HTTPS="true" ;;
-    *) fail_step "参数校验" "未知 Web 访问模式: $exposure" "请选择 local、lan 或 proxy。" ;;
-  esac
-  echo "Dovecot: $DOVECOT_USER @ $DOVECOT_HOST:$DOVECOT_PORT; Web: $WEB_PORT; Language: $WEB_LANGUAGE"
+  printf 'Web 访问模式 local/lan/proxy [%s]: ' "$exposure_default"; read -r input
+  if [ -n "$input" ]; then
+    WEB_EXPOSURE_OVERRIDE="$input"
+    set_web_exposure "$WEB_EXPOSURE_OVERRIDE"
+  fi
+  echo "Dovecot: $DOVECOT_USER @ $DOVECOT_HOST:$DOVECOT_PORT; Web: $MAIL_AGG_BIND_HOST:$WEB_PORT; Language: $WEB_LANGUAGE"
   printf '确认安装？ [Y/n]: '; read -r input; [ "$input" = "n" ] || [ "$input" = "N" ] && exit 0
 fi
 valid_user "$DOVECOT_USER" || fail_step "参数校验" "Dovecot 用户名不合法: $DOVECOT_USER" "仅允许小写字母、数字、_、-，且不能使用系统保留账号。"
@@ -192,14 +303,25 @@ if [ "$SHOW_CONFIG" = "1" ]; then
   echo "Dovecot user: $DOVECOT_USER"; echo "Dovecot host: $DOVECOT_HOST"; echo "Dovecot port: $DOVECOT_PORT"; echo "Web port: $WEB_PORT"; echo "Web bind: $MAIL_AGG_BIND_HOST"; echo "Require HTTPS: $MAIL_AGG_REQUIRE_HTTPS"; echo "Language: $WEB_LANGUAGE"; exit 0
 fi
 detect_platform
-
-echo "==> 1/9 更新软件包索引"
-if [ "$PLATFORM_ID" = "alpine" ] && ! grep -q "^[^#].*community" /etc/apk/repositories; then
-  sed -i 's/^#\(.*community\)/\1/' /etc/apk/repositories
+manual_update_guard
+if [ "$FRESH_APP_INSTALL" != 1 ] && [ "$FORCE_DOVECOT_INIT" = 1 ]; then
+  fail_step 'upgrade' '已有应用不能在同一次升级中重置 Dovecot。' '单独配置或修改 IMAP 口令，然后用 --app-only 升级应用。'
 fi
-platform_update
+
+wizard_event stage:1
+echo "==> 1/9 更新软件包索引"
+if [ "$WIZARD_FRESH" != 1 ] && [ "$PLATFORM_ID" = alpine ] && ! grep -q "^[^#].*community" /etc/apk/repositories; then
+  # The CLI can enable a commented repository only for this exact branch.
+  repo_branch=$(printf '%s' "$VERSION_ID" | cut -d. -f1-2 | sed 's/\./[.]/g')
+  sed -i "s|^#\(.*[/]v$repo_branch[/]community[/]*\)$|\1|" /etc/apk/repositories
+fi
+platform_update || fail_step '1/9' '无法刷新系统软件源' '核对本机网络和软件源是否可用。' source_index_failed
+if [ "$PLATFORM_ID" = alpine ] && ! command -v flock >/dev/null 2>&1; then
+  platform_install flock || fail_step '1/9' '无法安装 flock' '检查当前 Alpine 分支的 community 软件源。' dependency_failed
+fi
 
 echo ""
+wizard_event stage:2
 echo "==> 2/9 依赖检测"
 echo ""
 
@@ -211,10 +333,6 @@ check_and_report() {
     echo "  $2: ❌"
     return 1
   fi
-}
-
-node_version_supported() {
-  node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 12) ? 0 : 1)' >/dev/null 2>&1
 }
 
 NODE_OK=0
@@ -232,7 +350,8 @@ NPM_OK=0; check_and_report npm "npm" && NPM_OK=1
 SQLITE_OK=0; check_and_report sqlite3 "SQLite" && SQLITE_OK=1
 IMAPSYNC_OK=0
 if command -v imapsync >/dev/null 2>&1; then
-  echo "  imapsync: ✅ $(imapsync --version 2>&1 | head -1)"
+  imapsync_version=$(imapsync --noreleasecheck --version) || fail_step '2/9' '现有 imapsync 无法运行' '请修复已安装的 imapsync 后重试。'
+  echo "  imapsync: ✅ $imapsync_version"
   IMAPSYNC_OK=1
 else
   echo "  imapsync: ❌"
@@ -246,35 +365,67 @@ else
 fi
 
 echo ""
+wizard_event stage:3
 echo "==> 3/9 自动安装可以自动装的部分(Node.js/npm/SQLite/imapsync)"
 TO_INSTALL=""
-[ "$NODE_OK" = "0" ] && TO_INSTALL="$TO_INSTALL nodejs"
+INSTALL_PINNED_IMAPSYNC=0
+if [ "$NODE_OK" = 0 ]; then
+  if [ "$PACKAGE_MANAGER" = apt ] && ! apt_node_candidate_supported; then
+    fail_step '3/9' '已配置的源没有 Node.js 22.12 或更新版本' '请先从可信来源准备 /usr/bin/node 和 npm，再重新运行安装器。'
+  fi
+  TO_INSTALL="$TO_INSTALL nodejs"
+fi
 [ "$NPM_OK" = "0" ] && TO_INSTALL="$TO_INSTALL npm"
 if [ "$SQLITE_OK" = "0" ]; then
   if [ "$PLATFORM_ID" = "alpine" ]; then TO_INSTALL="$TO_INSTALL sqlite"; else TO_INSTALL="$TO_INSTALL sqlite3"; fi
 fi
-[ "$IMAPSYNC_OK" = "0" ] && TO_INSTALL="$TO_INSTALL imapsync"
+if [ "$IMAPSYNC_OK" = "0" ]; then
+  if platform_resolves imapsync 2>/dev/null; then
+    TO_INSTALL="$TO_INSTALL imapsync"
+  else
+    INSTALL_PINNED_IMAPSYNC=1
+  fi
+fi
 if [ "$PLATFORM_ID" = "alpine" ]; then
-  TO_INSTALL="$TO_INSTALL build-base python3 sqlite-dev"
+  TO_INSTALL="$TO_INSTALL build-base python3 sqlite-dev nodejs-dev"
 else
   TO_INSTALL="$TO_INSTALL build-essential python3 libsqlite3-dev"
 fi
 if [ -n "$TO_INSTALL" ]; then
   echo "  将安装:$TO_INSTALL"
-  platform_install $TO_INSTALL
+  platform_resolves $TO_INSTALL || fail_step '3/9' '无法解析系统依赖' '检查已配置的软件源。Alpine 需要同一分支的 main 和 community；Ubuntu 可能需要 universe。'
+  platform_install $TO_INSTALL || fail_step '3/9' '无法安装系统依赖' '核对软件源和磁盘空间。' dependency_failed
 else
   echo "  Node.js/npm/SQLite/imapsync 都已就绪,跳过"
 fi
 node_version_supported \
   || fail_step "3/9" "Node.js 版本低于 22.12" "请先通过发行版 backports 或 NodeSource 安装 Node.js 22.12 以上版本，再重新运行安装器。"
+if [ "$INSTALL_PINNED_IMAPSYNC" -eq 1 ]; then
+  wizard_event detail:imapsync
+  install_pinned_imapsync || fail_step '3/9' '无法安装并验证 imapsync 2.314' '检查当前软件源中的 Perl 依赖、GitHub 下载和本机证书。'
+fi
+imapsync --noreleasecheck --version >/dev/null || fail_step '3/9' 'imapsync 未通过运行检查' '检查 imapsync 和系统 Perl 模块。'
 
 echo ""
+wizard_event stage:4
 echo "==> 4/9 Dovecot 软件包"
 if [ "$DOVECOT_OK" = "1" ]; then
   echo "  已检测到 Dovecot"
 elif [ "$INSTALL_DOVECOT" = "1" ]; then
   echo "  未检测到 Dovecot,安装一个全新的"
-  if [ "$PLATFORM_ID" = "alpine" ]; then platform_install dovecot dovecot-openrc; else platform_install dovecot-imapd; fi
+  if [ "$PLATFORM_ID" = "alpine" ]; then
+    candidate=$(apk add --simulate dovecot dovecot-openrc) || fail_step '4/9' '找不到 Dovecot 软件包' '检查 Alpine 的 main 仓库。'
+    if [ "$FULL" = 1 ] && ! printf '%s\n' "$candidate" | grep -qE 'Installing dovecot \(2\.[34]\.'; then
+      fail_step '4/9' '软件仓库的 Dovecot 版本不符合自动安装要求' '请选择包含 Dovecot 2.3 或 2.4 的软件包来源。'
+    fi
+    platform_install dovecot dovecot-openrc
+  elif [ "$WIZARD_FRESH" = 1 ]; then
+    platform_resolves dovecot-imapd || fail_step '4/9' '找不到 Dovecot 软件包' '检查已配置的 apt 软件源。'
+    WIZARD_DOVECOT_ATTEMPTED=1
+    install_wizard_dovecot_apt || fail_step '4/9' '无法安全安装 Dovecot 软件包' '检查 apt 和 Dovecot 服务日志。'
+  else
+    platform_install dovecot-imapd
+  fi
   DOVECOT_OK=1
 else
   echo ""
@@ -284,13 +435,16 @@ else
   exit 1
 fi
 
+DOVECOT_ADAPTER=''
+DOVECOT_STANDALONE23=0
 if [ "$FULL" = "1" ]; then
   DOVECOT_VERSION="$(dovecot --version 2>&1 | head -1)"
   case "$DOVECOT_VERSION" in
-    2.3.*) echo "  Dovecot adapter: 2.3 (Supported)" ;;
-    2.4.*) fail_step "Dovecot adapter" "检测到 Dovecot $DOVECOT_VERSION，需要 Major Migration" "2.4 配置不能直接使用 2.3 adapter；当前版本禁止自动初始化。" ;;
-    *) fail_step "Dovecot adapter" "检测到未支持的 Dovecot 版本: $DOVECOT_VERSION" "当前只有 Dovecot 2.3 adapter，未知版本不会自动配置。" ;;
+    2.3.*) DOVECOT_ADAPTER=2.3 ;;
+    2.4.*) DOVECOT_ADAPTER=2.4 ;;
+    *) fail_step "Dovecot adapter" "检测到未支持的 Dovecot 版本: $DOVECOT_VERSION" "请选择 2.3 或 2.4，或手工配置后用 --app-only。" ;;
   esac
+  echo "  Dovecot adapter: $DOVECOT_ADAPTER"
 fi
 
 DOVECOT_CONF="/etc/dovecot/dovecot.conf"
@@ -308,6 +462,7 @@ PW_MARKER_BEGIN="# ==== BEGIN MAIL-AGGREGATOR-MANAGED PASSWDFILE (由 install.sh
 PW_MARKER_END="# ==== END MAIL-AGGREGATOR-MANAGED PASSWDFILE ===="
 DOVECOT_FRESH_INIT_DONE=0
 NEED_DOVECOT_INIT=0
+OWNED_MAILDIR=0
 INITIAL_DOVECOT_PASSWORD=""
 INITIAL_PASSWORD_WAS_DEFAULT=0
 
@@ -432,6 +587,7 @@ PW_EOF
 
 if [ "$FULL" = "1" ]; then
   echo ""
+  wizard_event stage:5
   echo "==> 5/9 --full: 检查已有配置 + 创建 mailuser + Maildir"
 
   # 只认本项目自己在 dovecot.conf 里留下的 BEGIN 标记,不能把 apk 安装
@@ -440,6 +596,27 @@ if [ "$FULL" = "1" ]; then
   ALREADY_CONFIGURED=0
   if [ -f "$DOVECOT_CONF" ] && grep -qF "$MARKER_BEGIN" "$DOVECOT_CONF" 2>/dev/null; then
     ALREADY_CONFIGURED=1
+  fi
+
+  if [ "$DOVECOT_ADAPTER" = '2.4' ]; then
+    if [ "$ALREADY_CONFIGURED" -eq 1 ]; then
+      grep -qFx '# mail-aggregator-dovecot-adapter=2.4' "$DOVECOT_CONF" ||
+        fail_step 'Dovecot adapter' '发现旧版托管配置' '请按 Dovecot 官方迁移指南处理现有实例。安装器不会迁移旧配置和邮件。'
+    elif service_status dovecot >/dev/null 2>&1 || [ -s "$DOVECOT_USERS_FILE" ]; then
+      fail_step 'Dovecot adapter' '发现现有 Dovecot 实例' '请使用 --app-only 复用已有配置。'
+    fi
+  elif [ "$ALREADY_CONFIGURED" -eq 1 ] && grep -qFx '# mail-aggregator-dovecot-adapter=2.4' "$DOVECOT_CONF"; then
+    fail_step 'Dovecot adapter' '配置属于 Dovecot 2.4' '请恢复匹配的 Dovecot 版本及配置。'
+  elif [ "$WIZARD_FRESH" = 1 ] || { [ "$ALREADY_CONFIGURED" = 1 ] && grep -qFx '# mail-aggregator-dovecot-adapter=2.3-standalone' "$DOVECOT_CONF"; }; then
+    DOVECOT_STANDALONE23=1
+  fi
+  if [ "$DOVECOT_ADAPTER" = 2.4 ] || [ "$DOVECOT_STANDALONE23" = 1 ]; then
+    case "$DOVECOT_HOST" in
+      localhost|127.0.0.1) DOVECOT_LISTEN_HOST=127.0.0.1 ;;
+      ::1) DOVECOT_LISTEN_HOST=::1 ;;
+      *) fail_step 'Dovecot adapter' '自动生成的 IMAP 配置只允许本机访问' '请使用 127.0.0.1、localhost 或 ::1，其他地址请使用 --app-only。' ;;
+    esac
+    [ "$DOVECOT_PORT" -ne 993 ] || fail_step 'Dovecot adapter' '自动配置不使用 993 端口' '如需隐式 TLS，请配置证书后使用 --app-only。'
   fi
 
   # 光有配置标记还不够:还要看给 imapsync 用的本地密钥
@@ -468,11 +645,18 @@ if [ "$FULL" = "1" ]; then
     echo "  未检测到 Mail Aggregator 的 Dovecot 配置标记——即使 /etc/dovecot/ 下已经有 apk 装包生成的默认 dovecot.conf / users 文件,也不算已经初始化过,继续初始化。"
   fi
 
+  if [ "$FRESH_APP_INSTALL" != 1 ] && [ "$NEED_DOVECOT_INIT" = 1 ]; then
+    fail_step 'upgrade' '此次操作会重配 Dovecot，已取消应用切换。' '请检查现有 IMAP 配置，应用升级请用 --app-only。'
+  fi
+  if [ "$FRESH_APP_INSTALL" = 1 ] && [ "$NEED_DOVECOT_INIT" = 1 ] &&
+     ! id "$DOVECOT_USER" >/dev/null 2>&1 && [ ! -e "/home/$DOVECOT_USER" ] && [ ! -L "/home/$DOVECOT_USER" ]; then
+    OWNED_MAILDIR=1
+  fi
   if ! id "$DOVECOT_USER" >/dev/null 2>&1; then
     if [ "$PLATFORM_ID" = "alpine" ]; then
       adduser -D -h "/home/$DOVECOT_USER" "$DOVECOT_USER"
     else
-      useradd --create-home --home-dir "/home/$DOVECOT_USER" --shell /usr/sbin/nologin "$DOVECOT_USER"
+      useradd --create-home --user-group --home-dir "/home/$DOVECOT_USER" --shell /usr/sbin/nologin "$DOVECOT_USER"
     fi
     echo "  已创建用户: $DOVECOT_USER"
   else
@@ -498,31 +682,33 @@ else
 fi
 
 echo ""
+wizard_event stage:6
 echo "==> 6/9 创建专用运行用户并部署项目"
 if ! id "$APP_USER" >/dev/null 2>&1; then
   if [ "$PLATFORM_ID" = "alpine" ]; then
     adduser -D -h "$DATA_DIR" "$APP_USER"
   else
-    useradd --system --create-home --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$APP_USER"
+    useradd --system --create-home --user-group --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$APP_USER"
   fi
 fi
 
-PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_STAGE="${APP_DIR}.deploy"
-APP_PREVIOUS="${APP_DIR}.previous"
-# Recover the last complete tree if the machine lost power between the two
-# rename operations of a previous deployment. If a live tree exists, the old
-# backup is stale and can be removed safely.
-if [ ! -d "$APP_DIR" ] && [ -d "$APP_PREVIOUS" ]; then
-  mv "$APP_PREVIOUS" "$APP_DIR"
-elif [ -d "$APP_DIR" ]; then
-  rm -rf "$APP_PREVIOUS"
+install_maintenance_tools
+if [ -n "$UPDATE_TRUST_KEY" ]; then
+  node "$PROJECT_ROOT/scripts/updater/trust-key.js" "$UPDATE_TRUST_KEY" "$CONFIG_DIR/update-public.pem" --check
 fi
 rm -rf "$APP_STAGE"
 mkdir -p "$APP_STAGE"
 cp -r "$PROJECT_ROOT"/server "$PROJECT_ROOT"/web "$PROJECT_ROOT"/config \
       "$PROJECT_ROOT"/package.json "$APP_STAGE"/
 [ -f "$PROJECT_ROOT/package-lock.json" ] && cp "$PROJECT_ROOT/package-lock.json" "$APP_STAGE"/
+mkdir "$APP_STAGE/scripts" "$APP_STAGE/scripts/lib"
+cp -r "$PROJECT_ROOT/scripts/updater" "$APP_STAGE/scripts/"
+cp "$PROJECT_ROOT/scripts/lib/maintenance.sh" "$APP_STAGE/scripts/lib/"
+for entry in backup restore verify-backup uninstall doctor; do
+  install -m 0755 "$PROJECT_ROOT/scripts/$entry.sh" "$APP_STAGE/scripts/$entry.sh"
+done
+cp "$PROJECT_ROOT/TESTING.md" "$APP_STAGE/"
 
 # fix_users_permissions() 只在这一份文件里定义,install.sh 和 dovecot-helper.sh
 # 都只调用它、不各自维护一份权限逻辑——v0.1.3.2 就是因为两边各写了一份、后写
@@ -539,31 +725,32 @@ fi
 mkdir -p "$DATA_DIR"
 chown -R "$APP_USER":"$APP_USER" "$APP_STAGE" "$DATA_DIR"
 chmod 700 "$DATA_DIR"
-# Preserve v0.1.3 installations: if no v0.1.4 config exists but Dovecot was
-# already managed, the Node database remains the source until an explicit
-# migration/custom reconfiguration is performed. Fresh initializations get the
-# new shared configuration file immediately.
-if [ -f "$CONFIG_FILE" ] || { [ "$FULL" = "1" ] && [ "$NEED_DOVECOT_INIT" = "1" ]; }; then
-  write_config
-fi
-
 cd "$APP_STAGE"
-if [ -f package-lock.json ]; then
-  su -s /bin/sh "$APP_USER" -c "npm ci --omit=dev --no-audit --no-fund"
-else
-  su -s /bin/sh "$APP_USER" -c "npm install --omit=dev --no-audit --no-fund"
+# Reuse matching Node headers installed alongside the runtime when possible.
+NODE_PREFIX=$(node -p 'require("node:path").resolve(process.execPath, "../..")')
+if [ -r "$NODE_PREFIX/include/node/node_version.h" ] &&
+   grep -Eq "^#define NODE_MODULE_VERSION[[:space:]]+$(node -p process.versions.modules)([[:space:]]|$)" "$NODE_PREFIX/include/node/node_version.h"; then
+  export npm_config_nodedir="$NODE_PREFIX"
 fi
+if [ -f package-lock.json ]; then
+  npm_run='ci'
+else
+  npm_run='install'
+fi
+su -s /bin/sh "$APP_USER" -c "npm $npm_run --ignore-scripts --omit=dev --no-audit --no-fund" 3>&- \
+  || fail_step '6/9' '无法获取应用依赖' '检查 npm 软件源、网络和锁文件。' npm_dependencies_failed
+su -s /bin/sh "$APP_USER" -c 'npm rebuild --omit=dev --no-audit --no-fund' 3>&- \
+  || fail_step '6/9' '无法构建 SQLite 原生模块' '检查 Node.js 头文件、编译工具和空间。' native_sqlite_failed
+su -s /bin/sh "$APP_USER" -c 'node -e "const db = new (require(\"better-sqlite3\"))(\":memory:\"); db.prepare(\"SELECT 1\").get(); db.close()"' 3>&- \
+  || fail_step '6/9' '原生 SQLite 模块未能在当前 Node.js 版本加载' '保留了现有部署。请检查 Node.js 及其编译头文件。' native_sqlite_failed
 
 # Build the complete deployment away from the live path, then replace the old
 # tree as one unit. This prevents removed files from older releases surviving a
 # reinstall and keeps a failed copy/npm install from damaging the running app.
-if [ -d "$APP_DIR" ]; then mv "$APP_DIR" "$APP_PREVIOUS"; fi
-if mv "$APP_STAGE" "$APP_DIR"; then
-  rm -rf "$APP_PREVIOUS"
-else
-  [ ! -d "$APP_DIR" ] && [ -d "$APP_PREVIOUS" ] && mv "$APP_PREVIOUS" "$APP_DIR"
-  fail_step "6/9" "无法切换到新部署目录" "旧程序目录已尽量自动恢复，请检查 /opt 所在文件系统。"
-fi
+chown -Rh root:root "$APP_STAGE"
+chmod -R a+rX,go-w "$APP_STAGE"
+manual_update_prepare
+mv "$APP_STAGE" "$APP_DIR" || fail_step '6/9' '无法切换到新部署目录' '正在尝试恢复旧版。'
 cd "$APP_DIR"
 
 # --full 的密码哈希生成放到这里(而不是第5步),是因为它现在调用的是
@@ -574,6 +761,7 @@ cd "$APP_DIR"
 INITIAL_DOVECOT_HASH=""
 if [ "$FULL" = "1" ] && [ "$NEED_DOVECOT_INIT" = "1" ]; then
   echo ""
+  wizard_event detail:dovecot_config
   echo "==> 6b/9 生成密码哈希 + 写入 Dovecot 配置"
 
   # 真实的数字UID/GID,而不是直接把用户名字符串塞进uid=/gid=,
@@ -593,6 +781,18 @@ if [ "$FULL" = "1" ] && [ "$NEED_DOVECOT_INIT" = "1" ]; then
     exit 1
   fi
 
+  if [ "$DOVECOT_ADAPTER" = 2.4 ] || [ "$DOVECOT_STANDALONE23" = 1 ]; then
+    . "$PROJECT_ROOT/scripts/lib/dovecot-activate.sh"
+    if [ "$DOVECOT_ADAPTER" = 2.4 ]; then
+      . "$PROJECT_ROOT/scripts/lib/dovecot-24.sh"
+      render_dovecot=render_dovecot24
+    else
+      . "$PROJECT_ROOT/scripts/lib/dovecot-23.sh"
+      render_dovecot=render_dovecot23
+    fi
+    if [ "$WIZARD_FRESH" = 1 ]; then WIZARD_DOVECOT_ATTEMPTED=1; fi
+    activate_dovecot_config "$render_dovecot" || fail_step '6b/9' "Dovecot $DOVECOT_ADAPTER 配置或本地登录验证失败" '查看 Dovecot 的服务日志。旧配置已保留或回退。'
+  else
   echo "${DOVECOT_USER}:${INITIAL_DOVECOT_HASH}::::::" > "$DOVECOT_USERS_FILE"
 
   # 权限统一交给 fix_users_permissions()(见 scripts/lib/dovecot-perms.sh)。
@@ -638,6 +838,7 @@ DOVECOT_EOF
     service_start dovecot
   fi
   echo "  Dovecot 已启动"
+  fi
 
   DOVECOT_FRESH_INIT_DONE=1
 elif [ "$FULL" = "1" ]; then
@@ -645,8 +846,20 @@ elif [ "$FULL" = "1" ]; then
   echo "==> 6b/9 Dovecot 配置已完整存在,跳过重新生成密码/配置"
 fi
 
+# Write inside the upgrade rollback boundary and before starting the service.
+# A fresh app needs its Web settings even if Dovecot is already configured.
+if [ "$FRESH_APP_INSTALL" = "1" ] || [ -n "$WEB_EXPOSURE_OVERRIDE" ] || [ -f "$CONFIG_FILE" ] ||
+   { [ "$FULL" = "1" ] && [ "$NEED_DOVECOT_INIT" = "1" ]; }; then
+  write_config
+fi
+if [ "$OWNED_MAILDIR" = 1 ]; then
+  (umask 077; printf '%s %s %s\n' "$DOVECOT_USER" \
+    "$(stat -c '%u:%d:%i' "/home/$DOVECOT_USER")" "$(stat -c '%u:%d:%i' "/home/$DOVECOT_USER/Maildir")" > "$CONFIG_DIR/owned-maildir")
+fi
+
 echo ""
-echo "==> 7/9 安装 OpenRC 服务 + 最小化 sudo 权限"
+wizard_event stage:7
+echo "==> 7/9 安装 $SERVICE_MANAGER 服务 + 最小化 sudo 权限"
 if [ "$SERVICE_MANAGER" = "openrc" ]; then
   cp "$PROJECT_ROOT/scripts/mail-aggregator.openrc" /etc/init.d/mail-aggregator \
     || fail_step "7/9" "无法安装 mail-aggregator 的 OpenRC 服务文件" "检查服务文件和 /etc/init.d 权限。"
@@ -656,7 +869,7 @@ else
     || fail_step "7/9" "无法安装 systemd 服务文件" "检查 /etc/systemd/system 权限。"
   systemctl daemon-reload
 fi
-service_enable mail-aggregator
+if [ "$WIZARD_FRESH" != 1 ]; then service_enable mail-aggregator; fi
 
 # Dovecot密码管理helper:root持有,mailadmin只能通过sudoers里严格限定的
 # 固定子命令调用,不能执行任意shell。
@@ -708,8 +921,10 @@ if command -v sudo >/dev/null 2>&1; then
     echo "${APP_USER} ALL=(root) NOPASSWD: ${HELPER_INSTALL_PATH} restore-backup"
     echo "${APP_USER} ALL=(root) NOPASSWD: ${HELPER_INSTALL_PATH} reload"
     echo "${APP_USER} ALL=(root) NOPASSWD: ${HELPER_INSTALL_PATH} storage-status *"
-    echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} remove-app"
-    echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} purge"
+    echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} queue remove-app"
+    echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} queue purge"
+    echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} status *"
+    echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} commit *"
   } > "$SUDOERS_FILE"
   chmod 0440 "$SUDOERS_FILE"
   if command -v visudo >/dev/null 2>&1 && visudo -c -f "$SUDOERS_FILE" >/dev/null 2>&1; then
@@ -724,12 +939,14 @@ if command -v sudo >/dev/null 2>&1; then
 fi
 
 echo ""
+wizard_event stage:8
 echo "==> 8/9 初始化 mail-aggregator 的 Dovecot 管理状态"
 if [ "$DOVECOT_FRESH_INIT_DONE" = "1" ]; then
   # local-target.pass 通过 server/credentials.js 的 saveGlobalLocalSecret()
   # 写入,复用和Web修改密码完全相同的原子写入逻辑(临时文件+fsync+rename),
   # 不在这里用shell自己再写一份非原子的 `printf > file`。
-  # 密码通过stdin喂给这段Node脚本,不经过命令行参数。
+  # 密码和哈希通过 stdin 传递，不经过命令行参数。
+  wizard_event detail:dovecot_state
   INIT_SCRIPT="$APP_DIR/.install-init.js"
   cat > "$INIT_SCRIPT" << 'NODE_EOF'
 const { db } = require('./server/db');
@@ -739,7 +956,10 @@ let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (c) => (input += c));
 process.stdin.on('end', () => {
-  const password = input.replace(/\r?\n+$/, '');
+  const newline = input.indexOf('\n');
+  if (newline < 1) throw new Error('Missing password hash');
+  const hash = input.slice(0, newline);
+  const password = input.slice(newline + 1).replace(/\r?\n+$/, '');
   saveGlobalLocalSecret(password);
 
   const upsert = db.prepare(
@@ -747,35 +967,89 @@ process.stdin.on('end', () => {
   );
   upsert.run('dovecot_target_user', process.argv[2]);
   upsert.run('dovecot_user', process.argv[2]);
-  upsert.run('dovecot_host', process.argv[4]);
-  upsert.run('dovecot_port', process.argv[5]);
-  upsert.run('web_port', process.argv[6]);
-  upsert.run('web_language', process.argv[7]);
-  upsert.run('dovecot_using_default_password', process.argv[8] === 'true' ? 'true' : 'false');
-  upsert.run('dovecot_last_known_hash', process.argv[3]);
+  upsert.run('dovecot_host', process.argv[3]);
+  upsert.run('dovecot_port', process.argv[4]);
+  upsert.run('web_port', process.argv[5]);
+  upsert.run('web_language', process.argv[6]);
+  upsert.run('dovecot_using_default_password', process.argv[7] === 'true' ? 'true' : 'false');
+  upsert.run('dovecot_last_known_hash', hash);
   console.log('Dovecot管理状态已初始化(local-target.pass已原子写入)');
 });
 NODE_EOF
   chown "$APP_USER:$APP_USER" "$INIT_SCRIPT"
-  printf '%s' "$INITIAL_DOVECOT_PASSWORD" \
-    | su -s /bin/sh "$APP_USER" -c "cd '$APP_DIR' && MAIL_AGG_DATA_DIR='$DATA_DIR' node '$INIT_SCRIPT' '$DOVECOT_USER' '$INITIAL_DOVECOT_HASH' '$DOVECOT_HOST' '$DOVECOT_PORT' '$WEB_PORT' '$WEB_LANGUAGE' '$([ "$INITIAL_PASSWORD_WAS_DEFAULT" = "1" ] && echo true || echo false)'"
+  printf '%s\n%s' "$INITIAL_DOVECOT_HASH" "$INITIAL_DOVECOT_PASSWORD" \
+    | su -s /bin/sh "$APP_USER" -c "cd '$APP_DIR' && MAIL_AGG_DATA_DIR='$DATA_DIR' node '$INIT_SCRIPT' '$DOVECOT_USER' '$DOVECOT_HOST' '$DOVECOT_PORT' '$WEB_PORT' '$WEB_LANGUAGE' '$([ "$INITIAL_PASSWORD_WAS_DEFAULT" = "1" ] && echo true || echo false)'" 3>&-
   rm -f "$INIT_SCRIPT"
 else
   echo "  跳过(没有加 --full,或者Dovecot配置已存在未重新初始化)"
 fi
+if [ "$WIZARD_FRESH" = 1 ]; then
+  wizard_event detail:admin_init
+  [ "$DOVECOT_FRESH_INIT_DONE" = 1 ] || exit 1
+  printf '%s\n' "$WIZARD_ADMIN" | su -s /bin/sh "$APP_USER" \
+    -c "MAIL_AGG_DATA_DIR='$DATA_DIR' /usr/bin/node '$APP_DIR/server/cli-web-install-admin.js'" 3>&- \
+    || fail_step '8/9' '无法创建网页管理员' '保留本次安装的数据，查看安装步骤记录。'
+  unset WIZARD_ADMIN
+fi
 
 echo ""
+wizard_event stage:9
+wizard_event detail:application_start
+if [ "$WIZARD_FRESH" = 1 ]; then WIZARD_WEB_ATTEMPTED=1; fi
 echo "==> 9/9 启动服务 + 自动验证"
 
-if service_status mail-aggregator >/dev/null 2>&1; then
+if [ -d "$INSTALL_ROLLBACK" ]; then
+  manual_start || fail_step '9/9' '新版 Web 启动失败' '已有版本将尝试恢复。' service_start_failed
+elif service_status mail-aggregator >/dev/null 2>&1; then
   service_restart mail-aggregator \
     || fail_step "9/9" "mail-aggregator 重启失败" "查看服务日志，修复后重新运行安装器。"
 else
   service_start mail-aggregator \
-    || fail_step "9/9" "mail-aggregator 启动失败" "查看服务日志，修复后重新运行安装器。"
+    || fail_step "9/9" "mail-aggregator 启动失败" "查看服务日志，修复后重新运行安装器。" service_start_failed
 fi
 
 echo ""
+NEW_APP_VERSION=$(node -e 'console.log(JSON.parse(require("node:fs").readFileSync(process.argv[1])).version)' "$APP_DIR/package.json")
+wizard_event detail:application_probe
+node "$PROJECT_ROOT/scripts/updater/probe.js" ready "$NEW_APP_VERSION" \
+  || fail_step '9/9' '新版 Web 未通过就绪检查' '查看应用日志；已有版本将尝试恢复。' service_readiness_failed
+if [ -d "$INSTALL_ROLLBACK" ]; then
+  manual_update_complete
+  POST_COMMIT_VERSION=$(node -p 'require(process.argv[1]).version' "$APP_DIR/package.json")
+  trap 'code=$?; if [ "$code" -ne 0 ]; then printf "\n新版应用 %s 已启用并保留新写入；后置步骤未完成。检查最近报错，必要时使用 --app-only 重试。\n" "$POST_COMMIT_VERSION" >&2; fi' EXIT
+else
+  manual_update_complete
+fi
+if [ "$WIZARD_FRESH" = 1 ]; then
+  wizard_event detail:setup_closed
+  /usr/bin/node "$PROJECT_ROOT/scripts/install-web/host.js" verify "$WEB_PORT" \
+    || fail_step '9/9' 'Web 未确认首位管理员已创建' '检查启动日志和数据库。'
+fi
+
+case "$PLATFORM_ID:$VERSION_ID:$(uname -m):$(node -p 'process.versions.node.split(".")[0]')" in
+  alpine:3.24*:x86_64:24)
+    # Install trusted executor outside the application. Its eligibility marker
+    # and public key are operator-owned and are never put in an app backup.
+    if [ -n "$UPDATE_TRUST_KEY" ]; then
+      install -d -m 0755 "$CONFIG_DIR"
+      node "$PROJECT_ROOT/scripts/updater/trust-key.js" "$UPDATE_TRUST_KEY" "$CONFIG_DIR/update-public.pem"
+    fi
+    if [ -e /etc/init.d/mail-aggregator-updater ] && rc-service mail-aggregator-updater status >/dev/null 2>&1; then
+      rc-service mail-aggregator-updater stop
+    fi
+    install -d -m 0755 /usr/local/lib/mail-aggregator-updater
+    for module in archive daemon data history host lock policy release rpc transaction web-config; do
+      install -m 0644 "$PROJECT_ROOT/scripts/updater/$module.js" "/usr/local/lib/mail-aggregator-updater/$module.js"
+    done
+    install -m 0755 "$PROJECT_ROOT/scripts/services/updater.openrc" /etc/init.d/mail-aggregator-updater
+    wizard_event detail:updater
+    if [ "$WIZARD_FRESH" = 1 ]; then WIZARD_UPDATER_ATTEMPTED=1; fi
+    rc-update add mail-aggregator-updater default
+    service_start mail-aggregator-updater
+
+    ;;
+esac
+
 echo "  正在验证各组件状态(以下检查仅用于展示信息,不会修改任何东西):"
 echo ""
 
@@ -826,8 +1100,8 @@ if [ "$FULL" = "1" ]; then
   # default_fields 的userdb在前面生效,uid/gid/home解析不出来,doveadm user
   # 直接失败。这里做真实检查,而不是假设 configure_passwdfile_auth() 一定
   # 生效对了。
-  PASSDB_COUNT="$(doveconf -n 2>/dev/null | grep -c '^passdb {' || true)"
-  USERDB_COUNT="$(doveconf -n 2>/dev/null | grep -c '^userdb {' || true)"
+  PASSDB_COUNT="$(doveconf -n 2>/dev/null | grep -cE '^passdb( [[:alnum:]_-]+)? \{' || true)"
+  USERDB_COUNT="$(doveconf -n 2>/dev/null | grep -cE '^userdb( [[:alnum:]_-]+)? \{' || true)"
   if [ "$PASSDB_COUNT" != "1" ] || [ "$USERDB_COUNT" != "1" ]; then
     fail_step "9/9" "doveconf -n 中 passdb 数量=${PASSDB_COUNT}, userdb 数量=${USERDB_COUNT}(期望都是1)" \
       "很可能是 $DOVECOT_PASSWDFILE_CONF 或 $DOVECOT_AUTH10 里还有额外的 passdb/userdb(比如其它非本项目的 include)。用 doveconf -n | grep -A3 '^passdb {' 和 doveconf -n | grep -A4 '^userdb {' 定位后手动清理,再重新运行 ./scripts/install.sh --full --force-dovecot-init"
@@ -857,11 +1131,14 @@ if [ "$FULL" = "1" ]; then
 
   # 明文LOGIN测试只在这次真正生成过初始密码时才有意义(才知道当前密码是
   # 什么);跳过重新初始化的运行不知道现在的真实密码,不测。这一项失败
-  # 只警告不中止安装——见 cli-imap-login-check.js 里的说明。
+  # 普通 CLI 仍只警告。网页版只有验证真实 IMAP 登录后才允许启动项。
   if [ "$DOVECOT_FRESH_INIT_DONE" = "1" ]; then
+    wizard_event detail:imap_login
     if command -v node >/dev/null 2>&1 \
        && printf '%s' "$INITIAL_DOVECOT_PASSWORD" | node "$APP_DIR/server/cli-imap-login-check.js" "$DOVECOT_HOST" "$DOVECOT_PORT" "$DOVECOT_USER" >/dev/null 2>&1; then
       echo "  IMAP 明文登录测试($DOVECOT_USER/初始密码,$DOVECOT_HOST:$DOVECOT_PORT) ✅"
+    elif [ "$WIZARD_FRESH" = 1 ]; then
+      fail_step '9/9' '本机 IMAP 登录未通过' '检查 Dovecot 的监听和服务日志。'
     else
       echo "  IMAP 明文登录测试($DOVECOT_USER/初始密码,$DOVECOT_HOST:$DOVECOT_PORT) ⚠️  未通过,但 doveadm user 检查已通过;建议用邮件客户端手动验证一次登录"
     fi
@@ -876,8 +1153,19 @@ fi
 
 if service_status mail-aggregator >/dev/null 2>&1; then
   echo "  Mail Aggregator ✅"
+elif [ "$WIZARD_FRESH" = 1 ]; then
+  fail_step '9/9' 'Web 服务未保持运行' '检查 Web 服务日志。'
 else
   echo "  Mail Aggregator ⚠️  未确认为 started,可手动执行: rc-service mail-aggregator start"
+fi
+
+if [ "$WIZARD_FRESH" = 1 ]; then
+  wizard_event detail:enable_boot
+  service_enable dovecot && service_enable mail-aggregator \
+    || fail_step '9/9' '无法设置服务开机启动' "检查 $SERVICE_MANAGER 的服务状态。"
+  WIZARD_COMPLETE=1
+  wizard_event verified
+  exit 0
 fi
 
 echo ""

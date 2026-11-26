@@ -7,7 +7,7 @@
 
 轻量级、自托管的邮件聚合器：通过 `imapsync` 将多个 IMAP 邮箱同步到本机 Dovecot，并提供账号管理、同步任务、运维和邮件浏览界面。
 
-> 项目状态：Public Beta。Alpine Linux 3.21.7 + Node.js 22 + Dovecot 2.3.21.1 + imapsync 2.290 是当前完整验收环境。Debian/Ubuntu 已提供安装适配，但尚未完成同等级真机验收。
+> 项目状态为 Public Beta。新装目标为 Alpine Linux 3.24 x86_64、Node.js 24 和 Dovecot 2.4。Alpine 3.21 与 Dovecot 2.3 是历史验收环境。Debian、Ubuntu 和其他组合的验证范围见[发布清单](./TESTING.md)。
 
 ## 功能
 
@@ -18,10 +18,15 @@
 - 按来源账号隔离目标文件夹，支持文件夹、时间和大小过滤
 - 可选镜像目标端删除，带严格的防误删限制
 - 登录后浏览本机邮件；主动打开正文后标为本地已读，支持手动标为已读／未读，自动预览不改变状态
+- 统一未读总览、本地星标、勾选批量标记已读／未读和星标
+- [持久化邮件任务中心和整理规则](./MAIL_TASKS.md)：完整预览后手动应用，支持取消、确认进度和重新登录后继续
 - HTML 邮件安全渲染、CID 内嵌图片和远程图片按需加载
-- 当前文件夹内按发件人、主题、收取日期和已读状态组合搜索
+- 当前文件夹或跨可访问文件夹组合搜索，支持发件人、收件人、主题、正文、大小、收取日期和已读状态
 - 附件下载与原始 `.eml` 导出，支持中文文件名；下载不改变已读状态
 - 健康检查、失败通知、安全备份、预检、恢复和恢复前快照
+- 账号页显示同步受阻原因和复查时间；可暂停定时同步，分别只读测试来源和目标，预演同步影响
+- [搜索接续](./MAIL_SEARCH_CONTINUATION.md)、个人标签、附件筛选和手机阅读导航；收取时间排序与会话分组覆盖当前显示的结果
+- [应用与 Maildir 配对备份](./MAILDIR_BACKUP.md)、[只读运维与审计](./OPERATIONS.md)、[主管理员双重验证](./TOTP_SECURITY.md) 和 [GitHub 更新检查与签名安装](./APP_UPDATES.md)
 - 简体中文、English、日本語、한국어、Español、Français、Deutsch
 
 ## 工作方式
@@ -41,7 +46,31 @@ Mail Aggregator 管理同步，不取代 Dovecot。邮件本体保存在 Maildir
 
 ## 快速安装
 
-全新 Alpine 机器以 `root` 执行：
+### 网页安装向导（全新 Linux 主机）
+
+适用范围：**Alpine 3.21 及更新的 3.x（OpenRC）**、**Debian 12/13（systemd）**、**Ubuntu 22.04 / 24.04 / 26.04 及安装器识别的更新 Ubuntu 版本（systemd）**，架构为 `x86_64` 或 `aarch64`。软件源还需提供兼容的 Dovecot 2.3 或 2.4。优先使用仍在维护的发行版。
+
+- Alpine：如果只启用了本机分支的 `main`，向导会检查同镜像、同分支的 `community`，成功后备份 `/etc/apk/repositories` 并补上这一项。已有同分支 `community` 或无法安全判断的自定义软件源会保留原样。`--check` 只报告，不改配置。
+- Debian / Ubuntu：需要系统 npm 和 `/usr/bin/node` 的 **Node.js 22.12 或更新版本**。如果当前 apt 源没有合适版本，请先从可信来源准备系统 Node.js 和 npm；只给登录账号安装的 nvm 版本不能供服务使用。Ubuntu 的依赖可能需要发行版的 `universe` 源。
+
+将已核对 SHA-256 的安装包解压到 root 的私有目录。在解压目录以 `root` 运行：
+
+```sh
+sh scripts/install-web.sh
+```
+
+安装器每次启动都会检测当前的私有局域网 IPv4。只有一个地址时直接使用；有多个时，在终端按网卡名称和地址选择。无人值守且有多个地址时，可用 `sh scripts/install-web.sh --listen 私有局域网IPv4` 指定其中一个。`sh scripts/install-web.sh --check` 只检查系统、已有安装、可用地址和 Node.js，不安装软件。
+
+1. 保持这个终端运行。在同一局域网的浏览器中打开终端打印的 `https://服务器地址:8090/`。证书是本次启动临时生成的；先在浏览器的证书详情核对 **SHA-256 指纹**，一致后才继续。无需把证书加入系统的信任列表。
+2. 输入终端显示的单次安装口令（15 分钟内有效）。检查通过后，选择邮件面板端口和语言，填写你要使用的**网页管理员账号和密码**，点击「开始安装」。刷新或关闭浏览器不会中止安装；可用原浏览器回来查看。
+3. 安装成功后，点击「显示一次」保存独立生成的 `mailuser` Dovecot 密码。打开邮件面板（默认 `http://服务器地址:8080/`），**直接用你在向导里设置的管理员账号和密码登录**。`mailuser` 密码用于本机 IMAP；安装口令只用于配对向导。
+4. 点击「完成并关闭向导」结束；安装结束后即使没有点击，临时 HTTPS 向导也会在 5 分钟后关闭。
+
+向导的证书和监听仅用于本次选定的地址。如果向导开着时服务器换了 IP，等正在进行的安装结束；若尚未安装，退出并重新运行向导，以终端的新地址、证书指纹和口令为准。按默认局域网方式安装后，IP 变化时用新 IP 打开原邮件面板端口（默认 8080）即可。正式面板使用 HTTP，如需公网访问，请另外配置 HTTPS 反向代理。向导会拒绝已有 Mail Aggregator、Dovecot、相关用户或数据的主机；升级和恢复仍使用对应的命令行流程。安装失败时保留已写的数据及终端显示的 root 专用步骤日志，不自动重试；向导会停止本次启动的服务并取消它们的开机启动。网页首次安装与 GitHub 自动安装更新的支持范围独立。
+
+### 命令行安装
+
+在全新的 Alpine 3.24 x86_64 机器上启用同一分支的 `main` 和 `community` 软件仓库，再以 `root` 执行：
 
 ```sh
 cd /root/mail-aggregator
@@ -54,6 +83,8 @@ chmod +x scripts/*.sh scripts/lib/*.sh scripts/platforms/*.sh
 ```sh
 ./scripts/install.sh --custom
 ```
+
+安装器优先复用可用的 imapsync 或从发行版源安装。软件源没有 imapsync 时，安装器从当前软件源安装 Perl 依赖，再下载并校验固定的上游 imapsync 2.314。已有 Dovecot 2.3 时，应用升级可采用 `--app-only`。Dovecot 2.3 到 2.4 的配置及存储升级需要按 [Dovecot 官方迁移文档](https://doc.dovecot.org/latest/installation/upgrade/2.3-to-2.4.html) 单独演练。
 
 未指定本地 Dovecot 初始密码时，安装器会生成 32 位随机密码并在安装结束时显示一次，请立即保存。
 
@@ -77,7 +108,13 @@ rc-service dovecot status
 rc-service mail-aggregator status
 ```
 
-新安装默认只监听本机，可先执行 `ssh -L 8080:127.0.0.1:8080 root@服务器地址`，再通过 `http://127.0.0.1:8080` 创建管理员。明确仅在可信局域网验收时可给安装命令增加 `--lan-http`，随后访问 `http://服务器地址:8080`；公网部署必须使用 HTTPS 反向代理。
+命令行全新安装的 Web 管理面板默认监听 `0.0.0.0:8080`。在同一个可信局域网内打开 `http://服务器局域网IP:8080`，创建第一个管理员。这个地址使用明文 HTTP；公网访问请使用 HTTPS 反向代理。
+
+### 应用更新
+
+主管理员可在「设置 → 应用更新」检查 GitHub Releases，默认每天检查正式版。Alpine 3.24 x86_64 / Node.js 24 / OpenRC 可在手工安装执行器、固定公钥并启用本机安装后，设置维护时段或立即安装。详见[部署、更新与回退说明](./APP_UPDATES.md)。
+
+主管理员可在「个人安全」开启双重验证。使用前请查看[恢复码与本机接管指引](./TOTP_SECURITY.md)。
 
 ## 多用户与权限
 
@@ -134,11 +171,13 @@ MAIL_AGG_COOKIE_SECURE=true
 MAIL_AGG_REQUIRE_HTTPS=true
 ```
 
-新安装默认只监听 `127.0.0.1`。明确只在可信局域网使用时可运行 `./scripts/install.sh --full --lan-http`；已有 HTTPS 反向代理时使用 `./scripts/install.sh --full --https-proxy`。默认本机模式可通过 SSH 端口转发临时访问：
+升级会保留已有的 Web 监听和 HTTPS 设置。可以用 `--lan-http` 显式启用局域网 HTTP，用 `--local-http` 只监听 `127.0.0.1`，或用 `--https-proxy` 让本机反向代理提供 HTTPS。仅本机模式可通过 SSH 端口转发访问：
 
 ```sh
 ssh -L 8080:127.0.0.1:8080 root@服务器IP
 ```
+
+上面的 SSH 转发适用于本机 HTTP 模式。启用可信反向代理后，请通过配置好的 HTTPS 域名登录或执行密码确认；直连应用端口不具备代理提供的客户端地址。遇到 503 时检查代理的 `X-Forwarded-For` 和 HTTPS 配置。
 
 反向代理应转发 `Host`、`X-Forwarded-Proto` 和客户端地址。修改配置后重启服务：
 
@@ -147,6 +186,8 @@ rc-service mail-aggregator restart
 ```
 
 ## 数据与备份
+
+主管理员可在首页「运维诊断」下载脱敏 JSON。服务启动失败时，在服务器运行 `sudo /opt/mail-aggregator/scripts/doctor.sh --json`。遇到恢复状态需检查时，先保留快照和恢复现场，查看[恢复指引](./TESTING.md#11-恢复中断与离线诊断)。
 
 默认位置：
 
@@ -160,22 +201,24 @@ rc-service mail-aggregator restart
 创建带清单和 SHA-256 校验的备份：
 
 ```sh
-sudo ./scripts/backup.sh
+sudo /opt/mail-aggregator/scripts/backup.sh
 ```
 
 只读预检：
 
 ```sh
-./scripts/verify-backup.sh backup.tar.gz backup.tar.gz.sha256
+sudo /opt/mail-aggregator/scripts/verify-backup.sh backup.tar.gz backup.tar.gz.sha256
 ```
 
 恢复：
 
 ```sh
-sudo ./scripts/restore.sh backup.tar.gz backup.tar.gz.sha256
+sudo /opt/mail-aggregator/scripts/restore.sh backup.tar.gz backup.tar.gz.sha256
 ```
 
 备份包含账号配置和明文可恢复凭据，必须加密、离线保存，不能上传到 Issue 或公开仓库。备份不包含 Maildir。
+
+邮件本体可从稳定快照单独创建加密备份，并恢复到独立目录演练；使用前请阅读 [Maildir 加密备份说明](./MAILDIR_BACKUP.md)。
 
 ## 卸载边界
 
@@ -211,9 +254,11 @@ npm test
 
 ## 已知限制
 
-- Web 邮件支持搜索、附件下载、原始邮件导出及本地已读／未读切换；不支持发送、回复、移动和删除
-- 搜索范围为当前文件夹，结束日期包含当天；正文预览上限 10 MB，超过时仍可查看附件列表。单次下载上限 100 MB，每用户最多同时下载 2 个文件、全站最多 4 个；超过上限或中途失败不会保存为成功文件
+- Web 邮件支持搜索、附件下载、原始邮件导出及本地已读／未读、星标切换；不支持发送、回复、移动和删除
+- 跨文件夹搜索按文件夹分批展示，每页检查最多 8 个文件夹，每个文件夹预览最多 5 封；同一封邮件在多个文件夹中会分别展示。结束日期包含当天；正文搜索依赖 Dovecot，未配置全文索引时可能较慢，不保证检索附件内容。
+- 正文预览上限 10 MB，超过时仍可查看附件列表。单次下载上限 100 MB，每用户最多同时下载 2 个文件、全站最多 4 个；超过上限或中途失败不会保存为成功文件
 - 首次复制保留源邮件标记；后续同步使用 `--noresyncflags` 保留本地标记，不再从源邮箱刷新已有邮件的已读、星标等状态。Web 操作不回写源邮箱。
+- 统一未读按有未读邮件的文件夹分组，每组预览最多 5 封，可进入文件夹查看全部；同一邮件出现在多个文件夹时按文件夹分别计数。
 - 账号角标表示收件箱未读数；各文件夹单独显示自己的未读数，避免 Gmail 标签重复计数。
 - 所有来源默认共用一个本地 Dovecot 服务账号，但新建邮箱使用不可伪造的账号级目录，并由 Web API 强制执行用户访问范围
 - Gmail / Microsoft OAuth 最终效果依赖各自控制台配置、租户策略和真实授权验收
@@ -223,6 +268,8 @@ npm test
 ## 参与贡献
 
 提交问题或代码前请阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)。变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
+
+后续阶段及验收目标见 [MAIL_ROADMAP.md](./MAIL_ROADMAP.md)。
 
 ## License
 

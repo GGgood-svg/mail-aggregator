@@ -32,7 +32,8 @@ try { ({ DatabaseSync } = require('node:sqlite')); } catch (_) {}
       VALUES('review','custom','imap.example.org','review@example.org',?,'subfolder','Review','U1-A1')`).run(user).lastInsertRowid);
     require('../server/credentials').saveSourceSecret(id, 'fixture');
     const handler = router.stack.find(s => s.route?.path === '/:id' && s.route.methods.put).route.stack[0].handle;
-    const res = { code: 200, status(n) { this.code = n; return this; }, json(body) { this.body = body; return this; } };
+    const res = { code: 200, headers: {}, status(n) { this.code = n; return this; },
+      set(key, value) { this.headers[key] = value; return this; }, json(body) { this.body = body; return this; } };
     handler({ params: { id: String(id) }, user: { id: user, role: 'user' }, body: {
       name: 'review', provider: 'custom', host: 'imap.example.org', port: 993, ssl: true, username: 'review@example.org', destination_mode: 'flat',
     } }, res, error => { throw error; });
@@ -41,6 +42,22 @@ try { ({ DatabaseSync } = require('node:sqlite')); } catch (_) {}
     const testHandler = router.stack.find(s => s.route?.path === '/:id/test').route.stack[0].handle;
     await testHandler({ params: { id: String(id) }, user: { id: user } }, res, error => { throw error; });
     assert.equal(res.body.ok, true);
+
+    const page = router.stack.find(s => s.route?.path === '/:id/sync-plan/page').route.stack[0].handle;
+    const actor = db.prepare('SELECT id,username,role,session_version,mail_access_all FROM admin_users WHERE id=?').get(user);
+    const request = { params: { id: String(id) }, session: { userId: user }, user: actor, body: { cursor: 'invalid' } };
+    await page(request, res, error => { throw error; });
+    assert.equal(res.headers['Cache-Control'], 'no-store');
+    assert.equal(res.body.category, 'config_changed');
+    assert.equal(res.body.rows, undefined);
+    const lock = require('../server/maintenance-lock');
+    assert.equal(lock.acquire('restore'), true);
+    try { await page(request, res, error => { throw error; }); }
+    finally { lock.release('restore'); }
+    assert.equal(res.body.category, 'maintenance');
+    await page({ ...request, params: { id: String(id + 1) } }, res, error => { throw error; });
+    assert.equal(res.code, 404);
+    await assert.rejects(async () => page({ ...request, session: null }, res, error => { throw error; }), { statusCode: 401 });
   } finally {
     Module._load = original; if (db) db.close();
     if (previous === undefined) delete process.env.MAIL_AGG_DATA_DIR; else process.env.MAIL_AGG_DATA_DIR = previous;

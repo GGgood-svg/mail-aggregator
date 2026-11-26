@@ -32,20 +32,29 @@ function generateDovecotHash(password, scheme = 'SHA512-CRYPT', options = {}) {
     let stderr = '';
     let stdinError = null;
     let settled = false;
+    let terminationError;
+    let outputBytes = 0;
+    const terminate = error => { terminationError ||= error; child.kill?.('SIGKILL'); };
+    const timer = setTimeout(() => terminate(new Error('doveadm 生成哈希超时')), options.timeoutMs || 10000);
+    timer.unref?.();
 
     const finish = (err, value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       if (err) reject(err);
       else resolve(value);
     };
 
-    child.stdout.on('data', (c) => (stdout += c.toString()));
-    child.stderr.on('data', (c) => (stderr += c.toString()));
+    const collect = (chunk, stderrStream) => {
+      outputBytes += chunk.length;
+      if (outputBytes > 8192) { terminate(new Error('doveadm 输出超过上限')); return; }
+      if (stderrStream) stderr += chunk.toString(); else stdout += chunk.toString();
+    };
+    child.stdout.on('data', chunk => collect(chunk, false));
+    child.stderr.on('data', chunk => collect(chunk, true));
 
-    child.once('error', (err) => {
-      finish(new Error(`无法启动 doveadm: ${err.message}`));
-    });
+    child.once('error', (err) => { terminationError ||= new Error(`无法启动 doveadm: ${err.message}`); });
 
     // write()/end()的try/catch只能接住同步异常。真实管道断开产生的EPIPE是
     // 异步error事件,必须在写入前注册监听器。先记下来,等close时连同doveadm
@@ -55,6 +64,7 @@ function generateDovecotHash(password, scheme = 'SHA512-CRYPT', options = {}) {
     });
 
     child.once('close', (code, signal) => {
+      if (terminationError) { finish(terminationError); return; }
       // doveadm的交互式提示("Enter new password:"等)以及最终生成的哈希,
       // 在不同版本/不同终端环境下可能出现在stdout或stderr,两路都搜一遍。
       const combined = stdout + '\n' + stderr;
@@ -81,7 +91,7 @@ function generateDovecotHash(password, scheme = 'SHA512-CRYPT', options = {}) {
       // 全程不经过任何命令行参数(argv对ps可见,stdin管道不会)。
       child.stdin.end(`${password}\n${password}\n`);
     } catch (err) {
-      finish(new Error(`写入密码到 doveadm 失败: ${err.message}`));
+      terminate(new Error(`写入密码到 doveadm 失败: ${err.message}`));
     }
   });
 }

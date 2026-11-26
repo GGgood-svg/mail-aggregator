@@ -19,7 +19,7 @@ function downloadFilename(disposition, fallback) {
 }
 
 const Api = (() => {
-  async function request(method, url, body) {
+  async function request(method, url, body, options = {}) {
     const headers = {};
     if (body) headers['Content-Type'] = 'application/json';
     if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method) && csrfToken) {
@@ -30,26 +30,29 @@ const Api = (() => {
       headers,
       body: body ? JSON.stringify(body) : undefined,
       credentials: 'same-origin',
+      signal: options.signal,
     });
-    if (res.status === 401 && !url.includes('/auth/')) {
+    const isJson = (res.headers.get('content-type') || '').includes('application/json');
+    const data = isJson ? await res.json() : await res.text();
+    if (res.status === 401 && !url.includes('/auth/') && data?.code !== 'current_password_invalid') {
       window.location.href = '/login.html';
       return null;
     }
-    const isJson = (res.headers.get('content-type') || '').includes('application/json');
-    const data = isJson ? await res.json() : await res.text();
     if (!res.ok) {
       const message = (data && data.error) || `请求失败 (${res.status})`;
       const error = new Error(message);
       error.details = data;
+      error.status = res.status;
       throw error;
     }
     return data;
   }
 
   return {
-    get: (url) => request('GET', url),
-    post: (url, body) => request('POST', url, body),
+    get: (url, options) => request('GET', url, undefined, options),
+    post: (url, body, options) => request('POST', url, body, options),
     put: (url, body) => request('PUT', url, body),
+    patch: (url, body) => request('PATCH', url, body),
     del: (url) => request('DELETE', url),
     download: async (url, body) => {
       const res = await fetch(url, {
@@ -173,21 +176,28 @@ async function requireLogin() {
 }
 
 async function logout() {
-  await Api.post('/api/auth/logout');
-  setCsrfToken(null);
-  window.location.href = '/login.html';
+  try {
+    await Api.post('/api/auth/logout');
+    setCsrfToken(null);
+    window.location.href = '/login.html';
+  } catch (error) {
+    if (error.status === 401) window.location.href = '/login.html';
+    else toast(error.message || '未能退出，请重试。', 'error');
+  }
 }
 
 function renderNav(active) {
-  const items = [
+  const operations = { href: '/operations.html', label: '运维', key: 'operations' };
+  const profile = { href: '/profile.html', label: '个人安全', key: 'profile' };
+  const items = currentUser?.role === 'operator' ? [operations, profile] : [
     { href: '/index.html', label: 'Dashboard', key: 'dashboard' },
     { href: '/mail.html', label: '查看邮件', key: 'mail' },
     { href: '/accounts.html', label: '邮箱账号', key: 'accounts' },
     { href: '/logs.html', label: '同步日志', key: 'logs' },
-    { href: '/profile.html', label: '个人安全', key: 'profile' },
+    profile,
     ...(currentUser && currentUser.role === 'admin' ? [
       { href: '/users.html', label: '用户管理', key: 'users' },
-      ...(currentUser.primaryAdmin ? [{ href: '/settings.html', label: '设置', key: 'settings' }] : []),
+      ...(currentUser.primaryAdmin ? [{ href: '/settings.html', label: '设置', key: 'settings' }, operations] : []),
       { href: '/system-info.html', label: '系统信息', key: 'system-info' },
     ] : []),
   ];

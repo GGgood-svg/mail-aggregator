@@ -48,10 +48,12 @@ validate_username() {
 }
 
 reload_dovecot() {
+  # Run as root so a Web-side timeout cannot leave a privileged reload running
+  # indefinitely after sudo has exited. Each fallback has its own hard deadline.
   if command -v doveadm >/dev/null 2>&1; then
-    doveadm reload 2>/dev/null && return 0
+    timeout -s KILL 2 doveadm reload 2>/dev/null && return 0
   fi
-  rc-service dovecot reload 2>/dev/null || rc-service dovecot restart
+  timeout -s KILL 2 rc-service dovecot reload 2>/dev/null || timeout -s KILL 2 rc-service dovecot restart
 }
 
 cmd_get_hash() {
@@ -73,6 +75,7 @@ cmd_get_hash() {
 cmd_set_password() {
   USERNAME="$1"
   validate_username "$USERNAME"
+  command -v timeout >/dev/null 2>&1 || { echo 'ERROR: timeout command required' >&2; exit 1; }
 
   NEW_HASH=$(head -n1)
   if [ -z "$NEW_HASH" ]; then
@@ -120,6 +123,7 @@ cmd_set_password() {
 }
 
 cmd_restore_backup() {
+  command -v timeout >/dev/null 2>&1 || { echo 'ERROR: timeout command required' >&2; exit 1; }
   if [ ! -f "$BACKUP_FILE" ]; then
     echo "ERROR: no backup file found at $BACKUP_FILE" >&2
     exit 1
@@ -148,10 +152,34 @@ cmd_storage_status() {
   # Fixed Maildir layout managed by this installer; never accept a path.
   MAIL_ROOT="/home/$1/Maildir"
   [ -d "$MAIL_ROOT" ] || { echo 'Maildir not found' >&2; exit 1; }
-  SPACE=$(df -Pk "$MAIL_ROOT") || exit 1
-  INODES=$(df -Pi "$MAIL_ROOT") || exit 1
+  if [ "${2:-}" = "--include-device" ] && [ "${3:-}" = "--include-mount" ] && [ -r /proc/self/mountinfo ]; then
+    # The same open directory supplies capacity and actual mount identity. A
+    # concurrent unmount must not pair root-filesystem space with an old mount ID.
+    timeout -s KILL 4 sh -s -- "$MAIL_ROOT" <<'MAIL_STORAGE_PROBE'
+set -e
+exec 9<"$1"
+TARGET=/proc/self/fd/9
+[ -d "$TARGET" ]
+DEV=$(stat -Lc '%d' "$TARGET")
+MOUNT=$(awk '$1 == "mnt_id:" {print $2}' /proc/self/fdinfo/9)
+SPACE=$(df -Pk "$TARGET")
+INODES=$(df -Pi "$TARGET")
+printf '%s\n' "$SPACE" | awk 'END {print $4}'
+printf '%s\n' "$INODES" | awk 'END {print ($4 ~ /^[0-9]+$/ ? $4 : "-")}'
+case "$DEV" in ''|*[!0-9]*|0) ;; *) printf 'dev:%s\n' "$DEV" ;; esac
+case "$MOUNT" in ''|*[!0-9]*|0) ;; *) printf 'mnt:%s\n' "$MOUNT" ;; esac
+MAIL_STORAGE_PROBE
+    return
+  fi
+  SPACE=$(timeout -s KILL 2 df -Pk "$MAIL_ROOT") || exit 1
+  INODES=$(timeout -s KILL 2 df -Pi "$MAIL_ROOT") || exit 1
   printf '%s\n' "$SPACE" | awk 'END {print $4}'
-  printf '%s\n' "$INODES" | awk 'END {print $4}'
+  printf '%s\n' "$INODES" | awk 'END {print ($4 ~ /^[0-9]+$/ ? $4 : "-")}'
+  # Keep the two-field protocol for older applications after a rollback.
+  if [ "${2:-}" = "--include-device" ]; then
+    DEVICE=$(timeout -s KILL 2 stat -c '%d' "$MAIL_ROOT") || DEVICE=
+    case "$DEVICE" in ''|*[!0-9]*|0) ;; *) printf 'dev:%s\n' "$DEVICE" ;; esac
+  fi
 }
 
 case "$1" in
@@ -159,7 +187,7 @@ case "$1" in
   set-password) shift; cmd_set_password "$1" ;;
   restore-backup) cmd_restore_backup ;;
   reload) cmd_reload ;;
-  storage-status) shift; cmd_storage_status "$1" ;;
+  storage-status) shift; cmd_storage_status "$@" ;;
   *)
     echo "ERROR: unknown subcommand '$1'" >&2
     echo "usage: $0 {get-hash <user>|set-password <user>|restore-backup|reload}" >&2

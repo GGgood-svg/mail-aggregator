@@ -8,7 +8,11 @@
     "start": "node server/app.js",
     "init-db": "node server/db.js --init",
     "test": "node --test tests/*.test.js",
-    "test:integration": "node tests/native-smoke.cjs"
+    "test:integration": "node tests/native-smoke.cjs",
+    "test:maildir": "node --test tests/maildir-backup.integration.cjs",
+    "test:dovecot": "node --test tests/dovecot.integration.cjs",
+    "test:helper": "node --test tests/dovecot-helper.integration.cjs",
+    "test:browser": "node --test tests/mail-browser.integration.cjs tests/notification-task-link.integration.cjs"
   },
   "license": "MIT",
   "keywords": [

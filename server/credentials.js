@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { randomUUID, createHash } = require('node:crypto');
 const { DIRS } = require('./db');
 
 const LOCAL_SECRET_PATH = path.join(DIRS.secrets, 'local-target.pass');
@@ -52,15 +53,24 @@ function saveSourceSecret(accountId, secret) {
   writeSecret(sourcePassPath(accountId), secret);
 }
 
-function saveOAuthTokens(accountId, tokens) {
+function saveOAuthTokens(accountId, tokens, { grantGeneration = randomUUID() } = {}) {
   if (!tokens || typeof tokens.accessToken !== 'string' || typeof tokens.refreshToken !== 'string') {
     throw new Error('OAuth2令牌数据不完整');
   }
   if (!tokens.accessToken || !tokens.refreshToken || /[\r\n\0]/.test(tokens.accessToken) || /[\r\n\0]/.test(tokens.refreshToken)) {
     throw new Error('OAuth2令牌格式不合法');
   }
-  writeSecret(oauthTokenPath(accountId), `${JSON.stringify(tokens)}\n`);
-  writeSecret(oauthAccessTokenPath(accountId), tokens.accessToken);
+  writeSecret(oauthTokenPath(accountId), `${JSON.stringify({ ...tokens, grantGeneration, tokenGeneration: randomUUID() })}\n`);
+  syncOAuthAccessFile(accountId, tokens);
+}
+
+function syncOAuthAccessFile(accountId, tokens) {
+  const filename = oauthAccessTokenPath(accountId);
+  let current;
+  try { current = fs.readFileSync(filename, 'utf8'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (current !== tokens.accessToken) writeSecret(filename, tokens.accessToken);
+  return filename;
 }
 
 function readOAuthTokens(accountId) {
@@ -71,6 +81,14 @@ function readOAuthTokens(accountId) {
   } catch (_) {
     throw new Error('OAuth2令牌文件损坏，请重新授权');
   }
+}
+
+function oauthAuthorizationGeneration(accountId) {
+  let raw;
+  try { raw = fs.readFileSync(path.join(DIRS.secrets, String(accountId), 'oauth-token.json'), 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  try { return JSON.parse(raw)?.grantGeneration || 'legacy'; }
+  catch (_) { return `invalid:${createHash('sha256').update(raw).digest('hex')}`; }
 }
 
 function hasOAuthTokens(accountId) {
@@ -154,8 +172,10 @@ module.exports = {
   saveSourceSecret,
   deleteSourceSecret,
   saveOAuthTokens,
+  syncOAuthAccessFile,
   readOAuthTokens,
   hasOAuthTokens,
+  oauthAuthorizationGeneration,
   deleteOAuthTokens,
   saveTargetSecret,
   saveGlobalLocalSecret,

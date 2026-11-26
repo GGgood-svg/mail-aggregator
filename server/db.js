@@ -1,24 +1,17 @@
 const path = require('path');
 const fs = require('fs');
 const Database = require('better-sqlite3');
+const { dataPaths } = require('./data-paths');
+const { journalPresent, initializeRestoreState } = require('./restore-journal');
 
 // The database, WAL files, cached provider state, logs, and credentials all
 // contain private mailbox metadata. Keep newly created runtime files private
 // even when the service manager inherits a permissive system umask.
 process.umask(0o077);
 
-const ROOT_DIR = process.env.MAIL_AGG_DATA_DIR || path.join(__dirname, '..', 'data');
-
-// v0.1.1: 按spec建议的目录结构拆分,而不是把所有东西堆在同一层
-const DIRS = {
-  root: ROOT_DIR,
-  db: path.join(ROOT_DIR, 'db'),
-  secrets: path.join(ROOT_DIR, 'secrets'),
-  cache: path.join(ROOT_DIR, 'cache'),
-  logs: path.join(ROOT_DIR, 'logs'),
-  tmp: path.join(ROOT_DIR, 'tmp'),
-  restorePoints: path.join(ROOT_DIR, 'restore-points'),
-};
+const DIRS = dataPaths();
+const ROOT_DIR = DIRS.root;
+if (journalPresent(ROOT_DIR)) throw new Error('检测到未完成的恢复。请启动服务以完成核对，或运行 scripts/doctor.sh --json');
 
 for (const dir of Object.values(DIRS)) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -31,6 +24,8 @@ const db = new Database(DB_PATH);
 fs.chmodSync(DB_PATH, 0o600);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+initializeRestoreState(db);
+require('./notification-outbox').migrateNotificationOutbox(db);
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS admin_users (
@@ -70,6 +65,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   last_sync_at TEXT,
   last_sync_status TEXT,
   last_sync_message TEXT,
+  last_sync_category TEXT,
+  sync_failure_count INTEGER NOT NULL DEFAULT 0,
   -- 下面这些字段代表"最近一次可信的"值:某次同步没能解析出对应字段时,
   -- 保留上一次的值不动,而不是被错误地覆盖成0或者N/A
   last_host2_messages INTEGER,
@@ -111,6 +108,11 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
   log_file TEXT
 );
 
+CREATE TABLE IF NOT EXISTS sync_provider_cooldowns (
+  provider_key TEXT PRIMARY KEY,
+  retry_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -121,6 +123,35 @@ CREATE TABLE IF NOT EXISTS sessions (
   sess TEXT NOT NULL,
   expires INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS oauth_flows (
+  sid TEXT NOT NULL REFERENCES sessions(sid) ON DELETE CASCADE,
+  state TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  owner_user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+  expires INTEGER NOT NULL,
+  flow TEXT NOT NULL,
+  PRIMARY KEY(sid, state)
+);
+CREATE INDEX IF NOT EXISTS idx_oauth_flows_expires ON oauth_flows(expires);
+
+CREATE TABLE IF NOT EXISTS session_revocations (
+  sid TEXT PRIMARY KEY,
+  expires INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS saved_searches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  scope TEXT NOT NULL CHECK(scope IN ('folder','all')),
+  folder TEXT,
+  filters_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK((scope='all' AND folder IS NULL) OR (scope='folder' AND folder IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_saved_searches_owner ON saved_searches(owner_user_id,id);
 
 CREATE TABLE IF NOT EXISTS login_attempts (
   ip TEXT PRIMARY KEY,
@@ -156,11 +187,23 @@ addColumnIfMissing('sync_jobs', 'host1_messages', 'host1_messages INTEGER');
 addColumnIfMissing('sync_jobs', 'host2_messages', 'host2_messages INTEGER');
 addColumnIfMissing('sync_jobs', 'host1_folders', 'host1_folders INTEGER');
 addColumnIfMissing('sync_jobs', 'host2_folders', 'host2_folders INTEGER');
+for (const [name, type] of [['stage','TEXT'], ['result_code','TEXT'], ['result_known','INTEGER'], ['result_message','TEXT'],
+  ['transfer_started_at','TEXT'], ['next_attempt_at','TEXT'], ['pid_identity','TEXT'],
+  ['trigger_source','TEXT'], ['transport_state','TEXT'], ['mirror_at_release','INTEGER']]) {
+  addColumnIfMissing('sync_jobs', name, `${name} ${type}`);
+}
+for (const [name, type] of [['last_sync_attempt_at','TEXT'], ['last_sync_success_at','TEXT'], ['last_finished_job_id','INTEGER'],
+  ['sync_result_unknown','INTEGER NOT NULL DEFAULT 0'], ['sync_review_required','INTEGER NOT NULL DEFAULT 0'], ['sync_block_code','TEXT'], ['sync_block_since','TEXT'], ['sync_block_scope','TEXT'],
+  ['sync_next_retry_at','TEXT'], ['sync_paused_until','TEXT'], ['sync_pause_started_at','TEXT']]) {
+  addColumnIfMissing('accounts', name, `${name} ${type}`);
+}
 addColumnIfMissing('accounts', 'last_host2_messages', 'last_host2_messages INTEGER');
 addColumnIfMissing('accounts', 'last_host2_folders', 'last_host2_folders INTEGER');
 addColumnIfMissing('accounts', 'last_transferred', 'last_transferred INTEGER');
 addColumnIfMissing('accounts', 'last_skipped', 'last_skipped INTEGER');
 addColumnIfMissing('accounts', 'last_errors', 'last_errors INTEGER');
+addColumnIfMissing('accounts', 'last_sync_category', 'last_sync_category TEXT');
+addColumnIfMissing('accounts', 'sync_failure_count', 'sync_failure_count INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('accounts', 'destination_mode', "destination_mode TEXT NOT NULL DEFAULT 'flat'");
 addColumnIfMissing('accounts', 'destination_folder', 'destination_folder TEXT');
 addColumnIfMissing('accounts', 'mailbox_folder', 'mailbox_folder TEXT');
@@ -326,6 +369,7 @@ if (oldHost) migrateSetting.run(oldHost.value, 'dovecot_host', defaultSettings.d
 if (oldPort) migrateSetting.run(oldPort.value, 'dovecot_port', defaultSettings.dovecot_port);
 if (oldUser) migrateSetting.run(oldUser.value, 'dovecot_user', defaultSettings.dovecot_user);
 
+require('./mail-tasks').initializeMailTasks(db);
 module.exports = { db, DATA_DIR: ROOT_DIR, DIRS, DB_PATH };
 
 if (require.main === module) {

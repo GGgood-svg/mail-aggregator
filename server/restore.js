@@ -1,7 +1,13 @@
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { runBounded } = require('./bounded-process');
 const { copySecrets } = require('./backup');
+const { preserveLocalOAuthBase } = require('./oauth-config-file');
+const { normalizeSavedSearch, MAX_SAVED_SEARCHES } = require('./saved-searches');
+const { normalizeRule, MAX_RULES } = require('./mail-rules');
+const { withStateLock } = require('./state-lock');
+const { journalPresent, readRestoreJournal, prepareRestoreJournal, moveCredentials, initializeRestoreState,
+  recordRestoreResult, reconcileCredentials, finishRestoreJournal } = require('./restore-journal');
 
 const REQUIRED_SOURCE_TABLES = ['accounts', 'settings'];
 const PRESERVED_SETTING_KEYS = new Set([
@@ -17,7 +23,7 @@ const PRESERVED_SETTING_KEYS = new Set([
 const MAX_WEB_RESTORE_UPLOAD = 512 * 1024 * 1024;
 const MAX_WEB_RESTORE_EXPANDED = 1024 * 1024 * 1024;
 
-function receiveArchive(req, destination, maxBytes = MAX_WEB_RESTORE_UPLOAD) {
+function receiveArchive(req, destination, maxBytes = MAX_WEB_RESTORE_UPLOAD, { signal, idleMs = 30000, totalMs = 300000 } = {}) {
   return new Promise((resolve, reject) => {
     const declared = Number(req.headers['content-length']);
     if (Number.isFinite(declared) && declared > maxBytes) {
@@ -27,53 +33,56 @@ function receiveArchive(req, destination, maxBytes = MAX_WEB_RESTORE_UPLOAD) {
     }
     const output = fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 });
     let bytes = 0;
-    let failed = false;
-
+    let failure, finished = false, idleTimer;
+    const timeout = () => fail(Object.assign(new Error('备份上传超时'), { statusCode: 408 }));
+    const resetIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(timeout, idleMs); idleTimer.unref?.(); };
+    const totalTimer = setTimeout(timeout, totalMs); totalTimer.unref?.();
+    const abort = () => fail(new Error('备份上传中断'));
     function fail(error) {
-      if (failed) return;
-      failed = true;
+      if (failure || finished) return;
+      failure = error;
       output.destroy();
-      fs.rmSync(destination, { force: true });
-      reject(error);
+      req.resume();
     }
-    req.on('data', (chunk) => {
+    function onData(chunk) {
+      resetIdle();
       bytes += chunk.length;
       if (bytes > maxBytes) {
         fail(Object.assign(new Error('备份压缩包超过512 MiB上传上限'), { statusCode: 413 }));
         return;
       }
-      if (!failed && !output.write(chunk)) req.pause(), output.once('drain', () => req.resume());
-    });
-    req.once('aborted', () => fail(new Error('备份上传中断')));
+      if (!failure && !output.write(chunk)) req.pause(), output.once('drain', () => req.resume());
+    }
+    req.on('data', onData);
+    req.once('aborted', abort);
     req.once('error', fail);
     output.once('error', fail);
-    req.once('end', () => {
-      if (failed) return;
-      output.end(() => {
-        if (bytes === 0) fail(new Error('没有收到备份文件'));
-        else resolve(bytes);
-      });
+    function onEnd() {
+      if (failure) return;
+      if (bytes === 0) return fail(new Error('没有收到备份文件'));
+      output.end(() => { finished = true; });
+    }
+    req.once('end', onEnd);
+    output.once('close', () => {
+      clearTimeout(idleTimer); clearTimeout(totalTimer);
+      signal?.removeEventListener('abort', abort);
+      req.removeListener('data', onData); req.removeListener('aborted', abort); req.removeListener('error', fail); req.removeListener('end', onEnd);
+      if (failure || !finished) { fs.rmSync(destination, { force: true }); reject(failure || new Error('备份上传中断')); }
+      else resolve(bytes);
     });
+    signal?.addEventListener('abort', abort, { once: true });
+    resetIdle(); if (signal?.aborted) abort();
   });
 }
 
-function extractVerifiedArchive(archivePath, destination) {
+function extractVerifiedArchive(archivePath, destination, { signal } = {}) {
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
-  return new Promise((resolve, reject) => {
-    const child = spawn('tar', [
+  return runBounded('tar', [
       '-xzf', archivePath,
       '-C', destination,
       '--no-same-owner',
       '--no-same-permissions',
-    ], { env: { PATH: process.env.PATH }, stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = '';
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.once('error', reject);
-    child.once('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`备份解压失败${stderr ? `: ${stderr.trim()}` : ''}`));
-    });
-  });
+    ], { env: { PATH: process.env.PATH }, signal, timeout: 120000, maxBuffer: 64 * 1024 });
 }
 
 function tableExists(database, table) {
@@ -86,7 +95,7 @@ function tableColumns(database, table) {
   return database.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
 }
 
-function inspectRestoreDatabase(Database, databasePath) {
+function inspectRestoreDatabase(Database, databasePath, { strict = false } = {}) {
   const source = new Database(databasePath, { readonly: true, fileMustExist: true });
   try {
     const quick = source.prepare('PRAGMA quick_check').get();
@@ -96,12 +105,22 @@ function inspectRestoreDatabase(Database, databasePath) {
     for (const table of REQUIRED_SOURCE_TABLES) {
       if (!tableExists(source, table)) throw new Error(`备份数据库缺少必要表: ${table}`);
     }
+    if (strict) {
+      for (const [table, keys] of Object.entries({ accounts: ['id', 'name', 'provider', 'host', 'username'], settings: ['key', 'value'],
+        ...(tableExists(source, 'admin_users') ? { admin_users: ['id', 'username'] } : {}) })) {
+        const fields = tableColumns(source, table);
+        if (keys.some(key => !fields.includes(key))) throw new Error(`备份数据库表结构不适用: ${table}`);
+      }
+    }
     return {
       accountCount: source.prepare('SELECT COUNT(*) AS count FROM accounts').get().count,
       jobCount: tableExists(source, 'sync_jobs')
         ? source.prepare('SELECT COUNT(*) AS count FROM sync_jobs').get().count
         : 0,
       settingCount: source.prepare('SELECT COUNT(*) AS count FROM settings').get().count,
+      savedSearchCount: tableExists(source, 'saved_searches')
+        ? source.prepare('SELECT COUNT(*) AS count FROM saved_searches').get().count : 0,
+      ruleCount: tableExists(source, 'mail_rules') ? source.prepare('SELECT COUNT(*) AS count FROM mail_rules').get().count : 0,
     };
   } finally {
     source.close();
@@ -165,7 +184,7 @@ function removeTargetPasswordOverrides(directory) {
   return removed;
 }
 
-function prepareRestoredSecrets(backupSecretsDir, currentSecretsDir, preparedDir) {
+function prepareRestoredSecrets(currentDb, backupSecretsDir, currentSecretsDir, preparedDir) {
   const owner = fs.statSync(currentSecretsDir);
   fs.rmSync(preparedDir, { recursive: true, force: true });
   copySecrets(backupSecretsDir, preparedDir);
@@ -177,6 +196,7 @@ function prepareRestoredSecrets(backupSecretsDir, currentSecretsDir, preparedDir
     fs.copyFileSync(currentGlobal, restoredGlobal);
     fs.chmodSync(restoredGlobal, 0o600);
   }
+  preserveLocalOAuthBase(currentDb, currentSecretsDir, preparedDir);
   preserveSecretOwnership(preparedDir, owner);
   return { skippedTargetOverrides };
 }
@@ -193,16 +213,106 @@ function preserveSecretOwnership(directory, owner, io = fs, platform = process.p
   io.chownSync(directory, owner.uid, owner.gid);
 }
 
-function restoreApplicationState({ Database, currentDb, backupDbPath, currentSecretsDir, backupSecretsDir, workDir }) {
+function restoreSavedSearches(current, source, ownerIds) {
+  const summary = { savedSearches: 0, savedSearchesSkipped: 0, savedSearchesPreserved: true };
+  // Older backups contain no saved-search state. Leave the live preferences intact.
+  if (!tableExists(source, 'saved_searches') || !tableExists(current, 'saved_searches')) return summary;
+  if (!['id', 'owner_user_id', 'name', 'scope', 'folder', 'filters_json'].every(column => tableColumns(source, 'saved_searches').includes(column))) {
+    throw new Error('备份中的保存搜索表结构不合法');
+  }
+  summary.savedSearchesPreserved = false;
+  for (const owner of new Set(ownerIds.values())) current.prepare('DELETE FROM saved_searches WHERE owner_user_id=?').run(owner);
+  const counts = new Map();
+  const insert = current.prepare('INSERT INTO saved_searches(owner_user_id,name,scope,folder,filters_json) VALUES(?,?,?,?,?)');
+  for (const row of statementRows(source.prepare('SELECT owner_user_id,name,scope,folder,filters_json FROM saved_searches ORDER BY id'))) {
+    const owner = ownerIds.get(Number(row.owner_user_id));
+    if (owner === undefined || (counts.get(owner) || 0) >= MAX_SAVED_SEARCHES) { summary.savedSearchesSkipped++; continue; }
+    let value;
+    try { value = normalizeSavedSearch({ name: row.name, scope: row.scope, folder: row.folder, filters: JSON.parse(row.filters_json) }); }
+    catch (_) { summary.savedSearchesSkipped++; continue; }
+    // Allocate fresh IDs. A source ID may already belong to an unmapped live user.
+    insert.run(owner, value.name, value.scope, value.folder, JSON.stringify(value.filters));
+    counts.set(owner, (counts.get(owner) || 0) + 1); summary.savedSearches++;
+  }
+  return summary;
+}
+
+function restoreRules(current, source, ownerIds, labelIds = new Map()) {
+  const summary = { rules: 0, rulesSkipped: 0, rulesPreserved: true };
+  if (!tableExists(source, 'mail_rules') || !tableExists(current, 'mail_rules')) return summary;
+  if (!['id', 'owner_user_id', 'name', 'scope', 'folder', 'filters_json', 'action'].every(column => tableColumns(source, 'mail_rules').includes(column))) throw new Error('备份中的规则表结构不合法');
+  summary.rulesPreserved = false;
+  for (const owner of new Set(ownerIds.values())) current.prepare('DELETE FROM mail_rules WHERE owner_user_id=?').run(owner);
+  const counts = new Map();
+  const hasLabelColumn = tableColumns(current, 'mail_rules').includes('label_id');
+  const insert = current.prepare(hasLabelColumn
+    ? 'INSERT INTO mail_rules(owner_user_id,name,scope,folder,filters_json,action,label_id) VALUES(?,?,?,?,?,?,?)'
+    : 'INSERT INTO mail_rules(owner_user_id,name,scope,folder,filters_json,action) VALUES(?,?,?,?,?,?)');
+  for (const row of statementRows(source.prepare('SELECT * FROM mail_rules ORDER BY id'))) {
+    const owner = ownerIds.get(Number(row.owner_user_id));
+    if (owner === undefined || (counts.get(owner) || 0) >= MAX_RULES) { summary.rulesSkipped++; continue; }
+    let value;
+    try {
+      const labelId = row.action === 'label' && hasLabelColumn ? labelIds.get(Number(row.label_id)) : undefined;
+      if (row.action === 'label') require('./mail-labels').ownedLabel(current, owner, labelId);
+      value = normalizeRule({ name: row.name, scope: row.scope, folder: row.folder, filters: JSON.parse(row.filters_json), action: row.action, labelId });
+    }
+    catch (_) { summary.rulesSkipped++; continue; }
+    insert.run(owner, value.name, value.scope, value.folder, JSON.stringify(value.filters), value.action, ...(hasLabelColumn ? [value.labelId ?? null] : []));
+    counts.set(owner, (counts.get(owner) || 0) + 1); summary.rules++;
+  }
+  return summary;
+}
+
+function restoreApplicationState(options) {
+  const { currentDb, currentSecretsDir, beforeCommit = () => {} } = options;
+  const root = path.dirname(path.resolve(currentSecretsDir));
+  let journal, consistent = false, result, failure;
+  try {
+    result = withStateLock(root, () => {
+      beforeCommit();
+      if (journalPresent(root)) throw new Error('已有恢复待核对，请运行离线诊断');
+      const synchronous = currentDb.prepare('PRAGMA synchronous').get().synchronous;
+      currentDb.exec('PRAGMA synchronous=FULL');
+      let importError;
+      try {
+        initializeRestoreState(currentDb);
+        return commitApplicationState(options, root);
+      } catch (error) {
+        importError = error;
+        throw error;
+      } finally {
+        try {
+          journal = readRestoreJournal(root, currentSecretsDir);
+          if (journal) reconcileCredentials(currentDb, root, currentSecretsDir, journal);
+          consistent = true;
+        } catch (error) {
+          if (importError) { importError.rollbackError = error; throw importError; }
+          throw error;
+        } finally {
+          currentDb.exec(`PRAGMA synchronous=${synchronous}`);
+        }
+      }
+    }, { allowDuringRestore: true });
+  } catch (error) { failure = error; }
+  if (journal && consistent) {
+    try { finishRestoreJournal(root, journal); }
+    catch (error) { failure ||= error; failure.recoveryRequired = true; }
+  }
+  if (failure) {
+    if (!consistent && journalPresent(root)) failure.recoveryRequired = true;
+    throw failure;
+  }
+  return result;
+}
+
+function commitApplicationState({ Database, currentDb, backupDbPath, currentSecretsDir, backupSecretsDir, onJournal = () => {} }, root) {
   const { registerMailboxOwnership } = require('./mailbox-ownership');
   const source = new Database(backupDbPath, { readonly: true, fileMustExist: true });
-  const preparedSecrets = path.join(workDir, 'prepared-secrets');
-  const oldSecrets = path.join(workDir, 'old-secrets');
-  let secretsSwapped = false;
-  let currentSecretsMoved = false;
-  let transactionCommitted = false;
   try {
-    const secretResult = prepareRestoredSecrets(backupSecretsDir, currentSecretsDir, preparedSecrets);
+    const { item, details: secretResult } = prepareRestoreJournal(root, currentSecretsDir,
+      prepared => prepareRestoredSecrets(currentDb, backupSecretsDir, currentSecretsDir, prepared));
+    onJournal(item.id);
     const localUserRow = currentDb.prepare("SELECT value FROM settings WHERE key='dovecot_user'").get();
     const currentLocalUser = localUserRow ? localUserRow.value : 'mailuser';
     const currentAdminColumns = new Set(tableColumns(currentDb, 'admin_users'));
@@ -223,8 +333,14 @@ function restoreApplicationState({ Database, currentDb, backupDbPath, currentSec
       }
     }
     const restore = currentDb.transaction(() => {
+      if (tableExists(currentDb, 'notification_runtime')) require('./notification-outbox').suppressNotificationDeliveries(currentDb);
       currentDb.prepare('DELETE FROM notification_events').run();
       currentDb.prepare('DELETE FROM sync_jobs').run();
+      const labels = require('./mail-labels').restoreMailLabels(currentDb, source, restoredOwnerIds);
+      // Background consent and work belong to the running installation, not an imported archive.
+      if (tableExists(currentDb, 'mail_auto_preview_pending')) currentDb.exec('DELETE FROM mail_auto_preview_pending');
+      if (tableExists(currentDb, 'mail_rules') && tableColumns(currentDb, 'mail_rules').includes('auto_after_job_id')) currentDb.exec('UPDATE mail_rules SET auto_after_job_id=NULL');
+      if (tableExists(currentDb, 'mail_tasks') && tableColumns(currentDb, 'mail_tasks').includes('automatic')) currentDb.exec('UPDATE mail_tasks SET automatic=1 WHERE automatic=2');
       currentDb.prepare('DELETE FROM accounts').run();
 
       const accounts = copyTableRows(currentDb, source, 'accounts', {
@@ -283,9 +399,11 @@ function restoreApplicationState({ Database, currentDb, backupDbPath, currentSec
         }
       }
       const now = new Date().toISOString();
+      const restoredUnfinished = [];
       const jobs = copyTableRows(currentDb, source, 'sync_jobs', {
         transform(row) {
           if (row.status === 'queued' || row.status === 'running') {
+            restoredUnfinished.push({ id: row.id, accountId: row.account_id, running: row.status === 'running' && row.transport_state !== 'unreleased', mirror: row.mirror_at_release === 1 });
             row.status = 'interrupted';
             row.finished_at = now;
             row.pid = null;
@@ -293,29 +411,39 @@ function restoreApplicationState({ Database, currentDb, backupDbPath, currentSec
           return row;
         },
       });
-      const notifications = copyTableRows(currentDb, source, 'notification_events');
-      const settings = mergeSettings(currentDb, source);
-
-      fs.renameSync(currentSecretsDir, oldSecrets);
-      currentSecretsMoved = true;
-      fs.renameSync(preparedSecrets, currentSecretsDir);
-      secretsSwapped = true;
-      return { accounts, jobs, notifications, settings, ...secretResult };
-    });
-    const result = restore();
-    transactionCommitted = true;
-    try { fs.rmSync(oldSecrets, { recursive: true, force: true }); } catch (_) {}
-    return result;
-  } catch (error) {
-    if (currentSecretsMoved && !transactionCommitted) {
-      try {
-        if (secretsSwapped) fs.rmSync(currentSecretsDir, { recursive: true, force: true });
-        fs.renameSync(oldSecrets, currentSecretsDir);
-      } catch (rollbackError) {
-        error.rollbackError = rollbackError;
+      if (restoredUnfinished.length && tableColumns(currentDb, 'sync_jobs').includes('result_known')
+          && tableColumns(currentDb, 'accounts').includes('sync_result_unknown')) {
+        const markJob = currentDb.prepare(`UPDATE sync_jobs SET pid_identity=NULL, next_attempt_at=NULL,
+          result_known=?, result_code=? WHERE id=?`);
+        const review = tableColumns(currentDb, 'accounts').includes('sync_review_required')
+          ? 'sync_review_required=MAX(sync_review_required,?),' : '';
+        const markAccount = currentDb.prepare(`UPDATE accounts SET sync_result_unknown=1,${review}last_sync_at=?,
+          last_finished_job_id=?,last_sync_status='interrupted',last_sync_category=NULL,
+          last_sync_message='备份包含未确认结果的同步任务，请核对后再重试'
+          WHERE id=? AND (last_finished_job_id IS NULL OR last_finished_job_id < ?)`);
+        for (const job of restoredUnfinished) {
+          markJob.run(job.running ? 0 : 1, job.running ? 'restore_unknown' : 'restore_cancelled', job.id);
+          if (job.running) markAccount.run(...(review ? [job.mirror ? 1 : 0] : []), now, job.id, job.accountId, job.id);
+        }
       }
-    }
-    throw error;
+      // Delivery attempts and receipts belong to this installation. Never import
+      // another generation's cooldown or pending work from a backup.
+      const notifications = 0;
+      const settings = mergeSettings(currentDb, source);
+      const savedSearches = restoreSavedSearches(currentDb, source, restoredOwnerIds);
+      const rules = restoreRules(currentDb, source, restoredOwnerIds, labels.ids);
+      // Live task history remains auditable, but a restore changes its directory universe.
+      // Never import or reactivate preview/authorization state from a backup.
+      if (tableExists(currentDb, 'mail_tasks')) currentDb.prepare(`UPDATE mail_tasks
+        SET resumable=0,expires_at=NULL,current_folder=NULL,
+          status=CASE WHEN kind='rule_preview' OR status IN ('queued','running','cancelling') THEN 'invalidated' ELSE status END,
+          error=CASE WHEN status!='completed' OR kind='rule_preview' THEN '应用已恢复，请重新选择范围创建任务' ELSE error END`).run();
+
+      moveCredentials(root, currentSecretsDir, item);
+      recordRestoreResult(currentDb, item.id, 'committed');
+      return { accounts, jobs, notifications, settings, ...savedSearches, ...rules, ...labels.summary, ...secretResult };
+    });
+    return restore();
   } finally {
     source.close();
   }
@@ -341,7 +469,7 @@ function cleanupStaleRestoreWorkdirs(tmpDir, nowMs = Date.now(), maxAgeMs = 24 *
     if (!entry.isDirectory() || !entry.name.startsWith('web-restore-')) continue;
     const target = path.join(tmpDir, entry.name);
     try {
-      if (nowMs - fs.statSync(target).mtimeMs < maxAgeMs) continue;
+      if (fs.existsSync(path.join(target, 'old-secrets')) || nowMs - fs.statSync(target).mtimeMs < maxAgeMs) continue;
       fs.rmSync(target, { recursive: true, force: true });
       removed++;
     } catch (_) {}
@@ -357,6 +485,8 @@ module.exports = {
   inspectRestoreDatabase,
   prepareRestoredSecrets,
   preserveSecretOwnership,
+  restoreSavedSearches,
+  restoreRules,
   restoreApplicationState,
   cleanupOldRestorePoints,
   cleanupStaleRestoreWorkdirs,

@@ -22,6 +22,7 @@ class LoginRateLimiter {
   constructor(database, { now = () => Date.now() } = {}) {
     this.db = database;
     this.now = now;
+    this.pending = new Map();
   }
 
   keys(ip, username) {
@@ -40,6 +41,29 @@ class LoginRateLimiter {
     const nowMs = this.now();
     const keys = this.keys(ip, username);
     return Math.max(this.lockedUntil(keys.userIp, nowMs), this.lockedUntil(keys.ip, nowMs));
+  }
+
+  reserve(ip, username) {
+    const nowMs = this.now();
+    const keys = this.keys(ip, username);
+    const lockedUntil = this.check(ip, username);
+    if (lockedUntil) return { lockedUntil };
+    for (const [key, maximum] of [[keys.userIp, USER_IP_MAX_FAILURES], [keys.ip, IP_MAX_FAILURES]]) {
+      const row = this.db.prepare('SELECT fail_count,locked_until,window_started FROM login_attempts WHERE ip=?').get(key);
+      const failures = row && Number(row.window_started) > 0 && nowMs - Number(row.window_started) < WINDOW_MS
+        ? Number(row.fail_count || 0) : 0;
+      if (failures + (this.pending.get(key) || 0) >= maximum) return { lockedUntil: nowMs + 1000 };
+    }
+    for (const key of Object.values(keys)) this.pending.set(key, (this.pending.get(key) || 0) + 1);
+    let released = false;
+    return { lockedUntil: 0, release: () => {
+      if (released) return;
+      released = true;
+      for (const key of Object.values(keys)) {
+        const count = this.pending.get(key) - 1;
+        if (count) this.pending.set(key, count); else this.pending.delete(key);
+      }
+    } };
   }
 
   record(key, maximum, nowMs) {

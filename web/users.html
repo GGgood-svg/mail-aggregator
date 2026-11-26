@@ -21,7 +21,7 @@
         <div class="form-group"><label>用户名</label><input id="new-username" maxlength="64" autocomplete="off"></div>
         <div class="form-group"><label>初始密码（至少10位）</label><input id="new-password" type="password" autocomplete="new-password"></div>
       </div>
-      <div class="form-group"><label>角色</label><select id="new-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></div>
+      <div class="form-group"><label>角色</label><select id="new-role"><option value="user">普通用户</option><option value="admin">管理员</option><option value="operator">只读运维</option></select></div>
       <button class="btn" id="create-btn">创建用户</button>
       <span id="create-msg" class="hint" style="margin-left:10px"></span>
     </div>
@@ -36,11 +36,11 @@
 async function loadUsers() {
   const users = await Api.get('/api/users');
   document.getElementById('user-list').innerHTML = users.map((u) => {
-    const protectedAdmin = u.role === 'admin' && !currentUser.primaryAdmin;
+    const protectedAdmin = ['admin', 'operator'].includes(u.role) && !currentUser.primaryAdmin;
     const self = u.id === currentUser.id;
     return `<tr>
     <td>${escapeHtml(u.username)}${u.id === currentUser.id ? '（当前）' : ''}</td>
-    <td><select data-role="${u.id}" ${self || !currentUser.primaryAdmin ? 'disabled' : ''}><option value="user" ${u.role === 'user' ? 'selected' : ''}>普通用户</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>管理员</option></select></td>
+    <td><select data-role="${u.id}" ${self || !currentUser.primaryAdmin ? 'disabled' : ''}><option value="user" ${u.role === 'user' ? 'selected' : ''}>普通用户</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>管理员</option><option value="operator" ${u.role === 'operator' ? 'selected' : ''}>只读运维</option></select></td>
     <td>${u.account_count}</td><td><select data-enabled="${u.id}" ${self || protectedAdmin ? 'disabled' : ''}><option value="1" ${u.enabled ? 'selected' : ''}>启用</option><option value="0" ${!u.enabled ? 'selected' : ''}>停用</option></select></td>
     <td><button class="btn secondary" onclick="saveUser(${u.id})" ${self || protectedAdmin ? 'disabled' : ''}>保存</button> <button class="btn danger" onclick="deleteUser(${u.id})" ${self || protectedAdmin ? 'disabled' : ''}>删除</button></td>
   </tr>`;
@@ -67,7 +67,7 @@ document.getElementById('create-btn').onclick = async () => {
   applyBranding();
   const me = await requireLogin();
   if (!me || me.role !== 'admin') { location.href='/index.html'; return; }
-  if (!me.primaryAdmin) document.querySelector('#new-role option[value="admin"]').disabled = true;
+  if (!me.primaryAdmin) for (const option of document.querySelectorAll('#new-role option:not([value="user"])')) option.disabled = true;
   renderNav('users');
   await loadUsers();
 })();

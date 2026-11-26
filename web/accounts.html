@@ -38,18 +38,74 @@
 </div>
 <script src="/js/api.js"></script>
 <script src="/js/branding.js"></script>
+<dialog id="sync-pause-dialog" aria-labelledby="sync-pause-label">
+  <form id="sync-pause-form">
+    <label id="sync-pause-label" for="sync-pause-time" data-i18n-skip></label>
+    <input id="sync-pause-time" type="datetime-local" required>
+    <p id="sync-pause-hint" data-i18n-skip></p>
+    <p id="sync-pause-error" role="alert" data-i18n-skip></p>
+    <button type="submit" class="btn">保存</button>
+    <button type="button" class="btn secondary" id="sync-pause-close">取消</button>
+  </form>
+</dialog>
 <script src="/js/i18n.js"></script>
+<script src="/js/sync-availability-ui.js"></script>
+<script src="/js/account-probe.js"></script>
 <script>
 function statusBadge(a) {
+  const state = a.syncAvailability?.state;
+  if (state === 'blocked' || state === 'unknown') return `<span class="badge failed" data-i18n-skip>${escapeHtml(syncUi(state))}</span>`;
   if (a.auth_type === 'oauth2' && !a.oauthAuthorized) return `<span class="badge failed">待OAuth授权</span>`;
-  if (a.syncing) return `<span class="badge running">同步中</span>`;
+  if (a.syncing) return `<span class="badge running" data-i18n-skip>${escapeHtml(syncUi(a.syncAvailability?.phase || 'transfer'))}</span>`;
   if (a.queued) return `<span class="badge queued">排队中</span>`;
   return `<span class="badge ${a.last_sync_status || 'idle'}">${statusLabel(a.last_sync_status)}</span>`;
 }
 
+function nextSyncLabel(account) {
+  const translate = value => window.I18n ? window.I18n.t(value) : value;
+  if (!account.enabled) return translate('已禁用');
+  if (!account.hasSecret) return translate('等待配置凭据');
+  if (account.syncing || account.queued || !account.nextSyncAt) return translate('等待当前任务完成');
+  const next = new Date(account.nextSyncAt);
+  if (Number.isNaN(next.getTime()) || next.getTime() <= Date.now()) return translate('等待调度');
+  return `${translate('下次同步')}：${next.toLocaleString((window.I18n && window.I18n.locale) || 'zh-CN')}`;
+}
+
+function availabilityDetails(a) {
+  const s = a.syncAvailability;
+  if (!s) return `<div class="hint">${escapeHtml(nextSyncLabel(a))}</div>`;
+  const info = [['lastAttempt', s.lastAttemptAt], ['lastSuccess', s.lastSuccessAt],
+    ['nextScheduled', s.nextScheduledAt], ['nextRetry', s.nextRetryAt]]
+    .filter(([key, value]) => value || key.startsWith('last'));
+  const locale = window.I18n?.locale || 'zh-CN';
+  const times = info.map(([key, value]) => `<div class="hint" data-i18n-skip>${escapeHtml(syncUi(key))}：${escapeHtml(value ? new Date(value).toLocaleString(locale) : syncUi('unknownTime'))}</div>`).join('');
+  return times + (s.block ? `<div class="hint" data-i18n-skip>${escapeHtml(syncUi(s.block.code))}</div>` : '');
+}
+
+const syncPauseDialog = document.getElementById('sync-pause-dialog');
+const syncPauseForm = document.getElementById('sync-pause-form');
+let syncPauseAccount = null;
+document.getElementById('sync-pause-close').addEventListener('click', () => syncPauseDialog.close());
+syncPauseForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const input = document.getElementById('sync-pause-time');
+  const error = document.getElementById('sync-pause-error');
+  const value = new Date(input.value);
+  const now = Date.now();
+  if (!Number.isFinite(+value) || +value <= now || +value > now + 30 * 86400000) { error.textContent = syncUi('badPause'); return; }
+  const save = syncPauseForm.querySelector('button[type=submit]');
+  save.disabled = true;
+  try {
+    await Api.patch(`/api/accounts/${syncPauseAccount}/sync-schedule`, { pauseUntil: value.toISOString() });
+    syncPauseDialog.close(); load();
+  } catch (e) { error.textContent = e.status === 400 ? syncUi('badPause') : e.message; }
+  finally { save.disabled = false; }
+});
+
 async function load() {
   applyBranding();
   await requireLogin();
+  await window.I18n?.ready;
   renderNav('accounts');
   try {
     const accounts = await Api.get('/api/accounts');
@@ -71,17 +127,19 @@ function render(accounts) {
   body.innerHTML = accounts
     .map((a) => {
       const busy = a.syncing || a.queued;
-      return `<tr data-id="${a.id}">
+      return `<tr data-id="${a.id}" data-review="${a.syncAvailability?.block?.code === 'confirm_unknown_result' ? '1' : '0'}">
         <td data-i18n-skip>${escapeHtml(a.name)}</td>
         <td data-i18n-skip>${escapeHtml(a.username)}</td>
         <td>${a.destination_mode === 'subfolder' ? `隔离：<span data-i18n-skip>${escapeHtml(a.destination_folder)}</span>` : '原样汇聚'}</td>
         <td>${statusBadge(a)}</td>
-        <td>${a.display.totalMessages}</td>
-        <td>${fmtTime(a.last_sync_at)}</td>
+        <td>${a.display.totalMessages}<div class="hint" data-i18n-skip>${escapeHtml(syncUi('targetFolders'))}：${a.display.totalFolders}</div></td>
+        <td>${availabilityDetails(a)}${!busy && a.syncAvailability?.state !== 'blocked' && ['failed', 'timed_out'].includes(a.last_sync_status) && a.last_sync_message ? `<div class="hint">${escapeHtml(a.last_sync_message)}</div>` : ''}</td>
         <td>${a.enabled ? '是' : '否'}</td>
         <td>
           <button class="btn small secondary" data-action="sync" ${busy || !a.hasSecret ? 'disabled' : ''}>立即同步</button>
-          <button class="btn small secondary" data-action="test" ${a.syncing || !a.hasSecret ? 'disabled' : ''}>测试连接</button>
+          <button class="btn small secondary" data-action="test" data-i18n-skip ${busy || !a.hasSecret ? 'disabled' : ''}>${escapeHtml(AccountProbe.label('test'))}</button>
+          <button class="btn small secondary" data-action="plan" data-i18n-skip ${busy || !a.hasSecret ? 'disabled' : ''}>${escapeHtml(AccountProbe.label('plan'))}</button>
+          ${a.enabled ? `<button class="btn small secondary" data-action="${a.syncAvailability?.pausedUntil ? 'resume-schedule' : 'pause-schedule'}" data-i18n-skip>${escapeHtml(syncUi(a.syncAvailability?.pausedUntil ? 'resume' : 'pause'))}</button>` : ''}
           <a class="btn small secondary" href="/account-edit.html?id=${a.id}">编辑</a>
           <a class="btn small secondary" href="/logs.html?account=${a.id}">日志</a>
           <button class="btn small danger" data-action="delete" ${busy ? 'disabled' : ''}>删除</button>
@@ -100,30 +158,32 @@ async function handleAction(btn) {
   const id = row.dataset.id;
   const action = btn.dataset.action;
 
+  if (action === 'pause-schedule') {
+    syncPauseAccount = id;
+    syncPauseForm.reset();
+    document.getElementById('sync-pause-label').textContent = syncUi('pauseUntil');
+    document.getElementById('sync-pause-hint').textContent = syncUi('pauseHint');
+    document.getElementById('sync-pause-error').textContent = '';
+    syncPauseDialog.showModal();
+    return;
+  }
+  if (action === 'resume-schedule') {
+    try { await Api.patch(`/api/accounts/${id}/sync-schedule`, { pauseUntil: null }); load(); }
+    catch (error) { toast(error.message, 'error'); }
+    return;
+  }
   if (action === 'sync') {
+    const confirmUnknown = row.dataset.review === '1';
+    if (confirmUnknown && !confirm(syncUi('review'))) return;
     try {
-      await Api.post(`/api/accounts/${id}/sync`);
+      await Api.post(`/api/accounts/${id}/sync`, { confirmUnknown });
       toast('已加入同步队列');
       load();
     } catch (e) {
       toast(e.message, 'error');
     }
-  } else if (action === 'test') {
-    btn.disabled = true;
-    btn.textContent = '测试中...(60秒超时)';
-    try {
-      const result = await Api.post(`/api/accounts/${id}/test`);
-      if (result.ok) {
-        toast(`✅ 连接成功,找到 ${result.folders ?? '?'} 个文件夹`);
-      } else {
-        toast(`❌ ${result.message}`, 'error');
-      }
-    } catch (e) {
-      toast(e.message, 'error');
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '测试连接';
-    }
+  } else if (action === 'test' || action === 'plan') {
+    AccountProbe.open(action, id, { onQueued: load, confirmUnknown: row.dataset.review === '1' });
   } else if (action === 'delete') {
     const proceed = confirm('删除该账号配置?(仅删除账号配置和cache,不会删除本地已同步的邮件)');
     if (!proceed) return;

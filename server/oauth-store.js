@@ -1,5 +1,5 @@
 const path = require('path');
-const fs = require('fs');
+const { randomUUID } = require('node:crypto');
 const { db, DIRS } = require('./db');
 const { writeSecret } = require('./credentials');
 const {
@@ -9,30 +9,22 @@ const {
 } = require('./oauth-core');
 const { isValidSecret } = require('./validation');
 
-const CLIENT_CONFIG_PATH = path.join(DIRS.secrets, 'oauth-clients.json');
+const { CLIENT_FILE, readClientConfig, readLocalOAuthBase } = require('./oauth-config-file');
+const CLIENT_CONFIG_PATH = path.join(DIRS.secrets, CLIENT_FILE);
 
-function readClients() {
-  if (!fs.existsSync(CLIENT_CONFIG_PATH)) return { google: {}, microsoft: { tenant: 'common' } };
-  try {
-    const parsed = JSON.parse(fs.readFileSync(CLIENT_CONFIG_PATH, 'utf8'));
-    return {
-      google: parsed.google || {},
-      microsoft: { tenant: 'common', ...(parsed.microsoft || {}) },
-    };
-  } catch (_) {
-    throw new Error('OAuth2客户端配置文件损坏');
-  }
+function readClients(parsed = readClientConfig(DIRS.secrets)) {
+  return { google: { ...(parsed?.google || {}) }, microsoft: { tenant: 'common', ...(parsed?.microsoft || {}) } };
 }
 
 function publicBaseUrl() {
-  const row = db.prepare("SELECT value FROM settings WHERE key='oauth_public_base_url'").get();
-  return row ? row.value : '';
+  return readLocalOAuthBase(db, DIRS.secrets);
 }
 
 function publicOAuthConfig() {
-  const clients = readClients();
+  const config = readClientConfig(DIRS.secrets);
+  const clients = readClients(config);
   return {
-    publicBaseUrl: publicBaseUrl(),
+    publicBaseUrl: readLocalOAuthBase(db, DIRS.secrets, config),
     google: {
       clientId: clients.google.clientId || '',
       hasClientSecret: !!clients.google.clientSecret,
@@ -57,6 +49,7 @@ function saveOAuthConfig(input) {
   const baseUrl = normalizePublicBaseUrl(input.publicBaseUrl);
   if (!baseUrl) throw new Error('OAuth2公开地址必须是HTTPS站点根地址；仅localhost允许HTTP');
   const clients = readClients();
+  const before = JSON.stringify(clients);
   clients.google.clientId = normalizedClientId(input.googleClientId, 'Google');
   clients.microsoft.clientId = normalizedClientId(input.microsoftClientId, 'Microsoft');
   const tenant = String(input.microsoftTenant || 'common').trim();
@@ -74,9 +67,11 @@ function saveOAuthConfig(input) {
     }
   }
 
-  writeSecret(CLIENT_CONFIG_PATH, `${JSON.stringify(clients)}\n`);
-  db.prepare(`INSERT INTO settings(key,value) VALUES('oauth_public_base_url',?)
-    ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(baseUrl);
+  const previous = JSON.parse(before);
+  for (const provider of ['google', 'microsoft']) {
+    if (JSON.stringify(clients[provider]) !== JSON.stringify(previous[provider])) clients[provider].generation = randomUUID();
+  }
+  writeSecret(CLIENT_CONFIG_PATH, `${JSON.stringify({ ...clients, publicBaseUrl: baseUrl })}\n`);
   return publicOAuthConfig();
 }
 
@@ -93,6 +88,7 @@ function getOAuthClient(accountProvider) {
     clientId: client.clientId,
     clientSecret: client.clientSecret,
     tenant: provider === 'microsoft' ? client.tenant || 'common' : undefined,
+    generation: client.generation || null,
   };
 }
 

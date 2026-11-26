@@ -7,8 +7,12 @@ const {
   hasSourceSecret,
   hasOAuthTokens,
 } = require('./credentials');
-const { notifySyncFailure } = require('./notifications');
-const { createOutputCollector, categorizeTestError } = require('./sync-output');
+const notifications = require('./notifications');
+const { settleSyncJob, markSyncTransferStarted } = require('./sync-settlement');
+const { blockedOutcome, deferQueuedSync, saveAccountBlock, needsSyncReview } = require('./sync-availability');
+const { providerGroup, providerConcurrency, readProviderCooldown, recordProviderCooldown } = require('./sync-provider-policy');
+const { parseSqliteUtc } = require('./scheduler-core');
+const { createOutputCollector, categorizeSyncFailure } = require('./sync-output');
 const { createCappedLog } = require('./capped-log');
 const { createProcessTerminator } = require('./process-terminator');
 const { applyDestinationStrategy } = require('./folder-strategy');
@@ -19,10 +23,11 @@ const jobStore = require('./job-store');
 const maintenanceLock = require('./maintenance-lock');
 const { assertPublicImapHost, assertSecureAccountEndpoint } = require('./network-policy');
 const { getProvider } = require('./providers');
-const { syncDiskCapacity } = require('./resource-limits');
+const { syncDiskCapacity, integerSetting } = require('./resource-limits');
 const { childEnvironment } = require('./child-environment');
 const { applyTargetTransport } = require('./target-transport');
-const { stateWritesBlocked } = require('./state-lock');
+const { runAccountImapProbe, probeUnavailable, probeError } = require('./account-imap-probe');
+const { stateWritesBlocked, withStateLock } = require('./state-lock');
 
 // account_id -> true,表示该账号当前正在同步中(内存锁,和DB的status='running'保持一致,
 // 用于同一进程内的快速判断;真正防重复排队的兜底保证来自DB的部分唯一索引)
@@ -32,7 +37,41 @@ const runningLocks = new Map();
 const runningChildren = new Map();
 const connectionTests = new Map();
 const preparingJobs = new Set();
-let queueFailed = false;
+const preparingControls = new Map();
+let queueFault = null;
+const pendingResults = new Map();
+const RECHECK_QUEUE_MS = 15000;
+
+function degradeQueue(error, message, now = Date.now()) {
+  const prior = queueFault;
+  const delay = prior ? Math.min((prior.delay || RECHECK_QUEUE_MS) * 2, 60000) : RECHECK_QUEUE_MS;
+  queueFault = { since: prior?.since || new Date(now).toISOString(), nextProbeAt: new Date(now + delay).toISOString(), delay };
+  console.error(`[sync] ${message}:`, error.message);
+}
+
+function syncQueueHealth() {
+  return queueFault ? { degraded: true, since: queueFault.since, nextProbeAt: queueFault.nextProbeAt,
+    pendingResults: pendingResults.size } : { degraded: false, since: null, nextProbeAt: null, pendingResults: 0 };
+}
+
+function probeQueue() {
+  if (!queueFault || Date.now() < Date.parse(queueFault.nextProbeAt)) return !queueFault;
+  if (shuttingDown || maintenanceLock.current() === 'restore' || stateWritesBlocked(DIRS.root)) return false;
+  try {
+    db.prepare(`INSERT INTO settings(key,value) VALUES('sync_queue_last_probe_at',?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(new Date().toISOString());
+    for (const [id, entry] of pendingResults) {
+      commitJob(id, entry.accountId, entry.result);
+      pendingResults.delete(id);
+    }
+    if (!reconcileStaleJobs()) throw new Error('上次运行的同步进程仍未退出');
+    queueFault = null;
+    return true;
+  } catch (error) {
+    degradeQueue(error, '队列仍需核对');
+    return false;
+  }
+}
 
 function getSetting(key, fallback) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -51,7 +90,7 @@ function getAccount(accountId) {
 
 // 构建imapsync参数数组。密码使用passfile，OAuth访问令牌也只传权限600的
 // 文件路径，任何凭据都不会出现在进程命令行。
-function buildArgs(account, { justFolders = false, sourceAddress } = {}) {
+function buildArgs(account, { sourceAddress } = {}) {
   if (account.destination_mode === 'flat') {
     const owner = db.prepare('SELECT mail_access_all FROM admin_users WHERE id=?').get(account.owner_user_id);
     if (account.mailbox_folder || !owner || !owner.mail_access_all) throw new Error('公共目录仅允许旧版主管理员账号使用');
@@ -86,11 +125,7 @@ function buildArgs(account, { justFolders = false, sourceAddress } = {}) {
   applySourceTransport(args, account);
 
   applyDestinationStrategy(args, account);
-  applySyncPolicy(args, account, { justFolders });
-
-  if (justFolders) {
-    args.push('--justfolders');
-  }
+  applySyncPolicy(args, account);
 
   return applyTargetTransport(args, local);
 }
@@ -131,44 +166,85 @@ function accountHasCredential(account) {
     : hasSourceSecret(account.id);
 }
 
-function storageCapacity(account = null) {
+function storageTarget(account = null) {
   const local = require('./config').localDovecot();
   if (account) local.user = account.local_user;
-  return syncDiskCapacity(db, DIRS, local);
+  return local;
 }
 
-function syncCapacityReason(account) {
-  const capacity = storageCapacity(account);
+function storageCapacity(account = null, priority = 1, fresh = false) {
+  return syncDiskCapacity(db, DIRS, storageTarget(account), { priority, fresh });
+}
+
+function capacityReason(capacity) {
+  // The reserve can change after an asynchronous probe has completed.
+  if (capacity.status === 'busy') return 'disk_check_busy';
+  if (Number(capacity.availableInodes) === 0 && capacity.availableInodes != null) return 'low_inodes';
+  const minimum = integerSetting(db, 'min_free_disk_mb', 512, 64, 1048576);
+  if (capacity.availableMb !== undefined && capacity.availableMb !== null && capacity.availableMb < minimum) return 'low_disk';
   if (capacity.ok) return null;
   return capacity.availableMb === null ? 'disk_check_failed' : 'low_disk';
+}
+
+function storageBlock(reason, capacity) {
+  return blockedOutcome(reason, Date.now(), undefined, capacity.scope === 'account' ? 'account' : 'system');
+}
+
+function accountIdentity(account) {
+  return JSON.stringify(Object.entries(account).filter(([key]) => !key.startsWith('last_')
+    && !key.startsWith('sync_block_') && !['sync_failure_count','sync_next_retry_at','sync_result_unknown','sync_review_required','sync_paused_until','sync_pause_started_at','sourceAddress'].includes(key)));
+}
+
+function providerBlock(account) {
+  const group = providerGroup(account);
+  const cooldown = readProviderCooldown(db, group);
+  if (cooldown) return blockedOutcome('provider_cooldown', Date.now(), cooldown);
+  const sameGroup = [...runningLocks.values(), ...[...connectionTests.values()].map(test => test.providerKey)]
+    .filter(key => key === group).length;
+  return sameGroup >= providerConcurrency(db, group) ? blockedOutcome('provider_busy') : null;
+}
+
+function recordBlock(account, outcome) {
+  if (account && outcome.block && !maintenanceActive() && (account.sync_block_code !== outcome.block.code
+      || account.sync_next_retry_at !== outcome.nextRetryAt || account.sync_block_scope !== outcome.block.scope)) saveAccountBlock(db, account.id, outcome);
+  return outcome;
+}
+
+function maintenanceActive() {
+  return shuttingDown || Boolean(queueFault) || maintenanceLock.current() === 'restore' || stateWritesBlocked(DIRS.root);
 }
 
 // ---- 排队/启动 ----
 // 循环填充可用并发名额,队首账号如果因为某种原因暂不可运行,跳过它继续检查
 // 下一个,而不是直接return导致整条队列被堵死。
 function drainQueue() {
-  try { drainQueueUnsafe(); }
-  catch (error) {
-    queueFailed = true;
-    console.error('[sync] 队列读取失败，已暂停启动新任务:', error.message);
-  }
+  try { if (probeQueue()) drainQueueUnsafe(); }
+  catch (error) { degradeQueue(error, '队列读取失败，已暂停启动新任务'); }
 }
 
 function drainQueueUnsafe() {
-  if (shuttingDown || queueFailed || maintenanceLock.current() === 'restore' || stateWritesBlocked(DIRS.root)) return;
+  if (maintenanceActive()) return;
   let guard = 0; // 防御性上限,避免任何未预见的逻辑错误导致死循环
   while (currentRunningCount() + connectionTests.size < maxConcurrent() && guard < 100) {
     guard++;
     const queued = jobStore.findNextQueuedJob(db);
     if (!queued) break;
     const preparation = runJob(queued).catch((error) => {
-      queueFailed = true;
-      runningLocks.delete(Number(queued.account_id));
-      console.error('[sync] 队列准备失败，已暂停启动新任务:', error.message);
-      try { db.prepare("UPDATE sync_jobs SET status='failed',finished_at=datetime('now') WHERE id=?").run(queued.id); } catch (_) {}
+      preparingControls.delete(Number(queued.account_id));
+      const current = jobStore.getJobForAccount(db, queued.id, queued.account_id);
+      if (current && ['queued', 'running'].includes(current.status)) {
+        finishJob(queued.id, queued.account_id, { status: 'failed', expected: current.status, category: 'spawn_failed',
+          message: '同步准备失败，请检查应用目录和日志' });
+      } else {
+        runningLocks.delete(Number(queued.account_id));
+      }
     });
-    preparingJobs.add(preparation);
-    preparation.finally(() => preparingJobs.delete(preparation));
+    const guardedPreparation = preparation.catch(error => {
+      runningLocks.delete(Number(queued.account_id));
+      degradeQueue(error, '队列准备结果无法核对');
+    });
+    preparingJobs.add(guardedPreparation);
+    guardedPreparation.finally(() => preparingJobs.delete(guardedPreparation));
     if (!runningLocks.has(Number(queued.account_id))) break;
   }
 }
@@ -176,29 +252,69 @@ function drainQueueUnsafe() {
 async function runJob(job) {
   const account = getAccount(job.account_id);
   if (!account) {
-    db.prepare(
-      `UPDATE sync_jobs SET status='failed', finished_at=datetime('now') WHERE id=?`
-    ).run(job.id);
+    finishJob(job.id, job.account_id, { status: 'failed', expected: 'queued', category: 'configuration_changed', message: '账号已移除' });
     return;
   }
-  const capacity = storageCapacity(account);
-  if (!capacity.ok) {
-    const detail = capacity.availableMb === null
-      ? '无法检查服务器剩余磁盘空间'
-      : `服务器仅剩 ${capacity.availableMb} MB 可用空间（安全下限 ${capacity.minimumMb} MB）`;
-    db.prepare(`UPDATE sync_jobs SET status='failed',finished_at=datetime('now'),
-      exit_code=-1,duration_ms=0 WHERE id=?`).run(job.id);
-    db.prepare(`UPDATE accounts SET last_sync_at=datetime('now'),last_sync_status='failed',
-      last_sync_message=? WHERE id=?`).run(detail, account.id);
+  // Reserve before the first await so overlapping drains cannot select the
+  // same queued job or exceed the global sync/test concurrency budget.
+  const groupBlock = providerBlock(account);
+  runningLocks.set(account.id, providerGroup(account));
+  const preparation = { cancelled: false };
+  preparingControls.set(account.id, preparation);
+  const reserved = db.prepare(`UPDATE sync_jobs SET status='running',stage='preparing',result_code=NULL,next_attempt_at=NULL
+      WHERE id=? AND account_id=? AND status='queued'`).run(job.id, account.id);
+  if (reserved.changes !== 1) {
+    preparingControls.delete(account.id);
+    runningLocks.delete(account.id);
+    return;
+  }
+  const yieldSlot = () => {
+    preparingControls.delete(account.id);
+    runningLocks.delete(account.id);
+    setImmediate(drainQueue);
+  };
+  function checkSchedule(current) {
+    if (job.trigger_source !== 'scheduled') return false;
+    if (!current.enabled) {
+      preparingControls.delete(account.id);
+      finishJob(job.id, account.id, { status: 'cancelled', code: 'schedule_disabled', message: '定时同步已关闭，传输未开始' });
+      return true;
+    }
+    if (parseSqliteUtc(current.sync_paused_until) <= Date.now()) return false;
+    deferQueuedSync(db, job.id, account.id, blockedOutcome('account_paused', Date.now(), current.sync_paused_until));
+    yieldSlot();
+    return true;
+  }
+  if (checkSchedule(account)) return;
+  if (groupBlock) {
+    deferQueuedSync(db, job.id, account.id, groupBlock);
+    preparingControls.delete(account.id);
+    runningLocks.delete(account.id);
+    setImmediate(drainQueue);
+    return;
+  }
+  const identity = accountIdentity(account), target = JSON.stringify(storageTarget(account));
+  const capacity = await storageCapacity(account);
+  const current = getAccount(account.id);
+  if (preparation.cancelled || maintenanceActive() || !current || accountIdentity(current) !== identity
+      || JSON.stringify(storageTarget(current)) !== target) {
+    preparingControls.delete(account.id);
+    finishJob(job.id, account.id, { status: 'cancelled', code: preparation.cancelled ? 'cancelled' : 'preparation_cancelled', exitCode: -1,
+      durationMs: 0, message: '同步准备已取消、配置已变更或服务正在维护' });
+    return;
+  }
+  if (checkSchedule(current)) return;
+  const initialBlock = capacityReason(capacity);
+  if (initialBlock) {
+    deferQueuedSync(db, job.id, account.id, storageBlock(initialBlock, capacity));
+    preparingControls.delete(account.id);
+    runningLocks.delete(account.id);
     setImmediate(drainQueue);
     return;
   }
 
-  runningLocks.set(account.id, true);
-  db.prepare(`UPDATE sync_jobs SET status='running' WHERE id=?`).run(job.id);
-
   const logFile = path.join(DIRS.logs, `job-${job.id}.log`);
-  const logStream = createCappedLog(logFile, { maxBytes: maxJobLogBytes() });
+  let logStream;
   const startedAt = Date.now();
   let completed = false;
   let timeoutTimer = null;
@@ -211,12 +327,13 @@ async function runJob(job) {
   function completeOnce(result) {
     if (completed) return;
     completed = true;
+    preparingControls.delete(account.id);
     if (timeoutTimer) clearTimeout(timeoutTimer);
     if (diskTimer) clearInterval(diskTimer);
     if (terminator) terminator.complete();
 
     const commit = () => finishJob(job.id, account.id, result);
-    if (logStream.closed || logStream.destroyed) {
+    if (!logStream || logStream.closed || logStream.destroyed) {
       commit();
       return;
     }
@@ -225,36 +342,65 @@ async function runJob(job) {
     logStream.end();
   }
 
-  logStream.on('error', (err) => {
-    // 日志写入失败不应导致整个服务因未处理的 stream error 崩溃。同步结果仍由
-    // imapsync 的退出状态决定，日志路径会保留，读取时按文件是否存在处理。
-    console.error(`[sync] 任务 ${job.id} 日志写入失败: ${err.message}`);
-  });
-
   try {
     assertSecureAccountEndpoint(account, getProvider(account.provider));
     const addresses = await assertPublicImapHost(account.host);
     account.sourceAddress = addresses.find((item) => Number(item.family) === 4)?.address || addresses[0].address;
-    if (shuttingDown) {
-      completeOnce({ exitCode: -1, durationMs: Date.now() - startedAt, status: 'interrupted', message: '服务正在关闭', logFile });
+    // On Linux, bypass the short capacity cache before opening a log or
+    // starting a transfer. A mount may have disappeared during DNS checks.
+    const readyCapacity = await storageCapacity(account, 1, true);
+    const latest = getAccount(account.id);
+    if (preparation.cancelled || maintenanceActive() || !latest || accountIdentity(latest) !== identity
+        || JSON.stringify(storageTarget(latest)) !== target) {
+      completeOnce({ exitCode: -1, durationMs: Date.now() - startedAt, status: 'cancelled', code: preparation.cancelled ? 'cancelled' : 'preparation_cancelled',
+        message: '同步准备已取消、配置已变更或服务正在维护' });
+      return;
+    }
+    if (checkSchedule(latest)) return;
+    const readyBlock = capacityReason(readyCapacity);
+    if (readyBlock) {
+      deferQueuedSync(db, job.id, account.id, storageBlock(readyBlock, readyCapacity));
+      completed = true;
+      preparingControls.delete(account.id);
+      runningLocks.delete(account.id);
+      setImmediate(drainQueue);
       return;
     }
   } catch (error) {
-    const message = `安全策略拒绝连接: ${error.message}`;
-    logStream.write(`${message}\n`);
+    const category = categorizeSyncFailure(error.message, 'failed');
+    const message = category === 'network' ? '无法解析邮箱服务器地址，请检查网络和域名' : `安全策略拒绝连接: ${error.message}`;
+    // Preserve the error in job history without opening a log on storage that
+    // has not passed the final preflight.
     completeOnce({
       exitCode: -1,
       durationMs: Date.now() - startedAt,
       status: 'failed',
       message,
-      logFile,
+      category,
     });
     return;
   }
 
   try {
+  logStream = createCappedLog(logFile, { maxBytes: maxJobLogBytes() });
+  logStream.on('error', (err) => {
+    // Log failures cannot crash the Web process or decide the transfer result.
+    console.error(`[sync] 任务 ${job.id} 日志写入失败: ${err.message}`);
+  });
   const args = buildArgs(account, { justFolders: false, sourceAddress: account.sourceAddress });
-  const child = spawn('imapsync', args, { env: childEnvironment(DIRS.root) });
+  // On Linux, the child cannot touch remote mail until SQLite records its
+  // process identity. If the Web process exits earlier, EOF closes the gate.
+  // exec preserves the PID and start time across the transition to imapsync.
+  const gated = process.platform === 'linux';
+  const mirror = account.deletion_mode === 'mirror_messages';
+  // Without the Linux pipe gate this launch is already uncertain if the
+  // parent exits at spawn. Never classify that window as safe to requeue.
+  if (!gated) db.prepare(`UPDATE sync_jobs SET transport_state=NULL,mirror_at_release=? WHERE id=?`).run(mirror ? 1 : 0, job.id);
+  const child = gated
+    ? spawn('/bin/sh', ['-c', 'IFS= read -r gate && [ "$gate" = start ] && exec imapsync "$@"', 'mail-aggregator-sync', ...args],
+      { env: childEnvironment(DIRS.root) })
+    : spawn('imapsync', args, { env: childEnvironment(DIRS.root) });
+  if (gated) child.stdin.on('error', () => {});
   terminator = createProcessTerminator({ child, jobId: job.id });
   const requestTermination = (status, message) => terminator.request(status, message);
 
@@ -268,6 +414,7 @@ async function runJob(job) {
     completion,
     resolveCompletion,
   });
+  preparingControls.delete(account.id);
   // 任务运行期间日志页也要能读取正在增长的文件，因此日志路径必须在启动时
   // 就持久化，不能等到 finishJob() 才写入。
   // Persist only after error/close handlers have been installed below.
@@ -278,14 +425,30 @@ async function runJob(job) {
   }, timeoutMinutes * 60 * 1000);
   timeoutTimer.unref();
 
-  diskTimer = setInterval(() => {
-    const currentCapacity = storageCapacity(account);
-    if (currentCapacity.ok) return;
-    const reason = currentCapacity.availableMb === null
+  let diskCheckPending = false;
+  let capacityConfirmedAt = Date.now();
+  let storageFailureCode = null;
+  diskTimer = setInterval(async () => {
+    if (diskCheckPending || completed) return;
+    diskCheckPending = true;
+    let currentCapacity;
+    try { currentCapacity = await storageCapacity(account, 2); }
+    catch (_) { currentCapacity = { ok: false, availableMb: null }; }
+    finally { diskCheckPending = false; }
+    // A late result must never write to a closed log or stop a later job.
+    if (completed) return;
+    const unavailable = capacityReason(currentCapacity);
+    if (!unavailable) { capacityConfirmedAt = Date.now(); return; }
+    if (currentCapacity.status === 'busy' && Date.now() - capacityConfirmedAt < 15000) return;
+    const reason = unavailable === 'low_inodes'
+      ? '存储文件节点已用尽，正在安全终止同步'
+      : currentCapacity.failure === 'read_only' ? '同步依赖的存储已变为只读，正在安全终止同步'
+      : ['mount_changed','mount_required'].includes(currentCapacity.failure) ? '同步依赖的存储挂载已变化，正在安全终止同步'
+      : currentCapacity.availableMb === null
       ? '运行中无法确认剩余磁盘空间，正在安全终止同步'
       : `可用磁盘空间降至 ${currentCapacity.availableMb} MB（安全下限 ${currentCapacity.minimumMb} MB），正在终止同步`;
     logStream.write(`\n${reason}\n`);
-    requestTermination('failed', reason);
+    if (requestTermination('failed', reason)) storageFailureCode = storageBlock(unavailable, currentCapacity).block.code;
   }, 5000);
   diskTimer.unref();
 
@@ -304,7 +467,8 @@ async function runJob(job) {
       exitCode: -1,
       durationMs: Date.now() - startedAt,
       status: 'failed',
-      message: `无法启动 imapsync: ${err.message}`,
+      category: 'spawn_failed',
+      message: '无法启动 imapsync，请检查应用和服务日志',
       logFile,
     });
   });
@@ -313,42 +477,61 @@ async function runJob(job) {
     // imapsync的统计摘要行不一定只出现在stdout里,不同版本/不同触发路径下
     // 可能会写到stderr,所以解析前把两路输出合并再喂给parseSummary,
     // 而不是只看stdout。原始日志文件本来就已经完整包含stdout+stderr,不受影响。
-    const { summary } = output.finish();
+    const { summary, tail, sourceRateLimited } = output.finish();
     const termination = terminator.getTermination();
     const status = termination ? termination.status : code === 0 ? 'success' : 'failed';
+    const category = storageFailureCode && status === 'failed' ? storageFailureCode
+      : status === 'failed' || status === 'timed_out' ? categorizeSyncFailure(tail, status, sourceRateLimited) : null;
     const message =
       termination
         ? termination.message
         : code === 0
         ? `同步成功,复制 ${summary.messagesTransferred ?? 'N/A'},跳过 ${summary.messagesSkipped ?? 'N/A'}`
+        : category === 'provider_rate_limited' ? '邮箱服务商暂时限流，冷却后重试'
+        : category === 'auth_failed' ? '邮箱认证失败，请检查授权和本地邮箱凭据'
+        : category === 'network' ? '邮箱网络连接失败，请检查网络后重试'
+        : category === 'tls_failed' ? '邮箱 TLS 连接失败，请检查证书和服务器配置'
         : `imapsync 退出码 ${code},请查看日志`;
     completeOnce({
       exitCode: code,
       durationMs: Date.now() - startedAt,
       status,
       message,
+      category,
       logFile,
       summary,
+      ...(termination && status !== 'cancelled' && mirror ? { resultKnown: false } : {}),
     });
   });
-  db.prepare('UPDATE sync_jobs SET pid=?, log_file=? WHERE id=?').run(child.pid || null, logFile, job.id);
+  if (child.pid && markSyncTransferStarted(db, job.id, account.id,
+      { pid: child.pid, pidIdentity: procIdentity(child.pid), logFile, mirror, now: new Date().toISOString() })) {
+    if (gated) child.stdin.end('start\n');
+  } else if (child.pid) {
+    if (gated) child.stdin.end();
+    requestTermination('interrupted', '任务已不能继续，请检查服务状态');
+  }
   } catch (error) {
     const control = runningChildren.get(account.id);
     if (control) {
-      control.requestTermination('failed', '同步准备失败');
+      control.child.stdin?.destroy();
+      // Spawn may have succeeded while the SQLite start record failed. Stop
+      // this process and keep the external outcome unknown until reconciled.
+      control.requestTermination('interrupted', '任务启动状态无法确认，请核对同步结果');
+      degradeQueue(error, '同步进程已启动但无法保存其状态');
       logStream.write('同步准备失败，请检查服务日志\n');
       console.error('[sync] 同步准备失败:', error.message);
     } else {
-      completeOnce({ exitCode: -1, durationMs: Date.now() - startedAt, status: 'failed', message: '同步准备失败，请检查目录权限与配置', logFile });
+      completeOnce({ exitCode: -1, durationMs: Date.now() - startedAt, status: 'failed', message: '同步准备失败，请检查目录权限与配置', logFile: logStream ? logFile : null });
     }
   }
 }
 
 function finishJob(jobId, accountId, result) {
-  try { commitJob(jobId, accountId, result); }
+  const entry = { accountId, result: { ...result, finishedAt: result.finishedAt || new Date().toISOString() } };
+  try { commitJob(jobId, accountId, entry.result); }
   catch (error) {
-    queueFailed = true;
-    console.error('[sync] 任务结果写入失败，已暂停队列:', error.message);
+    pendingResults.set(jobId, entry);
+    degradeQueue(error, '任务结果写入失败，已暂停队列');
   } finally {
     runningLocks.delete(accountId);
     const control = runningChildren.get(accountId);
@@ -358,82 +541,67 @@ function finishJob(jobId, accountId, result) {
   }
 }
 
-function commitJob(jobId, accountId, { exitCode, durationMs, status, message, logFile, summary }) {
-  const s = summary || {};
-  db.prepare(
-    `UPDATE sync_jobs SET
-      finished_at = datetime('now'),
-      status = ?,
-      exit_code = ?,
-      duration_ms = ?,
-      host1_messages = ?,
-      host2_messages = ?,
-      host1_folders = ?,
-      host2_folders = ?,
-      messages_transferred = ?,
-      messages_skipped = ?,
-      errors = ?,
-      log_file = ?
-     WHERE id = ?`
-  ).run(
-    status,
-    exitCode,
-    durationMs,
-    s.host1Messages ?? null,
-    s.host2Messages ?? null,
-    s.host1Folders ?? null,
-    s.host2Folders ?? null,
-    s.messagesTransferred ?? null,
-    s.messagesSkipped ?? null,
-    s.errors ?? null,
-    logFile,
-    jobId
-  );
-
-  // 邮件总数/文件夹数/复制/跳过/错误 各自独立用COALESCE保留上一次可信值,
-  // 避免某个字段这次没解析出来就被误覆盖成空
-  db.prepare(
-    `UPDATE accounts SET
-      last_sync_at = datetime('now'),
-      last_sync_status = ?,
-      last_sync_message = ?,
-      last_host2_messages = COALESCE(?, last_host2_messages),
-      last_host2_folders = COALESCE(?, last_host2_folders),
-      last_transferred = COALESCE(?, last_transferred),
-      last_skipped = COALESCE(?, last_skipped),
-      last_errors = COALESCE(?, last_errors)
-     WHERE id = ?`
-  ).run(
-    status,
-    message,
-    s.host2Messages ?? null,
-    s.host2Folders ?? null,
-    s.messagesTransferred ?? null,
-    s.messagesSkipped ?? null,
-    s.errors ?? null,
-    accountId
-  );
-
-  if (status === 'success') {
-    db.prepare('DELETE FROM notification_events WHERE account_id=?').run(accountId);
-  } else if (status === 'failed' || status === 'timed_out') {
-    const account = getAccount(accountId);
-    if (account) notifySyncFailure(account, message, jobId).catch((error) => console.error('[notifications]', error.message));
+function commitJob(jobId, accountId, result) {
+  const settled = settleSyncJob(db, jobId, accountId, result, (store, intent) => {
+    if (intent.category === 'provider_rate_limited') {
+      const account = getAccount(accountId);
+      if (account) recordProviderCooldown(store, providerGroup(account), intent.occurredAt);
+    }
+    notifications.recordSyncNotificationIntent?.(store, intent);
+  });
+  if (settled.intent && notifications.wakeSyncNotificationDelivery) {
+    try { notifications.wakeSyncNotificationDelivery(); } catch (error) { console.error('[notifications] 无法唤醒派送:', error.message); }
   }
+  return settled;
 }
 
 // 供API/Scheduler调用:触发一次同步。
 // 如果该账号已经有 queued 或 running 的任务,直接拒绝,不再插入新记录。
-function triggerSync(accountId) {
-  if (shuttingDown || queueFailed || maintenanceLock.current() === 'restore') return { ok: false, reason: 'maintenance' };
+async function triggerSync(accountId, { authorize = null, enabledOnly = false,
+  triggerSource = enabledOnly ? 'scheduled' : 'manual', ownerUserId = null, confirmUnknown = false } = {}) {
+  if (maintenanceActive()) return blockedOutcome(queueFault ? 'queue_degraded' : 'maintenance', Date.now(), queueFault?.nextProbeAt);
   const account = getAccount(accountId);
-  if (!account) return { ok: false, reason: 'not_found' };
-  if (!accountHasCredential(account)) return { ok: false, reason: 'missing_credentials' };
-  const capacityReason = syncCapacityReason(account);
-  if (capacityReason) return { ok: false, reason: capacityReason };
-
+  if (!account || (ownerUserId !== null && Number(account.owner_user_id) !== Number(ownerUserId))) return { ok: false, reason: 'not_found' };
+  if (!accountHasCredential(account)) {
+    const missing = blockedOutcome(account.auth_type === 'oauth2' ? 'authorization_required' : 'missing_credentials');
+    return recordBlock(account, missing);
+  }
+  if (needsSyncReview(account) && !confirmUnknown) {
+    return blockedOutcome('confirm_unknown_result');
+  }
+  const pausedUntil = parseSqliteUtc(account.sync_paused_until);
+  if (triggerSource === 'scheduled' && pausedUntil > Date.now()) return blockedOutcome('account_paused', Date.now(), account.sync_paused_until);
+  if (triggerSource === 'scheduled' && parseSqliteUtc(account.sync_next_retry_at) > Date.now() && account.sync_block_code) {
+    // A scheduled retry is driven by durable state. Manual attempts may recheck
+    // capacity sooner, but still cannot bypass the underlying safety limit.
+    const currentBlock = { low_space: 'low_disk', low_inodes: 'low_inodes', capacity_unavailable: 'disk_check_failed',
+      capacity_busy: 'disk_check_busy', provider_cooldown: 'provider_cooldown', provider_busy: 'provider_busy' }[account.sync_block_code];
+    if (currentBlock) return blockedOutcome(currentBlock, Date.now(), account.sync_next_retry_at, account.sync_block_scope ?? undefined);
+  }
   if (isAccountLocked(accountId)) return { ok: false, reason: 'already_running' };
-  const result = jobStore.enqueueJob(db, accountId);
+  const identity = accountIdentity(account), target = JSON.stringify(storageTarget(account));
+  const capacity = await storageCapacity(account);
+  const result = withStateLock(DIRS.root, () => {
+    if (authorize) authorize();
+    // This callback owns the short state lock. Other operations still cannot
+    // start while the durable queue is degraded.
+    if (maintenanceActive()) return blockedOutcome(queueFault ? 'queue_degraded' : 'maintenance', Date.now(), queueFault?.nextProbeAt);
+    const current = getAccount(accountId);
+    if (!current || (ownerUserId !== null && Number(current.owner_user_id) !== Number(ownerUserId))) return { ok: false, reason: 'not_found' };
+    if (accountIdentity(current) !== identity || JSON.stringify(storageTarget(current)) !== target
+        || (enabledOnly && !current.enabled)) return { ok: false, reason: 'configuration_changed' };
+    if (triggerSource === 'scheduled' && parseSqliteUtc(current.sync_paused_until) > Date.now()) return blockedOutcome('account_paused', Date.now(), current.sync_paused_until);
+    if (needsSyncReview(current) && !confirmUnknown) return blockedOutcome('confirm_unknown_result');
+    if (!accountHasCredential(current)) return recordBlock(current,
+      blockedOutcome(current.auth_type === 'oauth2' ? 'authorization_required' : 'missing_credentials'));
+    const reason = capacityReason(capacity);
+    if (reason) return recordBlock(current, storageBlock(reason, capacity));
+    const groupBlock = providerBlock(current);
+    if (groupBlock?.reason === 'provider_cooldown') return recordBlock(current, groupBlock);
+    if (isAccountLocked(accountId)) return { ok: false, reason: 'already_running' };
+    const queued = jobStore.enqueueJob(db, accountId, triggerSource);
+    return { ...queued, outcome: queued.ok ? 'accepted' : 'skipped' };
+  });
   if (result.ok) {
     drainQueue();
   }
@@ -451,6 +619,12 @@ function cancelJob(jobId, accountId) {
   }
 
   if (job.status === 'running') {
+    const pending = preparingControls.get(Number(accountId));
+    if (pending) {
+      db.prepare("UPDATE sync_jobs SET stage='cancelling' WHERE id=? AND account_id=? AND status='running'").run(job.id, accountId);
+      pending.cancelled = true;
+      return { ok: true, status: 'cancelling' };
+    }
     const control = runningChildren.get(job.account_id);
     if (!control || Number(control.jobId) !== Number(job.id)) {
       return { ok: false, reason: 'not_owned' };
@@ -466,34 +640,51 @@ function cancelJob(jobId, accountId) {
 
 // v0.1.6: 对失败/中断/已取消的历史任务创建一个新的同步任务。
 // 不复用旧记录，保留完整审计轨迹；仍然通过账号级唯一索引防止重复排队。
-function retryJob(jobId, ownerUserId = null) {
-  if (shuttingDown || queueFailed || maintenanceLock.current() === 'restore') return { ok: false, reason: 'maintenance' };
+async function retryJob(jobId, ownerUserId = null, { authorize = null, confirmUnknown = false } = {}) {
+  if (maintenanceActive()) return blockedOutcome(queueFault ? 'queue_degraded' : 'maintenance', Date.now(), queueFault?.nextProbeAt);
   const previous = ownerUserId === null
-    ? db.prepare('SELECT account_id FROM sync_jobs WHERE id=?').get(jobId)
-    : db.prepare(`SELECT j.account_id FROM sync_jobs j JOIN accounts a ON a.id=j.account_id
+    ? db.prepare('SELECT account_id,status,result_known FROM sync_jobs WHERE id=?').get(jobId)
+    : db.prepare(`SELECT j.account_id,j.status,j.result_known FROM sync_jobs j JOIN accounts a ON a.id=j.account_id
         WHERE j.id=? AND a.owner_user_id=?`).get(jobId, ownerUserId);
   if (!previous) return { ok: false, reason: 'not_found' };
   const account = getAccount(previous.account_id);
-  if (!account || !accountHasCredential(account)) {
-    return { ok: false, reason: 'missing_credentials' };
+  if (!account || !accountHasCredential(account)) return blockedOutcome(account?.auth_type === 'oauth2' ? 'authorization_required' : 'missing_credentials');
+  if ((account.sync_result_unknown || (previous.status === 'interrupted' && previous.result_known !== 1))
+      && account.deletion_mode === 'mirror_messages' && !confirmUnknown) {
+    return { ok: false, reason: 'confirm_unknown_result', outcome: 'skipped' };
   }
-  const capacityReason = syncCapacityReason(account);
-  if (capacityReason) return { ok: false, reason: capacityReason };
   if (isAccountLocked(account.id)) return { ok: false, reason: 'already_running' };
-  const result = jobStore.retryJob(db, jobId);
+  const identity = accountIdentity(account), target = JSON.stringify(storageTarget(account));
+  const capacity = await storageCapacity(account);
+  const result = withStateLock(DIRS.root, () => {
+    if (authorize) authorize();
+    if (maintenanceActive()) return { ok: false, reason: 'maintenance' };
+    const current = getAccount(account.id);
+    if (!current || (ownerUserId !== null && Number(current.owner_user_id) !== Number(ownerUserId))) return { ok: false, reason: 'not_found' };
+    if (accountIdentity(current) !== identity || JSON.stringify(storageTarget(current)) !== target) return { ok: false, reason: 'configuration_changed' };
+    if (needsSyncReview(current) && !confirmUnknown) return blockedOutcome('confirm_unknown_result');
+    if (!accountHasCredential(current)) return recordBlock(current,
+      blockedOutcome(current.auth_type === 'oauth2' ? 'authorization_required' : 'missing_credentials'));
+    const reason = capacityReason(capacity);
+    if (reason) return recordBlock(current, storageBlock(reason, capacity));
+    const groupBlock = providerBlock(current);
+    if (groupBlock?.reason === 'provider_cooldown') return recordBlock(current, groupBlock);
+    if (isAccountLocked(account.id)) return { ok: false, reason: 'already_running' };
+    return jobStore.retryJob(db, jobId);
+  });
   if (result.ok) {
     drainQueue();
   }
   return result;
 }
 
-function triggerAllEnabled(ownerUserId = null) {
+async function triggerAllEnabled(ownerUserId = null, { authorize = null } = {}) {
   const accounts = ownerUserId === null
     ? db.prepare('SELECT id FROM accounts WHERE enabled = 1 ORDER BY id').all()
     : db.prepare('SELECT id FROM accounts WHERE enabled=1 AND owner_user_id=? ORDER BY id').all(ownerUserId);
   const result = { queued: [], skipped: [] };
   for (const account of accounts) {
-    const outcome = triggerSync(account.id);
+    const outcome = await triggerSync(account.id, { authorize, enabledOnly: true, triggerSource: 'bulk', ownerUserId });
     if (outcome.ok) result.queued.push(outcome.jobId);
     else result.skipped.push({ accountId: account.id, reason: outcome.reason });
   }
@@ -501,66 +692,30 @@ function triggerAllEnabled(ownerUserId = null) {
 }
 
 function cancelAllQueued(ownerUserId = null) {
-  if (ownerUserId === null) return jobStore.cancelAllQueued(db);
-  const info = db.prepare(`UPDATE sync_jobs SET status='cancelled',finished_at=datetime('now')
-    WHERE status='queued' AND account_id IN (SELECT id FROM accounts WHERE owner_user_id=?)`).run(ownerUserId);
-  return { cancelled: info.changes };
+  return jobStore.cancelAllQueued(db, ownerUserId);
 }
 
 // ---- 连接测试:60秒后请求终止,错误分类,不做正式同步 ----
-async function testConnection(accountId) {
+async function testConnection(accountId, options = {}) {
   accountId = Number(accountId);
-  if (shuttingDown || maintenanceLock.current() === 'restore' || stateWritesBlocked(DIRS.root)) return { ok: false, category: 'maintenance', message: '系统正在维护或关闭' };
-  if (isAccountLocked(accountId) || hasActiveJob(accountId) ||
-      currentRunningCount() + connectionTests.size >= maxConcurrent()) {
-    return { ok: false, category: 'busy', message: '已有同步或连接测试，请稍后再试' };
+  const assertOperational = () => {
+    if (shuttingDown || maintenanceLock.current() === 'restore') throw probeError('maintenance');
+  };
+  options.authorize?.();
+  if (shuttingDown || maintenanceLock.current() === 'restore' || stateWritesBlocked(DIRS.root)) return probeUnavailable('maintenance');
+  if (isAccountLocked(accountId) || hasActiveJob(accountId) || currentRunningCount() + connectionTests.size >= maxConcurrent()) {
+    return probeUnavailable('busy');
   }
   const account = getAccount(accountId);
-  if (!account) return { ok: false, category: 'not_found', message: '账号不存在' };
-  if (!accountHasCredential(account)) return { ok: false, category: 'auth_failed', message: '账号尚未配置密码或完成授权' };
-  let cancelled = false, stopChild = null, resolveCompletion;
-  const completion = new Promise((resolve) => { resolveCompletion = resolve; });
-  connectionTests.set(accountId, {
-    completion,
-    requestTermination(status, message) { cancelled = true; if (stopChild) stopChild(status, message); },
-  });
+  if (!account) return probeUnavailable('not_found');
+  if (providerBlock(account)) return probeUnavailable('busy');
+  const controller = new AbortController();
+  const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+  let resolveCompletion;
+  const completion = new Promise(resolve => { resolveCompletion = resolve; });
+  connectionTests.set(accountId, { completion, providerKey: providerGroup(account), requestTermination() { controller.abort(probeError('interrupted')); } });
   try {
-    assertSecureAccountEndpoint(account, getProvider(account.provider));
-    const addresses = await assertPublicImapHost(account.host);
-    if (cancelled || shuttingDown || maintenanceLock.current() === 'restore') return { ok: false, category: 'maintenance', message: '服务正在维护或关闭' };
-    const sourceAddress = addresses.find((item) => Number(item.family) === 4)?.address || addresses[0].address;
-    const args = buildArgs(account, { justFolders: true, sourceAddress });
-    return await new Promise((resolve) => {
-      const output = createOutputCollector();
-      let completed = false;
-      const child = spawn('imapsync', args, { env: childEnvironment(DIRS.root) });
-      const terminator = createProcessTerminator({ child, jobId: 'test-' + accountId });
-      stopChild = (status, message) => terminator.request(status, message);
-      const timeout = setTimeout(() => stopChild('timed_out', '连接测试超过60秒'), 60000);
-      timeout.unref();
-      function complete(result) {
-        if (completed) return;
-        completed = true;
-        clearTimeout(timeout);
-        terminator.complete();
-        resolve(result);
-      }
-      child.stdout.on('data', (c) => output.push(c, 'stdout'));
-      child.stderr.on('data', (c) => output.push(c, 'stderr'));
-      child.once('error', () => complete({ ok: false, category: 'spawn_failed', message: '无法启动 imapsync' }));
-      child.once('close', (code) => {
-        const { summary, tail } = output.finish();
-        const termination = terminator.getTermination();
-        if (code === 0 && !termination) complete({ ok: true, message: '连接成功', folders: summary.host1Folders, messages: summary.host1Messages });
-        else {
-          const failure = termination ? { category: termination.status, message: termination.message } : categorizeTestError(tail, false);
-          complete({ ok: false, ...failure });
-        }
-      });
-    });
-  } catch (error) {
-    console.error('[sync] 连接测试失败:', error.message);
-    return { ok: false, category: 'test_failed', message: '连接测试失败，请检查连接设置、目录权限与服务日志' };
+    return await runAccountImapProbe(account, { ...options, signal, assertOperational });
   } finally {
     connectionTests.delete(accountId);
     resolveCompletion();
@@ -572,28 +727,49 @@ async function testConnection(accountId) {
 // Web服务可能在同步进行中被重启(rc-service restart / 机器重启 / crash)。
 // 这种情况下内存里的runningLocks会丢失,但DB里的 status='running' 记录会
 // 永久残留,导致: 1) Dashboard一直显示"正在同步" 2) 该账号被永久锁死无法再同步。
-// 启动时统一处理这些"孤儿"任务:标记为interrupted,并尝试终止可能还在后台
-// 残留运行的imapsync进程(避免它和下一次同步的cache读写冲突)。
-function reconcileAfterRestart() {
-  const staleRunning = jobStore.reconcileRunningJobs(db);
-  for (const job of staleRunning) {
-    if (job.pid) {
-      try {
-        const cmdlinePath = `/proc/${job.pid}/cmdline`;
-        if (fs.existsSync(cmdlinePath)) {
-          const cmdline = fs.readFileSync(cmdlinePath, 'utf8');
-          if (cmdline.includes('imapsync')) {
-            process.kill(job.pid, 'SIGTERM');
-          }
-        }
-      } catch (e) {
-        // pid已经不存在或没有权限读取/proc,忽略即可,不影响标记interrupted
-      }
+// 已退出的上次子进程可核对为 interrupted。仍有身份匹配的进程时，延后启动任务，
+// 不会根据可能已被重用的 PID 发送信号。
+let bootIdentity;
+function procIdentity(pid) {
+  if (process.platform !== 'linux' || !Number.isSafeInteger(pid) || pid < 2) return null;
+  try {
+    bootIdentity ||= fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/);
+    if (fields[0] === 'Z' || !/^\d+$/.test(fields[19])) return null;
+    return `${bootIdentity}:${fields[19]}`;
+  } catch (error) {
+    if (['ENOENT', 'ESRCH'].includes(error.code)) return null;
+    // An unreadable live PID must never be assumed to have already exited.
+    return 'unverified';
+  }
+}
+
+function reconcileStaleJobs() {
+  let waiting = false;
+  const reconciled = jobStore.reconcileRunningJobs(db, job => {
+    if (runningLocks.has(job.account_id) || pendingResults.has(job.id)) return false;
+    const identity = procIdentity(job.pid);
+    if (!identity) return true;
+    if (identity === 'unverified' || identity === job.pid_identity) { waiting = true; return false; }
+    if (job.pid_identity && job.pid_identity !== 'unverified') return true;
+    // Existing releases had no process identity. Wait only for a live imapsync,
+    // and do not signal it merely because a reused PID has a familiar name.
+    try {
+      if (fs.readFileSync(`/proc/${job.pid}/cmdline`, 'utf8').includes('imapsync')) { waiting = true; return false; }
+    } catch (error) {
+      if (!['ENOENT','ESRCH'].includes(error.code)) { waiting = true; return false; }
     }
-  }
-  if (staleRunning.length > 0) {
-    console.log(`[startup] 已将 ${staleRunning.length} 个因服务重启而中断的同步任务标记为 interrupted`);
-  }
+    return true;
+  });
+  if (reconciled.length) console.log(`[startup] 已核对 ${reconciled.length} 个中断的同步任务`);
+  return !waiting;
+}
+
+function reconcileAfterRestart() {
+  try {
+    if (!reconcileStaleJobs()) throw new Error('上次运行的同步进程仍未退出');
+  } catch (error) { degradeQueue(error, '启动时同步任务待核对'); }
 }
 
 // 优雅关闭:尽量终止正在跑的子进程,避免留下孤儿进程
@@ -625,6 +801,8 @@ module.exports = {
   hasActiveJob,
   currentRunningCount,
   currentConnectionTestCount,
+  isTestingConnection: accountId => connectionTests.has(Number(accountId)),
+  syncQueueHealth,
   maxConcurrent,
   syncTimeoutMinutes,
   maxJobLogBytes,

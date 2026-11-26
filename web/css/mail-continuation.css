@@ -1,0 +1,17 @@
+#reader-navigation[hidden], #mail-conversation-toolbar[hidden], #search-order-toolbar[hidden] { display: none; }
+@media (max-width: 760px) {
+  .mail-layout.reader-open .mail-folders,
+  .mail-layout.reader-open .mail-list-pane { display: none; }
+  #reader-navigation { position: sticky; top: 0; z-index: 1; background: var(--panel); }
+}
+
+.mail-result-attachments { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: .35rem; padding-bottom: .35rem; }
+.mail-result-attachments a { overflow-wrap: anywhere; }
+#search-order-toolbar select { margin-inline-start: .5rem; }
+
+.mail-conversation { border-inline-start: 2px solid currentColor; padding-inline-start: .5rem; }
+
+#rule-label-picker[hidden] { display: none; }
+.mail-label-options { display: grid; gap: .5rem; margin-block: .75rem; }
+.mail-label-options label { display: flex; align-items: center; gap: .5rem; }
+.mail-label-options input { width: auto; margin: 0; }

@@ -6,7 +6,7 @@ const { childEnvironment } = require('../server/child-environment');
 const { preserveSecretOwnership } = require('../server/restore');
 const { applyTargetTransport, imapTransportOptions } = require('../server/target-transport');
 const { applySourceTransport } = require('../server/source-transport');
-const { syncDiskCapacity } = require('../server/resource-limits');
+const { createCapacityChecker } = require('../server/resource-limits');
 const { applyDestinationStrategy } = require('../server/folder-strategy');
 
 test('new passwords enforce bcrypt byte boundary including multibyte Unicode', () => {
@@ -51,16 +51,16 @@ test('runtime destination guard refuses a corrupted isolated account set to flat
   assert.throws(() => applyDestinationStrategy([], { destination_mode: 'flat', mailbox_folder: 'U2-A7' }), /公共目录/);
 });
 
-test('mail disk guard checks the target independently and fails closed on helper errors', () => {
+test('mail disk guard checks the target independently and fails closed on helper errors', async () => {
   const db = { prepare: () => ({ get: () => ({ value: '512' }) }) };
   const local = { host: '127.0.0.1', user: 'mailuser' };
   const dirs = { root: '/data', cache: '/cache', tmp: '/tmp' };
   const statfs = () => ({ bavail: 1024, bsize: 1024 * 1024 });
   const seen = [];
   const deps = { env: {}, statfs, run: (cmd, args) => { seen.push([cmd, args]); return '1024\n100\n'; } };
-  assert.equal(syncDiskCapacity(db, dirs, local, deps).ok, false, 'mail disk is full even though app disk is free');
-  assert.equal(seen[0][1].at(-1), 'mailuser');
-  assert.equal(syncDiskCapacity(db, dirs, local, { ...deps, run: () => '1048576\n0\n' }).ok, false, 'no inodes');
-  assert.equal(syncDiskCapacity(db, dirs, local, { ...deps, run: () => { throw Error('missing helper'); } }).availableMb, null);
-  assert.equal(syncDiskCapacity(db, dirs, local, { ...deps, run: () => '1048576\n12345\n' }).ok, true);
+  assert.equal((await createCapacityChecker(deps)(db, dirs, local)).ok, false, 'mail disk is full even though app disk is free');
+  assert.deepEqual(seen[0][1].slice(-3), ['storage-status', 'mailuser', '--include-device']);
+  assert.equal((await createCapacityChecker({ ...deps, run: () => '1048576\n0\n' })(db, dirs, local)).ok, false, 'no inodes');
+  assert.equal((await createCapacityChecker({ ...deps, run: () => { throw Error('missing helper'); } })(db, dirs, local)).availableMb, null);
+  assert.equal((await createCapacityChecker({ ...deps, run: () => '1048576\n12345\n' })(db, dirs, local)).ok, true);
 });

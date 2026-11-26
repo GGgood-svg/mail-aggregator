@@ -1,3 +1,5 @@
+const { settleSyncJob } = require('./sync-settlement');
+
 const RETRYABLE_STATUSES = Object.freeze([
   'failed',
   'timed_out',
@@ -18,17 +20,17 @@ function hasActiveJob(db, accountId) {
     .get(accountId);
 }
 
-function enqueueJob(db, accountId) {
+function enqueueJob(db, accountId, triggerSource = 'manual') {
   if (hasActiveJob(db, accountId)) {
     return { ok: false, reason: 'already_running' };
   }
   try {
     const info = db
       .prepare(
-        `INSERT INTO sync_jobs (account_id, started_at, status)
-         VALUES (?, datetime('now'), 'queued')`
+        `INSERT INTO sync_jobs (account_id, started_at, status, trigger_source, transport_state)
+         VALUES (?, datetime('now'), 'queued', ?, 'unreleased')`
       )
-      .run(accountId);
+      .run(accountId, triggerSource);
     return { ok: true, jobId: info.lastInsertRowid };
   } catch (error) {
     if (isUniqueActiveJobError(error)) {
@@ -38,17 +40,17 @@ function enqueueJob(db, accountId) {
   }
 }
 
-function findNextQueuedJob(db) {
+function findNextQueuedJob(db, now = new Date().toISOString()) {
   return db
     .prepare(
       `SELECT * FROM sync_jobs
-       WHERE status = 'queued'
+       WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
          AND account_id NOT IN (
            SELECT account_id FROM sync_jobs WHERE status = 'running'
          )
        ORDER BY started_at ASC, id ASC LIMIT 1`
     )
-    .get();
+    .get(now);
 }
 
 function getJobForAccount(db, jobId, accountId) {
@@ -62,11 +64,8 @@ function cancelQueuedJob(db, jobId, accountId) {
   if (!job) return { ok: false, reason: 'not_found' };
   if (job.status !== 'queued') return { ok: false, reason: 'not_cancellable' };
 
-  db.prepare(
-    `UPDATE sync_jobs SET status='cancelled', finished_at=datetime('now')
-     WHERE id=? AND status='queued'`
-  ).run(jobId);
-  return { ok: true, status: 'cancelled' };
+  const result = settleSyncJob(db, jobId, accountId, { status: 'cancelled', expected: 'queued', code: 'cancelled' });
+  return result.applied ? { ok: true, status: 'cancelled' } : { ok: false, reason: 'not_cancellable' };
 }
 
 function retryJob(db, jobId) {
@@ -75,28 +74,32 @@ function retryJob(db, jobId) {
   if (!RETRYABLE_STATUSES.includes(job.status)) {
     return { ok: false, reason: 'not_retryable' };
   }
-  return enqueueJob(db, job.account_id);
+  return enqueueJob(db, job.account_id, 'retry');
 }
 
-function cancelAllQueued(db) {
-  const info = db
-    .prepare(
-      `UPDATE sync_jobs SET status='cancelled', finished_at=datetime('now')
-       WHERE status='queued'`
-    )
-    .run();
-  return { cancelled: info.changes };
+function cancelAllQueued(db, ownerUserId = null) {
+  const jobs = ownerUserId === null
+    ? db.prepare("SELECT id,account_id FROM sync_jobs WHERE status='queued'").all()
+    : db.prepare(`SELECT j.id,j.account_id FROM sync_jobs j JOIN accounts a ON a.id=j.account_id
+        WHERE j.status='queued' AND a.owner_user_id=?`).all(ownerUserId);
+  let cancelled = 0;
+  for (const job of jobs) if (cancelQueuedJob(db, job.id, job.account_id).ok) cancelled++;
+  return { cancelled };
 }
 
-function reconcileRunningJobs(db) {
+function reconcileRunningJobs(db, canSettle = () => true) {
   const jobs = db.prepare("SELECT * FROM sync_jobs WHERE status='running' ORDER BY id").all();
-  if (jobs.length) {
-    db.prepare(
-      `UPDATE sync_jobs SET status='interrupted', finished_at=datetime('now'), pid=NULL
-       WHERE status='running'`
-    ).run();
-  }
-  return jobs;
+  return jobs.filter(job => {
+    if (!canSettle(job)) return false;
+    if (job.transport_state === 'unreleased') {
+      if (job.stage === 'cancelling') return settleSyncJob(db, job.id, job.account_id, { status: 'cancelled',
+        code: 'cancelled', message: '同步已取消，邮件传输尚未放行' }).applied;
+      return db.prepare(`UPDATE sync_jobs SET status='queued',stage=NULL,pid=NULL,pid_identity=NULL,result_code=NULL,
+        next_attempt_at=NULL WHERE id=? AND status='running' AND transport_state='unreleased'`).run(job.id).changes === 1;
+    }
+    return settleSyncJob(db, job.id, job.account_id, { status: 'interrupted', code: 'restart_unknown',
+      message: '服务重启，任务结果未确认，请核对后再重试' }).applied;
+  });
 }
 
 module.exports = {

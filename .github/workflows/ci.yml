@@ -22,10 +22,20 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+        env:
+          NODE_OPTIONS: --experimental-sqlite
       - run: npm run test:integration
+      - name: Reconcile interrupted restores with the native SQLite binding
+        run: node --test tests/restore-crash.test.js
+        env:
+          MAIL_TEST_NATIVE_SQLITE: '1'
+      - name: Check helper deadlines and password rollback in an isolated fixture
+        run: npm run test:helper
+      - name: Check encrypted Maildir backup and recovery rehearsal
+        run: npm run test:maildir
       - name: Check shell syntax
         run: |
-          for script in scripts/*.sh scripts/lib/*.sh scripts/platforms/*.sh scripts/mail-aggregator.openrc; do
+          for script in scripts/*.sh scripts/lib/*.sh scripts/platforms/*.sh scripts/mail-aggregator.openrc tests/run-dovecot-ci.sh; do
             sh -n "$script" || exit 1
           done
 
@@ -39,3 +49,32 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
+
+  dovecot-integration:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install disposable Dovecot test service
+        run: |
+          sudo apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y dovecot-core dovecot-imapd
+      - name: Test against isolated local Dovecot
+        run: sh tests/run-dovecot-ci.sh
+
+  browser-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.62.1
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>查看邮件 - Mail Aggregator</title>
 <link rel="stylesheet" href="/css/style.css">
+<link rel="stylesheet" href="/css/mail-continuation.css">
 </head>
 <body>
 <div class="layout">
@@ -23,16 +24,39 @@
     </div>
 
     <form id="mail-search" class="mail-search">
-      <div class="hint mail-search-scope">搜索范围：当前文件夹；日期按收取日期筛选。</div>
+      <div class="hint mail-search-scope">日期按收取日期筛选；正文搜索可能较慢。</div>
+      <div class="hint mail-search-scope">跨文件夹搜索每页检查最多8个文件夹，每个文件夹先显示5封。</div>
+      <label>搜索范围<select name="scope" id="search-scope"><option value="folder">当前文件夹</option><option value="all">所有可访问文件夹</option></select></label>
       <label>发件人<input name="from" type="search" maxlength="200" placeholder="邮箱地址或名称"></label>
+      <label>收件人<input name="to" type="search" maxlength="200" placeholder="邮箱地址或名称"></label>
       <label>主题<input name="subject" type="search" maxlength="200" placeholder="主题关键词"></label>
+      <label>正文<input name="body" type="search" maxlength="200" placeholder="正文关键词"></label>
       <label>开始日期<input name="since" type="date"></label>
       <label>结束日期<input name="until" type="date"></label>
+      <label>大于（MB）<input name="largerMb" type="number" min="1" max="4095" step="1"></label>
+      <label>小于（MB）<input name="smallerMb" type="number" min="1" max="4095" step="1"></label>
       <label>已读状态<select name="seen"><option value="all">全部</option><option value="unread">未读</option><option value="read">已读</option></select></label>
-      <div class="mail-search-actions"><button class="btn" type="submit">搜索邮件</button><button class="btn secondary" type="reset">清除筛选</button></div>
+      <label>星标状态<select name="flagged"><option value="all">全部</option><option value="starred">有星标</option><option value="unstarred">无星标</option></select></label>
+      <label data-mail-attachment-filter><span data-mail-label="附件状态" data-i18n-skip></span><select name="attachment"><option value="all">全部</option><option value="present" data-mail-label="有附件" data-i18n-skip></option><option value="absent" data-mail-label="无附件" data-i18n-skip></option></select></label>
+      <label data-mail-attachment-filter><span data-mail-label="附件文件名" data-i18n-skip></span><input name="attachmentName" type="search" maxlength="100"></label>
+      <label data-mail-attachment-filter><span data-mail-label="附件类型" data-i18n-skip></span><input name="attachmentType" type="search" maxlength="128" placeholder="application/pdf, image/*" data-i18n-skip></label>
+      <div class="mail-search-actions"><button class="btn" type="submit">搜索邮件</button><button class="btn secondary" type="reset">清除筛选</button><button class="btn secondary" type="button" id="save-search">保存搜索</button><button class="btn secondary" type="button" id="update-saved-search" hidden>更新当前搜索</button><button class="btn secondary" type="button" id="create-rule">从当前搜索创建规则</button></div>
     </form>
+    <details id="mail-rules" class="mail-rules">
+      <summary>整理规则</summary>
+      <p class="hint">规则先预览，再手动应用；不会随同步自动执行。</p>
+      <div id="rule-list" class="mail-rule-list"></div>
+    </details>
+    <a class="mail-task-link" href="/logs.html?tab=mail">邮件整理任务中心</a>
+    <div class="hint" id="bulk-job-status" role="status" hidden></div>
     <div class="mail-layout">
       <section class="mail-folders" aria-label="邮箱文件夹">
+        <div class="mail-pane-title">智能文件夹</div>
+        <button class="folder-item" type="button" id="starred-view">★ <span>星标邮件</span></button>
+        <button class="folder-item" type="button" id="attachments-view">📎 <span>附件</span></button>
+        <div id="saved-search-list" class="saved-search-list"></div>
+        <button class="btn secondary small" type="button" id="manage-personal-labels" data-mail-label="管理个人标签" data-i18n-skip></button>
+        <div id="personal-label-list" class="saved-search-list"></div>
         <div class="mail-pane-title">邮箱文件夹</div>
         <div id="folder-list" class="folder-list"><div class="mail-loading">正在加载…</div></div>
       </section>
@@ -40,24 +64,46 @@
       <section class="mail-list-pane" aria-label="邮件列表">
         <div class="mail-list-header">
           <div>
-            <div class="mail-pane-title" id="current-folder" data-i18n-skip>INBOX</div>
+            <div class="mail-pane-title" id="current-folder" tabindex="-1" data-i18n-skip>INBOX</div>
             <div class="hint" id="message-total"></div>
             <button class="btn secondary small" id="folder-seen-all" type="button">文件夹全部已读</button>
           </div>
           <div class="mail-pager">
             <button class="btn secondary small" id="previous-page">上一页</button>
             <span id="page-label" class="hint"></span>
-            <button class="btn secondary small" id="next-page">下一页</button>
+            <button class="btn secondary small" id="next-page" data-i18n-skip>下一页</button>
           </div>
+        </div>
+        <div class="mail-bulk-toolbar" id="mail-bulk-toolbar">
+          <label><input type="checkbox" id="select-page"> 选择本页</label>
+          <button class="btn secondary small" type="button" data-bulk-flag="seen" data-value="true">标为已读</button>
+          <button class="btn secondary small" type="button" data-bulk-flag="seen" data-value="false">标为未读</button>
+          <button class="btn secondary small" type="button" data-bulk-flag="flagged" data-value="true">添加星标</button>
+          <button class="btn secondary small" type="button" data-bulk-flag="flagged" data-value="false">取消星标</button>
+        </div>
+        <div id="mail-conversation-toolbar" class="mail-bulk-toolbar">
+          <label><input type="checkbox" id="mail-conversations" aria-describedby="conversation-coverage"> <span data-mail-label="按会话显示" data-i18n-skip></span></label>
+          <small id="conversation-coverage" hidden data-mail-label="只合并本页中具有回复关系的邮件。" data-i18n-skip></small>
+        </div>
+        <div id="search-order-toolbar" class="mail-bulk-toolbar" hidden>
+          <label><span data-mail-label="显示顺序" data-i18n-skip></span><select id="search-order"><option value="folders" data-mail-label="按文件夹" data-i18n-skip></option><option value="received" data-mail-label="按收取时间" data-i18n-skip></option></select></label>
+          <small id="search-order-coverage" hidden role="status" data-i18n-skip></small>
         </div>
         <div id="message-list" class="message-list"><div class="mail-loading">请选择文件夹</div></div>
       </section>
 
       <section class="mail-reader" aria-label="邮件正文">
+        <div id="reader-navigation" class="mail-bulk-toolbar" hidden>
+          <button class="btn secondary small" type="button" id="reader-back" data-i18n-skip></button>
+          <button class="btn secondary small" type="button" id="reader-previous" data-i18n-skip></button>
+          <button class="btn secondary small" type="button" id="reader-next" data-i18n-skip></button>
+        </div>
         <div id="reader-empty" class="mail-reader-empty">选择一封邮件查看正文</div>
         <article id="reader-content" style="display:none">
           <header class="mail-message-header">
-            <h2 id="reader-subject" data-i18n-skip></h2>
+            <div class="hint" id="reader-conversation-count" hidden data-i18n-skip></div>
+            <h2 id="reader-subject" tabindex="-1" data-i18n-skip></h2>
+            <button class="btn secondary small" id="edit-message-labels" type="button" data-mail-label="个人标签" data-i18n-skip></button>
             <button class="btn secondary small" id="toggle-seen" type="button" data-i18n-skip></button>
             <a class="btn secondary small" id="export-message" href="#" download>导出原始邮件</a>
             <div class="hint">单次下载上限100 MB；下载不会修改邮件已读状态。</div>
@@ -80,19 +126,79 @@
     </div>
   </main>
 </div>
+<dialog id="personal-label-dialog" class="mail-dialog" aria-labelledby="personal-label-title">
+  <h2 id="personal-label-title" data-mail-label="管理个人标签" data-i18n-skip></h2>
+  <p class="hint" data-mail-label="标签只在当前账号目录中有效。恢复应用数据后需要重新标记邮件。" data-i18n-skip></p>
+  <div id="personal-label-manage-list" class="saved-search-list"></div>
+  <form id="personal-label-editor">
+    <label><span data-mail-label="标签名称" data-i18n-skip></span><input name="name" required maxlength="80" autocomplete="off"></label>
+    <div class="mail-search-actions"><button type="submit" class="btn">保存</button><button type="button" id="new-personal-label" class="btn secondary" data-mail-label="新增标签" data-i18n-skip></button><button type="button" id="close-personal-labels" class="btn secondary">关闭</button></div>
+  </form>
+</dialog>
+<dialog id="message-label-dialog" class="mail-dialog" aria-labelledby="message-label-title">
+  <h2 id="message-label-title" data-mail-label="个人标签" data-i18n-skip></h2>
+  <div id="message-label-options" class="mail-label-options" role="status"></div>
+  <button type="button" class="btn secondary" id="close-message-labels">关闭</button>
+</dialog>
+<dialog id="saved-search-dialog">
+  <form id="saved-search-editor">
+    <h2>保存搜索</h2>
+    <p class="hint" id="saved-search-scope" data-i18n-skip></p>
+    <p class="hint">智能文件夹仅保存筛选条件，不复制邮件。</p>
+    <label>搜索名称<input name="name" maxlength="80" required autocomplete="off"></label>
+    <label>搜索范围<select name="scope"><option value="folder">单个文件夹</option><option value="all">所有可访问文件夹</option></select></label>
+    <label>邮箱文件夹<select name="folder" data-i18n-skip></select></label>
+    <p id="saved-search-error" role="alert" data-i18n-skip></p>
+    <div class="mail-search-actions"><button class="btn" type="submit">保存</button><button class="btn secondary" id="cancel-saved-search" type="button">取消</button></div>
+  </form>
+</dialog>
+<dialog id="rule-dialog" class="mail-dialog">
+  <form id="rule-editor">
+    <h2>整理规则</h2>
+    <label>规则名称<input name="name" maxlength="80" required autocomplete="off"></label>
+    <label>整理动作<select name="action"><option value="seen">标为已读</option><option value="unseen">标为未读</option><option value="star">添加星标</option><option value="unstar">取消星标</option><option value="label" data-mail-label="添加个人标签" data-i18n-skip></option></select></label>
+    <label id="rule-label-picker" hidden><span data-mail-label="个人标签" data-i18n-skip></span><select name="labelId" data-i18n-skip disabled></select></label>
+    <label id="rule-auto-preview-picker" hidden><input type="checkbox" name="autoPreviewEnabled" aria-describedby="rule-auto-preview-help" disabled> <span data-mail-label="同步成功后自动预览" data-i18n-skip></span></label>
+    <small id="rule-auto-preview-help" hidden data-mail-label="只预览本次同步的账号，应用仍需手动确认。" data-i18n-skip></small>
+    <label>邮箱文件夹<select name="folder" data-i18n-skip></select></label>
+    <div id="rule-filters" class="rule-filters"></div>
+    <p class="hint">修改规则会使旧预览失效；请重新预览后应用。</p>
+    <p id="rule-error" role="alert" data-i18n-skip></p>
+    <div class="mail-search-actions"><button class="btn" type="submit">保存规则</button><button class="btn secondary" id="cancel-rule-edit" type="button">取消</button></div>
+  </form>
+</dialog>
+<dialog id="rule-preview-dialog" class="mail-dialog">
+  <h2 id="rule-preview-title" data-i18n-skip></h2>
+  <p id="rule-preview-summary" role="status" data-i18n-skip></p>
+  <p id="rule-preview-error" role="alert" data-i18n-skip></p>
+  <p id="rule-preview-expiry" class="hint" data-i18n-skip></p>
+  <p class="hint">仅应用此次完整预览中的邮件；10分钟后需重新预览。新邮件不会加入。</p>
+  <ul id="rule-preview-results" class="mail-task-results"></ul>
+  <div class="mail-search-actions"><button class="btn" type="button" id="apply-rule-preview" disabled>应用此次预览</button><button class="btn secondary" type="button" id="resume-rule-preview" hidden>继续任务</button><button class="btn secondary" type="button" id="cancel-rule-preview">取消预览</button><button class="btn secondary" type="button" id="close-rule-preview">关闭</button></div>
+</dialog>
 <script src="/js/api.js"></script>
 <script src="/js/branding.js"></script>
 <script src="/js/i18n.js"></script>
+<script src="/js/mail-searches.js"></script>
+<script src="/js/mail-continuation-i18n.js"></script>
+<script src="/js/mail-tasks.js"></script>
+<script src="/js/mail-labels.js"></script>
+<script src="/js/mail-rules.js"></script>
+<script src="/js/mail-result-order.js"></script>
 <script>
 const mailState = {
-  folder: 'INBOX', page: 1, pageSize: 30, totalPages: 1,
+  folder: 'INBOX', page: 1, pageSize: 30, total: null, totalPages: 1,
   selectedUid: null, requestId: 0, collapsedGroups: new Set(), groupsInitialized: false,
   cursors: [null], uidValidity: null, hasMore: false,
-  filters: {},
+  filters: {}, view: 'folder', selectedFolder: null, selectedValidity: null,
+  listController: null, detailController: null, loading: false,
+  visible: [], checked: new Set(), folderLabels: new Map(), listData: null, groupControllers: new Map(), readerAnchor: null,
+  folderRequestId: 0, folderController: null, availableFolders: null, savedSearchId: null, smartKind: null, labelId: null,
 };
+const receivedScan = window.MailResultOrder.createReceivedScan();
 
 function t(source) {
-  return window.I18n ? window.I18n.t(source) : source;
+  return window.MailContinuationText?.(source, window.I18n?.locale) ?? window.I18n?.t(source) ?? source;
 }
 
 function readableBytes(value) {
@@ -103,6 +209,8 @@ function readableBytes(value) {
 }
 
 function clearReader(message = '选择一封邮件查看正文') {
+  mailState.detailController?.abort();
+  mailState.detailController = null;
   document.getElementById('reader-empty').textContent = t(message);
   document.getElementById('reader-empty').style.display = 'flex';
   document.getElementById('reader-content').style.display = 'none';
@@ -213,7 +321,7 @@ function renderFolder(folder, group) {
     ? `${folder.unseen} ${t('封未读邮件')}，${t('共')} ${folder.messages} ${t('封邮件')}`
     : `${t('共')} ${folder.messages} ${t('封邮件')}`;
   return `
-    <button class="folder-item ${folder.path === mailState.folder ? 'active' : ''}"
+    <button class="folder-item ${mailState.view === 'folder' && folder.path === mailState.folder ? 'active' : ''}"
       data-folder="${escapeHtml(folder.path)}" style="--folder-depth:${folderDepth(folder, group)}"
       title="${escapeHtml(`${relativeFolderName(folder, group)} · ${countLabel}`)}">
       <span class="folder-item-main"><span class="folder-icon" aria-hidden="true">${folderIcon(folder)}</span><span class="folder-name" data-i18n-skip>${escapeHtml(relativeFolderName(folder, group))}</span></span>
@@ -221,35 +329,91 @@ function renderFolder(folder, group) {
     </button>`;
 }
 
-function selectFolder(path) {
-  if (path === mailState.folder) return;
+function selectFolder(path, source = 'folder') {
+  leaveReader(false);
+  receivedScan.reset();
+  if (source !== 'search') { mailState.labelId = null; personalLabels.select(null); }
+  const filters = source === 'unread' ? { seen: 'unread' } : source === 'search' ? { ...mailState.filters } : {};
+  savedSearches.clear();
+  mailState.filters = filters;
+  document.querySelectorAll('#mail-search [name]').forEach(input => { input.value = filters[input.name] || (input.tagName === 'SELECT' ? 'all' : ''); });
+  mailState.view = 'folder';
+  document.getElementById('search-scope').value = 'folder';
+  document.getElementById('mail-search').style.display = '';
+  document.getElementById('folder-seen-all').hidden = false;
   mailState.folder = path;
   mailState.page = 1;
   mailState.cursors = [null];
   mailState.uidValidity = null;
+  mailState.total = null;
   mailState.selectedUid = null;
+  mailState.selectedFolder = null;
+  mailState.selectedValidity = null;
   document.querySelectorAll('.folder-item').forEach((item) => item.classList.toggle('active', item.dataset.folder === path));
+  document.getElementById('unread-view')?.classList.remove('active');
+  clearReader();
+  loadMessages().catch(showError);
+}
+
+function selectUnreadView() {
+  if (mailState.view === 'unread') return;
+  mailState.labelId = null; personalLabels.select(null);
+  leaveReader(false);
+  receivedScan.reset();
+  savedSearches.clear();
+  mailState.view = 'unread';
+  mailState.page = 1; mailState.cursors = [null]; mailState.total = null;
+  mailState.selectedUid = null; mailState.selectedFolder = null; mailState.selectedValidity = null;
+  document.getElementById('mail-search').style.display = 'none';
+  document.getElementById('folder-seen-all').hidden = true;
+  document.querySelectorAll('.folder-item').forEach(item => item.classList.remove('active'));
+  document.getElementById('unread-view')?.classList.add('active');
   clearReader();
   loadMessages().catch(showError);
 }
 
 async function loadFolders() {
+  const requestId = ++mailState.folderRequestId;
+  mailState.folderController?.abort();
+  const controller = new AbortController(); mailState.folderController = controller;
   const list = document.getElementById('folder-list');
   list.innerHTML = `<div class="mail-loading">${escapeHtml(t('正在加载…'))}</div>`;
   const [data, accounts] = await Promise.all([
-    Api.get('/api/mail/folders'),
-    Api.get('/api/accounts'),
+    Api.get('/api/mail/folders', { signal: controller.signal }),
+    Api.get('/api/accounts', { signal: controller.signal }),
   ]);
+  if (requestId !== mailState.folderRequestId || !data || !accounts) return false;
+  mailState.availableFolders = new Set(data.folders.map(folder => folder.path));
+  savedSearches.render();
   if (!data.folders.length) {
     list.innerHTML = `<div class="mail-loading">${escapeHtml(t('没有可查看的文件夹'))}</div>`;
+    mailState.listController?.abort(); mailState.requestId++;
+    mailState.loading = false; mailState.visible = []; mailState.checked.clear(); mailState.folderLabels.clear();
+    mailState.page = 1; mailState.cursors = [null]; mailState.total = 0; mailState.totalPages = 1;
+    mailState.hasMore = false; mailState.uidValidity = null;
+    mailState.selectedUid = null; mailState.selectedFolder = null; mailState.selectedValidity = null;
+    clearReader('没有可查看的文件夹');
+    document.getElementById('reader-body').replaceChildren();
+    document.getElementById('reader-attachments').replaceChildren();
+    document.getElementById('message-list').innerHTML = `<div class="mail-loading">${escapeHtml(t('没有可查看的文件夹'))}</div>`;
+    document.getElementById('current-folder').textContent = '-';
+    document.getElementById('message-total').textContent = '';
+    document.getElementById('page-label').textContent = '';
+    document.getElementById('folder-seen-all').disabled = true;
+    updateMailControls();
     return false;
   }
-  if (!data.folders.some((item) => item.path === mailState.folder)) {
+  document.getElementById('folder-seen-all').disabled = !!mailState.bulkBusy;
+  if (mailState.view === 'folder' && !mailState.savedSearchId && !data.folders.some((item) => item.path === mailState.folder)) {
     mailState.folder = data.folders[0].path;
-    mailState.page = 1; mailState.cursors = [null]; mailState.uidValidity = null;
-    mailState.selectedUid = null; clearReader();
+    mailState.page = 1; mailState.cursors = [null]; mailState.uidValidity = null; mailState.total = null;
+    mailState.selectedUid = null; mailState.selectedFolder = null; mailState.selectedValidity = null; clearReader();
   }
   const groups = groupFolders(data.folders, accounts);
+  mailState.folderLabels = new Map();
+  groups.forEach(group => group.folders.forEach(folder => {
+    mailState.folderLabels.set(folder.path, `${group.label} / ${relativeFolderName(folder, group)}`);
+  }));
   groups.sort((a, b) => {
     const aActive = a.folders.some((folder) => folder.path === mailState.folder);
     const bActive = b.folders.some((folder) => folder.path === mailState.folder);
@@ -263,7 +427,7 @@ async function loadFolders() {
     });
     mailState.groupsInitialized = true;
   }
-  list.innerHTML = groups.map((group) => {
+  list.innerHTML = `<button class="folder-item unread-view ${mailState.view === 'unread' ? 'active' : ''}" id="unread-view" type="button">${escapeHtml(t('统一未读'))}</button>` + groups.map((group) => {
     const collapsed = mailState.collapsedGroups.has(group.key);
     const unread = group.folders.filter((folder) => (folder.name || '').toUpperCase() === 'INBOX').reduce((sum, folder) => sum + folder.unseen, 0);
     return `<div class="folder-group ${collapsed ? 'collapsed' : ''}" data-group="${escapeHtml(group.key)}">
@@ -276,6 +440,7 @@ async function loadFolders() {
       <div class="folder-group-items">${group.folders.map((folder) => renderFolder(folder, group)).join('')}</div>
     </div>`;
   }).join('');
+  list.querySelector('#unread-view').addEventListener('click', selectUnreadView);
   list.querySelectorAll('.folder-group-header').forEach((button) => button.addEventListener('click', () => {
     const group = button.closest('.folder-group');
     const collapsed = group.classList.toggle('collapsed');
@@ -283,7 +448,7 @@ async function loadFolders() {
     if (collapsed) mailState.collapsedGroups.add(group.dataset.group);
     else mailState.collapsedGroups.delete(group.dataset.group);
   }));
-  list.querySelectorAll('.folder-item').forEach((button) => button.addEventListener('click', () => selectFolder(button.dataset.folder)));
+  list.querySelectorAll('.folder-item[data-folder]').forEach((button) => button.addEventListener('click', () => selectFolder(button.dataset.folder)));
   list.querySelectorAll('.group-seen-all').forEach((button) => {
     button.disabled = !!mailState.bulkBusy;
     button.addEventListener('click', () => {
@@ -294,63 +459,396 @@ async function loadFolders() {
   return true;
 }
 
-async function loadMessages() {
-  const requestId = ++mailState.requestId;
-  const list = document.getElementById('message-list');
-  list.innerHTML = `<div class="mail-loading">${escapeHtml(t('正在加载…'))}</div>`;
-  const query = new URLSearchParams({ folder: mailState.folder, page: mailState.page, pageSize: mailState.pageSize });
-  Object.entries(mailState.filters).forEach(([key, value]) => { if (value && value !== 'all') query.set(key, value); });
-  const beforeUid = mailState.cursors[mailState.page - 1];
-  if (beforeUid) query.set('beforeUid', beforeUid);
-  if (mailState.uidValidity) query.set('uidValidity', mailState.uidValidity);
-  const data = await Api.get(`/api/mail/messages?${query}`);
-  if (requestId !== mailState.requestId) return;
-  mailState.uidValidity = data.uidValidity;
-  mailState.hasMore = data.hasMore;
-  mailState.cursors.length = mailState.page;
-  mailState.cursors[mailState.page] = data.nextBeforeUid;
-  const selected = data.messages.find((message) => message.uid === mailState.selectedUid);
-  if (selected) { mailState.seen = selected.seen; updateSeenButton(); }
-  mailState.totalPages = data.totalPages;
-  document.getElementById('current-folder').textContent = data.folder;
-  document.getElementById('message-total').textContent = `${t('共')} ${data.total} ${t('封邮件')}`;
-  document.getElementById('page-label').textContent = `${data.page} / ${data.totalPages}`;
-  document.getElementById('previous-page').disabled = data.page <= 1;
-  document.getElementById('next-page').disabled = !data.hasMore;
-  if (!data.messages.length) {
-    clearReader();
-    list.innerHTML = `<div class="mail-loading">${escapeHtml(t('没有符合条件的邮件'))}</div>`;
-    return;
+function receivedOrder() {
+  return mailState.view === 'search' && document.getElementById('search-order').value === 'received';
+}
+
+function updateMailControls() {
+  document.getElementById('save-search').disabled = !!mailState.labelId;
+  document.getElementById('create-rule').disabled = !!mailState.labelId;
+  document.getElementById('mail-conversation-toolbar').hidden = mailState.view === 'unread' || mailState.smartKind === 'attachments';
+  document.getElementById('conversation-coverage').hidden = !threadMode();
+  document.getElementById('search-order-toolbar').hidden = mailState.view !== 'search' || !mailState.listData;
+  const coverage = document.getElementById('search-order-coverage');
+  coverage.hidden = !receivedOrder();
+  if (!coverage.hidden) {
+    const { complete, limited, incomplete, moreFolders } = receivedScan.coverage();
+    const labels = [complete ? '本次搜索已扫描完毕。' : '仅排序已扫描的结果。'];
+    if (moreFolders) labels.push('还有文件夹待扫描。');
+    if (incomplete) labels.push('部分文件夹尚未扫完或需要重试。');
+    if (limited) labels.push('已达到排序显示上限，可切换按文件夹查看其余结果。');
+    coverage.textContent = labels.map(t).join(' ');
   }
-  list.innerHTML = data.messages.map((message) => `
-    <button class="message-item ${message.seen ? '' : 'unread'} ${message.uid === mailState.selectedUid ? 'active' : ''}" data-uid="${message.uid}">
+  document.getElementById('attachments-view').classList.toggle('active', mailState.smartKind === 'attachments');
+  document.getElementById('previous-page').disabled = mailState.loading || mailState.page <= 1;
+  const nextPage = document.getElementById('next-page');
+  nextPage.disabled = mailState.loading || !mailState.hasMore;
+  nextPage.textContent = t(mailState.view === 'search' ? '继续到下一批文件夹' : (mailState.listData?.reason === 'scan_limit' || mailState.listData?.inspectedCandidates !== undefined) ? '继续扫描此文件夹' : '下一页');
+  const all = document.getElementById('select-page');
+  all.disabled = mailState.loading || mailState.flagBusy || !mailState.visible.length;
+  all.checked = !!mailState.visible.length && mailState.checked.size === mailState.visible.length;
+  all.indeterminate = mailState.checked.size > 0 && !all.checked;
+  document.querySelectorAll('[data-bulk-flag]').forEach(button => { button.disabled = mailState.loading || mailState.flagBusy || !mailState.checked.size; });
+  document.querySelectorAll('.message-star').forEach(button => { button.disabled = !!mailState.flagBusy; });
+}
+
+function messageRow(message, folder, validity, showReceived = false, showFolder = false, threadSize = 1) {
+  const index = mailState.visible.push({ folder, uidValidity: validity, uid: message.uid, flagged: message.flagged, threadSize }) - 1;
+  const active = folder === mailState.selectedFolder && message.uid === mailState.selectedUid && validity === mailState.selectedValidity;
+  if (active) { mailState.seen = message.seen; updateSeenButton(); }
+  const fileQuery = new URLSearchParams({ folder, uidValidity: validity });
+  const downloads = (message.matchingAttachments || []).map(item => `<a class="btn secondary small" data-i18n-skip href="/api/mail/messages/${message.uid}/attachments/${encodeURIComponent(item.part)}/download?${escapeHtml(fileQuery.toString())}" download>📎 ${escapeHtml(item.filename)} · ${escapeHtml(t('下载附件'))}</a>`).join('');
+  return `<div class="message-item ${message.seen ? '' : 'unread'} ${active ? 'active' : ''}" data-index="${index}">
+    <input class="message-select" type="checkbox" aria-label="${escapeHtml(t('选择邮件'))}">
+    <button class="message-open" type="button">
       <span class="message-unread-dot" aria-hidden="true"></span>
       <span class="message-content">
-        <span class="message-row"><span class="message-from" data-i18n-skip>${escapeHtml(message.from || t('未知发件人'))}</span><time>${escapeHtml(fmtTime(message.date))}</time></span>
+        <span class="message-row"><span class="message-from" data-i18n-skip>${escapeHtml(message.from || t('未知发件人'))}</span><time>${escapeHtml(fmtTime(showReceived ? message.receivedAt : message.date))}</time></span>
         <span class="message-subject" data-i18n-skip>${escapeHtml(message.subject)}</span>
-        <span class="message-size">${message.flagged ? '★ · ' : ''}${readableBytes(message.size)}</span>
+        <span class="message-size">${readableBytes(message.size)}${showFolder ? ` · <span data-i18n-skip>${escapeHtml(mailState.folderLabels.get(folder) || folder)}</span>` : ''}</span>
       </span>
-    </button>`).join('');
-  list.querySelectorAll('.message-item').forEach((button) => button.addEventListener('click', () => {
-    mailState.selectedUid = Number(button.dataset.uid);
-    list.querySelectorAll('.message-item').forEach((item) => item.classList.toggle('active', item === button));
-    loadMessage(mailState.selectedUid, true).catch(showError);
-  }));
-  if (!mailState.selectedUid && data.messages.length && window.matchMedia('(min-width: 761px)').matches) {
-    const first = list.querySelector('.message-item');
-    mailState.selectedUid = Number(first.dataset.uid);
-    first.classList.add('active');
-    loadMessage(mailState.selectedUid).catch(showError);
+    </button>
+    <button class="message-star" type="button" aria-pressed="${!!message.flagged}" aria-label="${escapeHtml(t(message.flagged ? '取消星标' : '添加星标'))}">${message.flagged ? '★' : '☆'}</button>
+    ${downloads ? `<div class="mail-result-attachments">${downloads}${message.matchingAttachmentsOmitted > 0 ? `<small>${escapeHtml(t('打开原邮件查看其余附件'))}</small>` : ''}</div>` : ''}
+  </div>`;
+}
+
+function usableMailFilters(filters = mailState.filters) {
+  return Object.fromEntries(Object.entries(filters).filter(([key, value]) => String(value ?? '').trim()
+    && (!['seen', 'flagged', 'attachment'].includes(key) || value !== 'all')));
+}
+
+function threadMode() {
+  return mailState.smartKind !== 'attachments' && document.getElementById('mail-conversations').checked;
+}
+function threadOptions() { return { ...(threadMode() ? { conversations: true } : {}), ...(mailState.labelId ? { labelId: mailState.labelId } : {}) }; }
+function conversationRows(results, received, showFolder) {
+  return window.MailResultOrder.groupConversations(results).map(group => {
+    const rows = group.map(({ message, group: box }) => messageRow(message, box.folder, box.uidValidity, received, showFolder, group.length)).join('');
+    return group.length > 1 ? `<section class="mail-conversation" aria-label="${escapeHtml(t('会话邮件'))}"><div class="hint">${escapeHtml(t('会话邮件'))} (${group.length})</div>${rows}</section>` : rows;
+  }).join('');
+}
+
+function renderMessagePage(data, list, autoRead = true) {
+  const same = mailState.listData === data;
+  mailState.listData = data;
+  mailState.visible = [];
+  mailState.checked.clear();
+  if (mailState.view === 'unread' || mailState.view === 'search') {
+    const search = mailState.view === 'search';
+    const selectedGroup = data.groups.find(group => group.folder === mailState.selectedFolder && group.ok);
+    if (selectedGroup && selectedGroup.uidValidity !== mailState.selectedValidity) {
+      mailState.selectedUid = null; mailState.selectedFolder = null; mailState.selectedValidity = null; clearReader();
+    }
+    const ordered = receivedOrder();
+    document.getElementById('current-folder').textContent = personalLabels.get(mailState.labelId)?.name || savedSearches.title(t(search ? (mailState.smartKind === 'attachments' ? '附件' : '跨文件夹搜索') : '统一未读'));
+    document.getElementById('message-total').textContent = search
+      ? `${t('已检查文件夹')} ${data.scannedFolders} / ${data.totalFolders}`
+      : `${data.totalUnread} ${t('封未读邮件（按文件夹统计）')}`;
+    document.getElementById('page-label').textContent = String(mailState.page);
+    const threaded = search && threadMode();
+    const flat = ordered ? receivedScan.rows() : threaded ? data.groups.flatMap(group => group.ok ? group.messages.map(message => ({ group, message })) : []) : [];
+    const orderedRows = threaded ? conversationRows(flat, ordered, true) : flat.map(({ group, message }) => messageRow(message, group.folder, group.uidValidity, true, true)).join('');
+    // Keep current-folder controls available even when the cumulative view is full.
+    const known = new Map(data.groups.map(group => [group.folder, group]));
+    if (ordered) for (const group of receivedScan.controls()) {
+      if (known.has(group.folder) || group.state !== 'complete' || flat.some(row => row.group.folder === group.folder)) known.set(group.folder, group);
+    }
+    const controlGroups = ordered ? [...known.values()] : data.groups;
+    const grouped = controlGroups.map((group, index) => `<div class="unread-group">
+      <div class="unread-group-title"><strong data-i18n-skip>${escapeHtml(mailState.folderLabels.get(group.folder) || group.folder)}</strong>
+        <button class="btn secondary small" type="button" data-result-folder="${index}" data-target-folder="${escapeHtml(group.folder)}">${escapeHtml(t(search ? '查看该文件夹全部结果' : '查看该文件夹未读'))}${!search ? ` (${group.unread})` : ''}</button></div>
+      ${group.ok ? (ordered || threaded ? '' : group.messages.map(message => messageRow(message, group.folder, group.uidValidity)).join('')) : `<div class="mail-loading">${escapeHtml(t(group.reason === 'mailbox_changed' ? '邮箱已重建，已移除该文件夹的旧结果。' : group.error || '文件夹搜索或加载失败'))}${!search ? ` <button class="btn secondary small" type="button" data-retry-page>${escapeHtml(t('重试本页'))}</button>` : ''}</div>`}
+      ${group.reason === 'scan_limit' || (group.state === 'limited' && !group.messages.length) ? `<p class="mail-loading">${escapeHtml(t('尚未扫描完毕'))}</p>` : ''}
+      ${search && (group.resumeCursor || group.retryCursor) ? `<button class="btn secondary small" type="button" data-continue-group="${index}"${mailState.groupControllers.has(group.folder) ? ' disabled' : ''}>${escapeHtml(t(group.retryCursor ? '重试此文件夹' : '继续扫描此文件夹'))}</button>` : ''}
+    </div>`).join('') || `<div class="mail-loading">${escapeHtml(t(search ? (data.nextFoldersCursor ? '本组没有结果，可继续下一页' : '本组没有符合条件的邮件') : '没有未读邮件'))}</div>`;
+    list.innerHTML = orderedRows + grouped;
+    list.querySelectorAll('[data-result-folder]').forEach(button => button.addEventListener('click', () => selectFolder(controlGroups[Number(button.dataset.resultFolder)].folder, search ? 'search' : 'unread')));
+    list.querySelectorAll('[data-retry-page]').forEach(button => button.addEventListener('click', () => loadMessages().catch(showError)));
+    list.querySelectorAll('[data-continue-group]').forEach(button => button.addEventListener('click', async event => {
+      const index = Number(button.dataset.continueGroup);
+      const group = controlGroups[index];
+      const keyboard = event.detail === 0 && document.activeElement === button;
+      const originalPage = mailState.requestId;
+      const controller = new AbortController();
+      if (mailState.groupControllers.has(group.folder)) return;
+      mailState.groupControllers.set(group.folder, controller);
+      button.disabled = true;
+      try {
+        const cursor = group.retryCursor || group.resumeCursor;
+        const update = await Api.post('/api/mail/search', { ...usableMailFilters(), ...threadOptions(), continuation: true, cursor }, { signal: controller.signal });
+        if (!update || originalPage !== mailState.requestId || data !== mailState.listData || controller.signal.aborted) return;
+        mailState.groupControllers.delete(group.folder);
+        receivedScan.slice(update);
+        const scroll = list.scrollTop;
+        const slot = data.groups.findIndex(item => item.folder === group.folder);
+        if (slot >= 0) {
+          data.groups[slot] = update.groups[0];
+          // Keep the cursor of this visible slice so it can be reloaded on return.
+          (data.groupPositions ||= new Map()).set(group.folder, cursor);
+        }
+        const updatedGroup = update.groups[0];
+        if (updatedGroup.reason === 'mailbox_changed' && mailState.selectedFolder === group.folder) {
+          mailState.selectedUid = null; mailState.selectedFolder = null; mailState.selectedValidity = null; clearReader();
+        }
+        const active = document.activeElement;
+        renderMessagePage(data, list);
+        list.scrollTop = scroll;
+        updateMailControls();
+        // A keyboard retry that finds no messages can move directly to the next
+        // batch instead of making the user tab through all remaining folders.
+        if (keyboard && active !== button && active !== document.body) return;
+        if (keyboard && group.retryCursor && updatedGroup.ok) {
+          const found = new Set(updatedGroup.messages.map(message => message.uid));
+          const index = mailState.visible.findIndex(ref => ref.folder === group.folder && ref.uidValidity === updatedGroup.uidValidity && found.has(ref.uid));
+          const row = index >= 0 ? readerRow(index) : null;
+          const next = document.getElementById('next-page');
+          const target = row || (!found.size && !next.disabled ? next : null);
+          if (target) { target.focus(); return; }
+        }
+        const position = [...list.querySelectorAll('[data-result-folder]')].find(element => element.dataset.targetFolder === group.folder);
+        (position?.closest('.unread-group')?.querySelector('[data-continue-group]') || position)?.focus({ preventScroll: true });
+      } catch (error) {
+        if (originalPage === mailState.requestId && (error.details?.code === 'SEARCH_CURSOR_INVALID' || [401, 403, 404].includes(error.status))) {
+          receivedScan.reset();
+          mailState.requestId++;
+          for (const pending of mailState.groupControllers.values()) pending.abort();
+          mailState.groupControllers.clear();
+          leaveReader(false);
+          mailState.selectedUid = null; mailState.selectedFolder = null; mailState.selectedValidity = null; clearReader();
+          data.groups = []; data.groupPositions?.clear(); mailState.visible = []; mailState.hasMore = false;
+          list.innerHTML = `<div class="mail-loading">${escapeHtml(t('搜索位置已失效，请重新搜索'))} <button class="btn secondary small" type="button" id="retry-mail-page">${escapeHtml(t('重新搜索'))}</button></div>`;
+          const retry = list.querySelector('#retry-mail-page'); retry.addEventListener('click', resetMailSearch); retry.focus();
+          updateMailControls();
+        } else showError(error);
+      }
+      finally {
+        if (mailState.groupControllers.get(group.folder) === controller) {
+          mailState.groupControllers.delete(group.folder);
+          const control = [...list.querySelectorAll('[data-result-folder]')].find(element => element.dataset.targetFolder === group.folder);
+          const resume = control?.closest('.unread-group')?.querySelector('[data-continue-group]');
+          if (resume) resume.disabled = false;
+        }
+      }
+    }));
+  } else {
+    mailState.uidValidity = data.uidValidity;
+    mailState.totalPages = data.totalPages; mailState.total = data.total;
+    document.getElementById('current-folder').textContent = personalLabels.get(mailState.labelId)?.name || savedSearches.title(data.folder);
+    document.getElementById('message-total').textContent = data.total === null ? t('邮件总数未知') : `${t('共')} ${data.total} ${t('封邮件')}`;
+    document.getElementById('page-label').textContent = data.totalPages === null ? String(data.page) : `${data.page} / ${data.totalPages}`;
+    list.innerHTML = (threadMode() ? conversationRows(data.messages.map(message => ({ group: data, message })), false, false)
+      : data.messages.map(message => messageRow(message, data.folder, data.uidValidity)).join(''))
+      || `<div class="mail-loading">${escapeHtml(t(data.state === 'limited' ? '尚未扫描完毕' : '没有符合条件的邮件'))}</div>`;
+  }
+  list.querySelectorAll('.message-item').forEach(row => {
+    const index = Number(row.dataset.index), ref = mailState.visible[index];
+    row.querySelector('.message-select').addEventListener('change', event => {
+      if (event.target.checked) mailState.checked.add(index); else mailState.checked.delete(index);
+      updateMailControls();
+    });
+    row.querySelector('.message-star').addEventListener('click', () => applyMailFlags([ref], 'flagged', !ref.flagged).catch(showError));
+    row.querySelector('.message-open').addEventListener('click', () => openReader(ref));
+  });
+  if (autoRead && !same && mailState.view === 'folder' && data.inspectedCandidates === undefined && !mailState.readerAnchor && !mailState.selectedUid && mailState.visible.length && window.matchMedia('(min-width: 761px)').matches) {
+    const first = mailState.visible[0];
+    mailState.selectedUid = first.uid; mailState.selectedFolder = first.folder; mailState.selectedValidity = first.uidValidity;
+    list.querySelector('.message-item').classList.add('active');
+    loadMessage(first.uid, false, first.folder, first.uidValidity).catch(showError);
+  }
+  updateReaderNavigation();
+}
+
+async function loadMessages(targetPage = mailState.page, readerReturn = null) {
+  const requestId = ++mailState.requestId;
+  for (const pending of mailState.groupControllers.values()) pending.abort();
+  mailState.groupControllers.clear();
+  mailState.listController?.abort();
+  const controller = new AbortController();
+  mailState.listController = controller;
+  mailState.loading = true; mailState.checked.clear(); mailState.visible = [];
+  updateMailControls();
+  const list = document.getElementById('message-list');
+  if (mailState.savedSearchId && mailState.view === 'folder' && !mailState.availableFolders?.has(mailState.folder)) {
+    mailState.loading = false; mailState.hasMore = false; mailState.total = 0;
+    mailState.page = 1; mailState.totalPages = 1; mailState.uidValidity = null;
+    mailState.listController = null; mailState.listData = null;
+    document.getElementById('current-folder').textContent = savedSearches.title(mailState.folder);
+    document.getElementById('message-total').textContent = '';
+    document.getElementById('page-label').textContent = '1 / 1';
+    list.innerHTML = `<div class="mail-loading">${escapeHtml(t('保存的搜索文件夹已不存在或无权访问，请编辑搜索范围。'))}</div>`;
+    updateMailControls();
+    return;
+  }
+  list.innerHTML = `<div class="mail-loading">${escapeHtml(t('正在加载邮件…'))}</div>`;
+  try {
+    const prior = mailState.cursors[targetPage - 1];
+    const cursor = prior ? { cursor: prior } : {};
+    let data;
+    if (mailState.view === 'search') {
+      const filters = { ...usableMailFilters(), ...threadOptions(), continuation: true };
+      data = await Api.post('/api/mail/search', { ...filters, ...cursor }, { signal: controller.signal });
+      if (data && requestId === mailState.requestId && !controller.signal.aborted) receivedScan.page(data, targetPage);
+      if (data && readerReturn?.groups?.size) {
+        const groups = new Map(data.groups.map(group => [group.folder, group]));
+        for (const [folder, cursor] of readerReturn.groups) {
+          if (requestId !== mailState.requestId || controller.signal.aborted) return;
+          const replay = await Api.post('/api/mail/search', { ...filters, cursor }, { signal: controller.signal });
+          const group = replay?.groups?.[0];
+          if (group?.folder === folder && requestId === mailState.requestId && !controller.signal.aborted) {
+            groups.set(folder, group); receivedScan.slice(replay);
+          }
+        }
+        data.groupPositions = new Map(readerReturn.groups);
+        data.groups = [...groups.values()].sort((a, b) => a.folder === b.folder ? 0 : a.folder < b.folder ? -1 : 1);
+      }
+    } else if (mailState.view === 'unread') {
+      const query = new URLSearchParams(prior ? { after: prior } : {});
+      data = await Api.get(`/api/mail/unread?${query}`, { signal: controller.signal });
+    } else {
+      data = await Api.post('/api/mail/messages/search', { ...usableMailFilters(), ...threadOptions(), folder: mailState.folder, page: String(targetPage),
+        pageSize: String(mailState.pageSize), continuation: true, ...cursor, ...(mailState.uidValidity ? { uidValidity: mailState.uidValidity } : {}) }, { signal: controller.signal });
+    }
+    if (requestId !== mailState.requestId || !data) return;
+    mailState.page = targetPage;
+    mailState.cursors.length = targetPage;
+    if (data.pageCursor) mailState.cursors[targetPage - 1] = data.pageCursor;
+    const next = mailState.view === 'unread' ? data.nextAfter : mailState.view === 'search' ? data.nextFoldersCursor : data.resumeCursor;
+    mailState.hasMore = !!next;
+    mailState.cursors[targetPage] = next;
+    renderMessagePage(data, list, !readerReturn);
+    return data;
+  } catch (error) {
+    if (error.name === 'AbortError' || requestId !== mailState.requestId) return;
+    const displayError = [400, 409].includes(error.status) || error.details?.code === 'SEARCH_BUDGET_EXCEEDED' ? error.message : '邮件加载失败，请刷新后重试';
+    const restart = error.details?.code === 'SEARCH_CURSOR_INVALID';
+    if (mailState.view === 'search' && (restart || [401, 403, 404].includes(error.status))) {
+      receivedScan.reset(); mailState.listData = null; mailState.hasMore = false;
+    }
+    list.innerHTML = `<div class="mail-loading">${escapeHtml(t(displayError))} <button class="btn secondary small" type="button" id="retry-mail-page">${escapeHtml(t(restart ? '重新搜索' : '重试本页'))}</button></div>`;
+    list.querySelector('#retry-mail-page').addEventListener('click', () => restart ? resetMailSearch() : loadMessages(targetPage).catch(showError));
+    throw error;
+  } finally {
+    if (requestId === mailState.requestId) { mailState.loading = false; mailState.listController = null; updateMailControls(); updateReaderNavigation(); }
   }
 }
 
-async function loadMessage(uid, markRead = false) {
+const readerHistoryKey = Math.random().toString(36).slice(2);
+const sameRef = (ref, anchor) => ref && anchor && ref.uid === anchor.uid && ref.folder === anchor.folder && ref.uidValidity === anchor.uidValidity;
+const selectedRef = () => ({ uid: mailState.selectedUid, folder: mailState.selectedFolder, uidValidity: mailState.selectedValidity });
+const readerRow = index => document.querySelector(`.message-item[data-index="${index}"] .message-open`);
+function updateReaderNavigation() {
+  const nav = document.getElementById('reader-navigation');
+  nav.hidden = !mailState.readerAnchor;
+  const back = document.getElementById('reader-back');
+  const previous = document.getElementById('reader-previous');
+  const next = document.getElementById('reader-next');
+  back.textContent = t('返回列表'); previous.textContent = t('上一封'); next.textContent = t('下一封');
+  const index = mailState.visible.findIndex(ref => sameRef(ref, selectedRef()));
+  const count = document.getElementById('reader-conversation-count');
+  const size = mailState.visible[index]?.threadSize || 1;
+  count.hidden = size <= 1;
+  count.textContent = size > 1 ? `${t('会话邮件')} (${size})` : '';
+  previous.disabled = mailState.loading || mailState.readerMoving || (index <= 0 && (mailState.page <= 1 || receivedOrder()));
+  next.disabled = mailState.loading || mailState.readerMoving || (index >= mailState.visible.length - 1 && !mailState.hasMore);
+}
+
+function openReader(ref) {
+  if (!ref) return;
+  if (!mailState.readerAnchor) {
+    mailState.readerAnchor = { ref, page: mailState.page, data: mailState.listData, cursors: [...mailState.cursors],
+      validity: mailState.uidValidity, groups: new Map(mailState.listData?.groupPositions),
+      listTop: document.getElementById('message-list').scrollTop, screenY: window.scrollY };
+    if (history.state?.mailReader !== readerHistoryKey) history.pushState({ mailReader: readerHistoryKey }, '');
+    document.querySelector('.mail-layout').classList.add('reader-open');
+    if (window.matchMedia('(max-width: 760px)').matches) document.querySelector('.mail-layout').scrollIntoView({ block: 'start' });
+  }
+  mailState.selectedUid = ref.uid; mailState.selectedFolder = ref.folder; mailState.selectedValidity = ref.uidValidity;
+  document.querySelectorAll('.message-item').forEach(item => item.classList.toggle('active', sameRef(mailState.visible[Number(item.dataset.index)], ref)));
+  updateReaderNavigation();
+  loadMessage(ref.uid, true, ref.folder, ref.uidValidity).catch(error => {
+    if (error.name === 'AbortError' || !sameRef(ref, selectedRef())) return;
+    clearReader('邮件加载失败，请刷新后重试'); showError(error);
+  });
+}
+
+function leaveReader(restore = true) {
+  const anchor = mailState.readerAnchor;
+  if (!anchor) return;
+  const shouldReload = mailState.readerMoving || mailState.page !== anchor.page || mailState.listData !== anchor.data;
+  mailState.readerAnchor = null; mailState.readerMoving = false;
+  // Withdraw the history token when switching views without a browser back.
+  if (history.state?.mailReader === readerHistoryKey) history.replaceState(null, '');
+  document.querySelector('.mail-layout').classList.remove('reader-open');
+  mailState.selectedUid = null; mailState.selectedFolder = null; mailState.selectedValidity = null;
+  clearReader(); updateReaderNavigation();
+  document.querySelectorAll('.message-item.active').forEach(row => row.classList.remove('active'));
+  if (!restore) return;
+  let ready = Promise.resolve();
+  if (shouldReload) {
+    // loadMessages cancels the old traversal and advances the response generation.
+    mailState.cursors = anchor.cursors; mailState.uidValidity = anchor.validity;
+    ready = loadMessages(anchor.page, anchor);
+  }
+  const requestId = mailState.requestId;
+  const restoreFocus = success => requestAnimationFrame(() => {
+    if (requestId !== mailState.requestId || mailState.readerAnchor) return;
+    const list = document.getElementById('message-list');
+    if (success) { list.scrollTop = anchor.listTop; window.scrollTo(0, anchor.screenY); }
+    const index = mailState.visible.findIndex(item => sameRef(item, anchor.ref));
+    const row = readerRow(index) || list.querySelector('#retry-mail-page') || readerRow(0) || document.getElementById('current-folder');
+    row?.focus({ preventScroll: true });
+  });
+  ready.then(() => restoreFocus(true), () => restoreFocus(false));
+}
+
+function backToMessages() {
+  if (history.state?.mailReader === readerHistoryKey) history.back();
+  else leaveReader();
+}
+
+async function moveReader(direction) {
+  if (!mailState.readerAnchor || mailState.loading || mailState.readerMoving) return;
+  const anchor = mailState.readerAnchor;
+  const current = mailState.visible.findIndex(ref => sameRef(ref, selectedRef()));
+  const next = current + direction;
+  if (current >= 0 && mailState.visible[next]) return openReader(mailState.visible[next]);
+  const ordered = receivedOrder();
+  if (direction > 0 ? !mailState.hasMore : mailState.page <= 1 || ordered) return;
+  const previouslyVisible = ordered ? [...mailState.visible] : null;
+  mailState.readerMoving = true; updateReaderNavigation();
+  try {
+    await loadMessages(mailState.page + direction);
+    if (anchor !== mailState.readerAnchor) return;
+    const ref = ordered ? mailState.visible.find(item => !previouslyVisible.some(previous => sameRef(previous, item)))
+      : direction > 0 ? mailState.visible[0] : mailState.visible.at(-1);
+    if (ref) openReader(ref);
+    else toast(t('本组没有结果，可继续下一页'));
+  } catch (error) { showError(error); }
+  finally { if (anchor === mailState.readerAnchor) { mailState.readerMoving = false; updateReaderNavigation(); } }
+}
+
+window.addEventListener('popstate', () => { if (history.state?.mailReader !== readerHistoryKey) leaveReader(); });
+document.getElementById('reader-back').addEventListener('click', backToMessages);
+document.getElementById('reader-previous').addEventListener('click', () => moveReader(-1));
+document.getElementById('reader-next').addEventListener('click', () => moveReader(1));
+document.querySelector('.mail-reader').addEventListener('keydown', event => {
+  if (!mailState.readerAnchor || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey
+    || event.target.closest('input,textarea,select,[contenteditable]') || document.querySelector('dialog[open]')) return;
+  if (event.key === 'Escape') { event.preventDefault(); backToMessages(); }
+  if (event.key === 'ArrowLeft' && !document.getElementById('reader-previous').disabled) { event.preventDefault(); moveReader(-1); }
+  if (event.key === 'ArrowRight' && !document.getElementById('reader-next').disabled) { event.preventDefault(); moveReader(1); }
+});
+
+async function loadMessage(uid, markRead = false, folderAtRequest = mailState.folder, validityAtRequest = mailState.uidValidity) {
   clearReader('正在加载邮件正文…');
-  const folderAtRequest = mailState.folder;
+  const controller = new AbortController();
+  mailState.detailController = controller;
   const query = new URLSearchParams({ folder: folderAtRequest });
-  if (mailState.uidValidity) query.set('uidValidity', mailState.uidValidity);
-  const data = await Api.get(`/api/mail/messages/${uid}?${query}`);
-  if (mailState.folder !== folderAtRequest || mailState.selectedUid !== uid) return;
+  if (validityAtRequest) query.set('uidValidity', validityAtRequest);
+  const data = await Api.get(`/api/mail/messages/${uid}?${query}`, { signal: controller.signal });
+  if (!data || mailState.detailController !== controller || mailState.selectedFolder !== folderAtRequest || mailState.selectedUid !== uid || mailState.selectedValidity !== validityAtRequest) return;
+  mailState.detailController = null;
   const message = data.message;
   const fileQuery = new URLSearchParams({ folder: folderAtRequest, uidValidity: message.uidValidity });
   document.getElementById('export-message').href = `/api/mail/messages/${uid}/export?${fileQuery}`;
@@ -366,11 +864,18 @@ async function loadMessage(uid, markRead = false) {
     : '-';
 
   const attachments = document.getElementById('reader-attachments');
-  if (message.attachments.length) {
+  const omittedCount = Number(message.attachmentsOmittedCount || 0);
+  if (message.attachments.length || omittedCount) {
     attachments.style.display = 'block';
     attachments.innerHTML = `<strong>${escapeHtml(t('附件'))} (${message.attachments.length})</strong>` + message.attachments.map((item) =>
       `<span data-i18n-skip>📎 ${escapeHtml(item.filename)} · ${readableBytes(item.size)} ${item.part ? `<a class="btn secondary small" href="/api/mail/messages/${uid}/attachments/${encodeURIComponent(item.part)}/download?${escapeHtml(fileQuery.toString())}" download>${escapeHtml(t('下载附件'))}</a>` : ''}</span>`
     ).join('');
+    if (omittedCount) {
+      const note = document.createElement('p');
+      note.className = 'hint';
+      note.textContent = `${t('未显示的附件')} ${omittedCount} · ${t('可导出原始邮件查看所有附件')}`;
+      attachments.append(note);
+    }
   } else {
     attachments.style.display = 'none';
     attachments.innerHTML = '';
@@ -380,7 +885,7 @@ async function loadMessage(uid, markRead = false) {
   if (message.html) body.innerHTML = message.html;
   else {
     const pre = document.createElement('pre');
-    pre.textContent = message.bodyOmitted ? t('正文超过10 MB，暂不预览；可下载附件或导出原始邮件。') : message.text || t('这封邮件没有可显示的正文');
+    pre.textContent = message.bodyOmitted ? t(message.omittedReason ? '正文或内嵌图片超过预览预算；可下载附件或导出原始邮件。' : '正文超过10 MB，暂不预览；可下载附件或导出原始邮件。') : message.text || t('这封邮件没有可显示的正文');
     body.replaceChildren(pre);
   }
   const imageControls = document.getElementById('reader-image-controls');
@@ -394,26 +899,28 @@ async function loadMessage(uid, markRead = false) {
     : t('内嵌图片和安全排版已还原；脚本、表单、外部样式和危险布局始终被屏蔽。');
   document.getElementById('reader-empty').style.display = 'none';
   document.getElementById('reader-content').style.display = 'block';
-  if (markRead && !message.seen) await setSeen(true, uid, folderAtRequest);
-  if (window.matchMedia('(max-width: 760px)').matches) {
-    document.querySelector('.mail-reader').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (markRead && mailState.readerAnchor && sameRef(selectedRef(), { uid, folder: folderAtRequest, uidValidity: validityAtRequest })) {
+    document.getElementById('reader-subject').focus({ preventScroll: true });
   }
+  if (markRead && !message.seen) await setSeen(true, uid, folderAtRequest, message.uidValidity).catch(showError);
 }
 
 function updateSeenButton() {
-  document.getElementById('toggle-seen').textContent = t(mailState.seen ? '标为未读' : '标为已读');
+  const button = document.getElementById('toggle-seen');
+  button.textContent = t(mailState.seen ? '标为未读' : '标为已读');
+  const pending = mailState.seenRequest;
+  button.disabled = !!pending && pending.folder === mailState.selectedFolder && pending.uid === mailState.selectedUid && pending.validity === mailState.selectedValidity;
 }
 
 async function markAllSeen(label, folders) {
   if (mailState.bulkBusy) return;
   if (!confirm(`${t('将以下范围全部标为本地已读（包含所有分页）？')}\n${label}\n\n${folders.join('\n')}`)) return;
-  mailState.bulkBusy = true;
-  document.querySelectorAll('#folder-seen-all, .group-seen-all').forEach((button) => { button.disabled = true; });
   try {
-    const data = await Api.put('/api/mail/seen-all', { folders });
-    const failed = data.results.filter((result) => !result.ok);
-    if (failed.length) toast(`${t('部分文件夹失败，请刷新后重试')}：${failed.map((result) => result.folder).join(', ')}`, 'error');
-    else toast(t('已全部标为已读'));
+    mailState.bulkBusy = true;
+    document.querySelectorAll('#folder-seen-all, .group-seen-all').forEach(button => { button.disabled = true; });
+    const job = await Api.post('/api/mail/seen-jobs', { folders });
+    try { sessionStorage.setItem('mail-seen-job', job.id); } catch (_) {}
+    await followSeenJob(job.id);
   } catch (error) { showError(error); }
   finally {
     mailState.bulkBusy = false;
@@ -422,21 +929,87 @@ async function markAllSeen(label, folders) {
   }
 }
 
-async function setSeen(seen, uid = mailState.selectedUid, folder = mailState.folder) {
-  const button = document.getElementById('toggle-seen');
-  button.disabled = true;
+async function followSeenJob(id) {
+  const status = document.getElementById('bulk-job-status');
+  status.hidden = false;
+  for (;;) {
+    let job;
+    try { job = await Api.get(`/api/mail/seen-jobs/${encodeURIComponent(id)}`); }
+    catch (error) {
+      if (error.status === 404) { try { sessionStorage.removeItem('mail-seen-job'); } catch (_) {} }
+      status.textContent = t('批量任务状态暂不可用，请刷新后检查');
+      throw error;
+    }
+    status.textContent = `${t('批量标记进行中')}：${job.processedFolders}/${job.totalFolders} ${t('个文件夹')} · ${t('已确认邮件')} ${job.updated}`;
+    if (!['queued', 'running', 'cancelling'].includes(job.status)) {
+      try { sessionStorage.removeItem('mail-seen-job'); } catch (_) {}
+      const failed = job.results.filter(result => !result.ok);
+      if (job.status !== 'completed') {
+        status.textContent = `${t('批量任务部分完成，请检查失败文件夹')}：${failed.map(result => result.folder).join(', ')}`;
+        toast(status.textContent, 'error');
+      } else { status.textContent = `${t('批量任务已完成')}：${job.updated} ${t('封邮件')}`; toast(t('已全部标为已读')); }
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1200));
+  }
+}
+
+async function resumeSeenJob() {
+  let id;
+  try { id = sessionStorage.getItem('mail-seen-job'); } catch (_) {}
+  if (mailState.bulkBusy) return;
+  if (!id) {
+    try { id = (await Api.get('/api/mail/seen-jobs/active'))?.job?.id; }
+    catch (_) { return; }
+  }
+  if (!id || mailState.bulkBusy) return;
+  mailState.bulkBusy = true;
+  document.querySelectorAll('#folder-seen-all, .group-seen-all').forEach(button => { button.disabled = true; });
+  try { await followSeenJob(id); }
+  catch (error) { showError(error); }
+  finally {
+    mailState.bulkBusy = false;
+    await refreshAll();
+    document.querySelectorAll('#folder-seen-all, .group-seen-all').forEach(button => { button.disabled = false; });
+  }
+}
+
+async function setSeen(seen, uid = mailState.selectedUid, folder = mailState.selectedFolder, validity = mailState.selectedValidity) {
+  const pending = { folder, uid, validity };
+  mailState.seenRequest = pending;
+  updateSeenButton();
   try {
     const query = new URLSearchParams({ folder });
-    if (mailState.uidValidity) query.set('uidValidity', mailState.uidValidity);
+    if (validity) query.set('uidValidity', validity);
     const result = await Api.put(`/api/mail/messages/${uid}/seen?${query}`, { seen });
-    if (mailState.folder === folder) {
-      document.querySelectorAll('.message-item').forEach((item) => {
-        if (Number(item.dataset.uid) === uid) item.classList.toggle('unread', !result.seen);
-      });
-      if (mailState.selectedUid === uid) { mailState.seen = result.seen; updateSeenButton(); }
+    if (!result) return;
+    document.querySelectorAll('.message-item').forEach((item) => {
+      const ref = mailState.visible[Number(item.dataset.index)];
+      if (ref && ref.folder === folder && ref.uid === uid && ref.uidValidity === validity) item.classList.toggle('unread', !result.seen);
+    });
+    if (mailState.selectedFolder === folder && mailState.selectedUid === uid && mailState.selectedValidity === validity) {
+      mailState.seen = result.seen; updateSeenButton();
     }
     await loadFolders();
-  } finally { button.disabled = false; }
+  } finally { if (mailState.seenRequest === pending) { mailState.seenRequest = null; updateSeenButton(); } }
+}
+
+async function applyMailFlags(refs, flag, value) {
+  if (!refs.length || mailState.flagBusy) return;
+  mailState.flagBusy = true; updateMailControls();
+  try {
+    const messages = refs.map(({ folder, uidValidity, uid }) => ({ folder, uidValidity, uid }));
+    const data = await Api.put('/api/mail/messages/flags', { messages, flag, value });
+    const failed = data.results.filter(result => !result.ok);
+    if (flag === 'seen' && refs.some(ref => ref.folder === mailState.selectedFolder && ref.uid === mailState.selectedUid && ref.uidValidity === mailState.selectedValidity)
+        && data.results.some(result => result.folder === mailState.selectedFolder && result.ok)) {
+      mailState.seen = value; updateSeenButton();
+    }
+    if (failed.length) toast(`${t('部分邮件操作失败，请刷新后重试')}：${failed.map(result => result.folder).join(', ')}`, 'error');
+    else toast(t('邮件操作已完成'));
+    mailState.total = null;
+    await refreshAll();
+  } finally { mailState.flagBusy = false; updateMailControls(); }
 }
 
 function loadRemoteImages() {
@@ -456,7 +1029,8 @@ function loadRemoteImages() {
 }
 
 function showError(error) {
-  toast(error.message, 'error');
+  if (error?.name === 'AbortError') return;
+  toast(t(error.message), 'error');
 }
 
 document.querySelector('.mail-reader').addEventListener('click', async (event) => {
@@ -492,18 +1066,44 @@ async function refreshAll() {
 }
 
 function resetMailSearch() {
-  mailState.page = 1; mailState.cursors = [null]; mailState.uidValidity = null;
+  receivedScan.reset();
+  leaveReader(false);
+  mailState.listController?.abort();
+  mailState.page = 1; mailState.cursors = [null]; mailState.uidValidity = null; mailState.total = null;
   mailState.hasMore = false;
   mailState.requestId++;
-  mailState.selectedUid = null; clearReader(); refreshAll();
+  mailState.selectedUid = null; mailState.selectedFolder = null; mailState.selectedValidity = null; clearReader(); refreshAll();
 }
+document.getElementById('select-page').addEventListener('change', event => {
+  mailState.checked.clear();
+  if (event.target.checked) mailState.visible.forEach((_, index) => mailState.checked.add(index));
+  document.querySelectorAll('.message-select').forEach(input => { input.checked = event.target.checked; });
+  updateMailControls();
+});
+document.querySelectorAll('[data-bulk-flag]').forEach(button => button.addEventListener('click', () => {
+  const refs = [...mailState.checked].map(index => mailState.visible[index]).filter(Boolean);
+  applyMailFlags(refs, button.dataset.bulkFlag, button.dataset.value === 'true').catch(showError);
+}));
 document.getElementById('mail-search').addEventListener('submit', (event) => {
   event.preventDefault();
-  mailState.filters = Object.fromEntries(new FormData(event.currentTarget));
+  const { scope, ...filters } = Object.fromEntries(new FormData(event.currentTarget));
+  if (scope === 'all' && !mailState.labelId && !Object.keys(usableMailFilters(filters)).length) {
+    toast(t('请至少填写一个搜索条件'), 'error'); return;
+  }
+  mailState.filters = filters;
+  mailState.smartKind = null;
+  mailState.view = scope === 'all' ? 'search' : 'folder';
+  document.getElementById('folder-seen-all').hidden = mailState.view !== 'folder';
+  document.querySelectorAll('.folder-item').forEach(item => item.classList.toggle('active', mailState.view === 'folder' && item.dataset.folder === mailState.folder));
   resetMailSearch();
 });
 document.getElementById('mail-search').addEventListener('reset', () => {
+  savedSearches.clear();
+  mailState.labelId = null; personalLabels.select(null);
   mailState.filters = {};
+  mailState.view = 'folder';
+  document.getElementById('folder-seen-all').hidden = false;
+  document.querySelectorAll('.folder-item').forEach(item => item.classList.toggle('active', item.dataset.folder === mailState.folder));
   resetMailSearch();
 });
 document.getElementById('refresh-mail').addEventListener('click', resetMailSearch);
@@ -511,17 +1111,52 @@ document.getElementById('folder-seen-all').addEventListener('click', () => markA
 document.getElementById('toggle-seen').addEventListener('click', () => setSeen(!mailState.seen).catch(showError));
 document.getElementById('load-remote-images').addEventListener('click', loadRemoteImages);
 document.getElementById('previous-page').addEventListener('click', () => {
-  if (mailState.page > 1) { mailState.page -= 1; mailState.selectedUid = null; clearReader(); loadMessages().catch(showError); }
+  if (!mailState.loading && mailState.page > 1) { mailState.selectedUid = null; mailState.selectedFolder = null; mailState.selectedValidity = null; clearReader(); loadMessages(mailState.page - 1).catch(showError); }
 });
 document.getElementById('next-page').addEventListener('click', () => {
-  if (mailState.hasMore) { mailState.page += 1; mailState.selectedUid = null; clearReader(); loadMessages().catch(showError); }
+  if (!mailState.loading && mailState.hasMore) { mailState.selectedUid = null; mailState.selectedFolder = null; mailState.selectedValidity = null; clearReader(); loadMessages(mailState.page + 1).catch(showError); }
 });
+
+document.getElementById('mail-conversations').addEventListener('change', resetMailSearch);
+document.getElementById('search-order').addEventListener('change', () => {
+  if (mailState.view === 'search' && !mailState.loading && mailState.listData) {
+    renderMessagePage(mailState.listData, document.getElementById('message-list'));
+    updateMailControls();
+  }
+});
+document.getElementById('attachments-view').addEventListener('click', () => {
+  document.getElementById('search-order').value = 'received';
+  applySavedSearch({ scope: 'all', filters: { attachment: 'present' } }, { attachments: true });
+  savedSearches.render();
+});
+function applySavedSearch(value, { savedSearchId = null, starred = false, attachments = false, labelId = null } = {}) {
+  mailState.labelId = labelId; personalLabels.select(labelId);
+  mailState.savedSearchId = savedSearchId; mailState.smartKind = starred ? 'starred' : attachments ? 'attachments' : null;
+  mailState.filters = { ...value.filters }; mailState.view = value.scope === 'all' ? 'search' : 'folder';
+  if (value.scope === 'folder') mailState.folder = value.folder;
+  const form = document.getElementById('mail-search');
+  for (const element of form.elements) {
+    if (!element.name) continue;
+    element.value = element.name === 'scope' ? value.scope : value.filters[element.name] || (element.tagName === 'SELECT' ? 'all' : '');
+  }
+  form.style.display = '';
+  document.getElementById('folder-seen-all').hidden = mailState.view !== 'folder';
+  resetMailSearch();
+}
+const savedSearches = MailSearches.create({ state: mailState, form: document.getElementById('mail-search'),
+  api: Api, t, escapeHtml, apply: applySavedSearch, onError: showError });
+const personalLabels = MailLabelsUI.create({ selectedRef, t, onError: showError,
+  openLabel: id => { if (id) applySavedSearch({ scope: 'all', filters: {} }, { labelId: id }); else selectFolder(mailState.folder); savedSearches.render(); } });
+const mailRules = MailRules.create({ state: mailState, searchForm: document.getElementById('mail-search'), t, onError: showError, labelOptions: personalLabels.options });
 
 (async function initializeMail() {
   applyBranding();
-  await requireLogin();
+  await Promise.all([requireLogin(), window.I18n?.ready]);
   renderNav('mail');
-  await refreshAll();
+  document.querySelectorAll('[data-mail-label]').forEach(element => { element.textContent = t(element.dataset.mailLabel); });
+  await Promise.all([refreshAll(), savedSearches.load().catch(showError), personalLabels.load().catch(showError)]);
+  await mailRules.load().then(() => mailRules.showLinkedPreview()).catch(showError);
+  resumeSeenJob();
 })();
 </script>
 </body>

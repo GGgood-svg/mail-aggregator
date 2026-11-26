@@ -1,5 +1,7 @@
 const { Transform } = require('node:stream');
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+const MAX_ATTACHMENT_METADATA_BYTES = 512 * 1024;
+const SEARCH_FILTER_KEYS = Object.freeze(['from', 'to', 'subject', 'body', 'since', 'until', 'seen', 'flagged', 'largerMb', 'smallerMb']);
 
 function mailError(message, statusCode = 400) {
   return Object.assign(new Error(message), { statusCode });
@@ -7,7 +9,7 @@ function mailError(message, statusCode = 400) {
 
 function searchCriteria(query) {
   const result = {};
-  for (const key of ['from', 'subject']) {
+  for (const key of ['from', 'to', 'subject', 'body']) {
     const value = query[key];
     if (value === undefined || value === '') continue;
     if (typeof value !== 'string' || value.length > 200 || /[\x00-\x1f\x7f]/.test(value)) throw mailError('搜索文字不合法或超过200个字符');
@@ -27,6 +29,19 @@ function searchCriteria(query) {
   if (dates.until) result.before = new Date(dates.until.getTime() + 86400000);
   if (query.seen !== undefined && !['', 'all', 'read', 'unread'].includes(query.seen)) throw mailError('已读筛选值不合法');
   if (query.seen === 'read' || query.seen === 'unread') result.seen = query.seen === 'read';
+  if (query.flagged !== undefined && !['', 'all', 'starred', 'unstarred'].includes(query.flagged)) throw mailError('星标筛选值不合法');
+  if (query.flagged === 'starred' || query.flagged === 'unstarred') result.flagged = query.flagged === 'starred';
+  const sizes = {};
+  for (const [input, output] of [['largerMb', 'larger'], ['smallerMb', 'smaller']]) {
+    const value = query[input];
+    if (value === undefined || value === '') continue;
+    if (typeof value !== 'string' || !/^[1-9]\d{0,3}$/.test(value) || Number(value) > 4095) throw mailError('邮件大小必须是 1 至 4095 MB 的整数');
+    sizes[output] = Number(value) * 1024 * 1024;
+  }
+  if (sizes.larger !== undefined && sizes.smaller !== undefined && sizes.larger >= sizes.smaller) {
+    throw mailError('大小下限必须小于上限');
+  }
+  Object.assign(result, sizes);
   return result;
 }
 
@@ -40,10 +55,10 @@ function safeFilename(value, fallback = 'attachment') {
 
 function attachmentParts(structure) {
   if (!structure) return [];
-  const result = [], stack = [{ node: structure, depth: 0 }];
+  const result = [], stack = [{ node: structure, depth: 0, related: false }];
   let visited = 0;
   while (stack.length) {
-    const { node, depth } = stack.pop();
+    const { node, depth, related } = stack.pop();
     if (++visited > 2000 || depth > 50) throw mailError('邮件结构过于复杂', 413);
     const type = String(node.type || '').toLowerCase();
     const filename = node.dispositionParameters?.filename || node.parameters?.name;
@@ -51,15 +66,40 @@ function attachmentParts(structure) {
     const isFile = disposition === 'attachment' || Boolean(filename) || (!type.startsWith('text/') && !type.startsWith('multipart/') && !node.childNodes?.length);
     if (isFile && !type.startsWith('multipart/')) {
       const part = String(node.part || (depth === 0 ? '1' : ''));
-      if (/^[1-9]\d*(?:\.[1-9]\d*)*$/.test(part)) result.push({
-        part, filename: safeFilename(filename, `attachment-${part}`), contentType: type || 'application/octet-stream',
-        size: Number(node.size || 0), inline: disposition === 'inline',
+      if (part.length <= 256 && /^[1-9]\d*(?:\.[1-9]\d*)*$/.test(part)) result.push({
+        part, filename: safeFilename(filename, `attachment-${part}`), contentType: utf8Prefix(type, 128) || 'application/octet-stream',
+        size: Number(node.size || 0), inline: disposition !== 'attachment' && (disposition === 'inline' || (related && Boolean(node.id))),
       });
       continue; // A forwarded message is one attachment, not arbitrary inner parts.
     }
-    for (const child of [...(node.childNodes || [])].reverse()) stack.push({ node: child, depth: depth + 1 });
+    for (const child of [...(node.childNodes || [])].reverse()) stack.push({ node: child, depth: depth + 1, related: related || type === 'multipart/related' });
   }
   return result;
+}
+
+function utf8Prefix(value, maximum) {
+  const bytes = Buffer.from(String(value || '').slice(0, maximum));
+  if (bytes.length <= maximum) return bytes.toString('utf8');
+  let end = maximum;
+  while ((bytes[end] & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString('utf8');
+}
+
+function boundedAttachmentMetadata(items) {
+  const attachments = [];
+  let bytes = 2; // The JSON array's brackets and separators count as well.
+  for (const item of items || []) {
+    if (attachments.length === 2000) break;
+    const filename = utf8Prefix(item.filename, 384) || 'attachment';
+    const contentType = utf8Prefix(item.contentType, 128) || 'application/octet-stream';
+    const value = { filename, contentType, size: Number(item.size || 0), inline: Boolean(item.inline) };
+    if (typeof item.part === 'string' && item.part.length <= 256) value.part = item.part;
+    const cost = Buffer.byteLength(JSON.stringify(value)) + (attachments.length > 0 ? 1 : 0);
+    if (bytes + cost > MAX_ATTACHMENT_METADATA_BYTES) break;
+    bytes += cost;
+    attachments.push(value);
+  }
+  return { attachments, attachmentsOmittedCount: (items?.length || 0) - attachments.length };
 }
 
 function checkUidValidity(mailbox, expected, required = false) {
@@ -78,4 +118,5 @@ function downloadLimiter(maximum = MAX_DOWNLOAD_BYTES) {
   } });
 }
 
-module.exports = { MAX_DOWNLOAD_BYTES, mailError, searchCriteria, safeFilename, attachmentParts, checkUidValidity, downloadLimiter };
+module.exports = { MAX_DOWNLOAD_BYTES, MAX_ATTACHMENT_METADATA_BYTES, SEARCH_FILTER_KEYS, mailError, searchCriteria,
+  safeFilename, attachmentParts, checkUidValidity, downloadLimiter, utf8Prefix, boundedAttachmentMetadata };

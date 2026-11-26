@@ -11,29 +11,7 @@ try {
 const jobStore = require('../server/job-store');
 const integrationTest = DatabaseSync ? test : test.skip;
 
-function createDatabase() {
-  const db = new DatabaseSync(':memory:');
-  db.exec(`
-    PRAGMA foreign_keys = ON;
-    CREATE TABLE accounts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      enabled INTEGER NOT NULL DEFAULT 1
-    );
-    CREATE TABLE sync_jobs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-      started_at TEXT NOT NULL,
-      finished_at TEXT,
-      status TEXT NOT NULL DEFAULT 'queued'
-      ,pid INTEGER
-    );
-    CREATE UNIQUE INDEX idx_unique_active_job_per_account
-      ON sync_jobs(account_id)
-      WHERE status IN ('queued', 'running');
-  `);
-  return db;
-}
+const createDatabase = DatabaseSync ? require('./fixtures/sync-test-db.cjs').createDatabase : null;
 
 function addAccount(db, name) {
   return db.prepare('INSERT INTO accounts(name) VALUES(?)').run(name).lastInsertRowid;
@@ -173,11 +151,15 @@ integrationTest('restart reconciliation interrupts only running jobs and clears 
     const successAccount = addAccount(db, 'success-restart');
     const queued = jobStore.enqueueJob(db, queuedAccount);
     const running = jobStore.enqueueJob(db, runningAccount);
-    db.prepare("UPDATE sync_jobs SET status='running', pid=4321 WHERE id=?").run(running.jobId);
+    const preparedAccount = addAccount(db, 'prepared-restart');
+    const prepared = jobStore.enqueueJob(db, preparedAccount, 'scheduled');
+    db.prepare("UPDATE sync_jobs SET status='running',stage='preparing' WHERE id=?").run(prepared.jobId);
+    db.prepare("UPDATE sync_jobs SET status='running', transport_state='released', pid=4321 WHERE id=?").run(running.jobId);
     const success = addFinishedJob(db, successAccount, 'success');
 
     const stale = jobStore.reconcileRunningJobs(db);
-    assert.deepEqual(stale.map((job) => job.id), [running.jobId]);
+    assert.deepEqual(stale.map((job) => job.id), [running.jobId, prepared.jobId]);
+    assert.equal(db.prepare('SELECT status FROM sync_jobs WHERE id=?').get(prepared.jobId).status, 'queued');
     const repaired = db.prepare('SELECT status,finished_at,pid FROM sync_jobs WHERE id=?').get(running.jobId);
     assert.equal(repaired.status, 'interrupted');
     assert.ok(repaired.finished_at);

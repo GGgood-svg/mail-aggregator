@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>个人安全</title><link rel="stylesheet" href="/css/style.css"></head>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>个人安全</title><link rel="stylesheet" href="/css/style.css"><style>#profile-totp[hidden],#profile-totp [hidden]{display:none!important}</style></head>
 <body><div class="layout"><div class="sidebar"><div class="brand">📬 <span id="sidebar-brand-text">Mail Aggregator</span></div><nav id="sidebar-nav"></nav></div>
 <main class="content"><h1>个人安全</h1>
   <div id="transport-warning" class="panel" style="display:none;border-color:var(--warn);max-width:680px;margin:18px 0;color:var(--warn)">当前连接是 HTTP，登录密码和会话无法抵御网络窃听或中间人劫持。可信内网可临时使用，外网必须配置 HTTPS。</div>
@@ -10,8 +10,41 @@
     <div class="form-group"><label>确认新密码</label><input id="confirm-password" type="password" autocomplete="new-password"></div>
     <button class="btn" id="change-btn">修改密码</button><span id="change-msg" class="hint" style="margin-left:10px"></span>
   </div>
-</main></div><script src="/js/api.js"></script><script src="/js/branding.js"></script><script src="/js/i18n.js"></script>
+  <div class="panel" style="max-width:680px;margin-top:18px"><h2>登录设备</h2>
+    <p class="hint">浏览器类别用于辨认登录记录。旧会话没有完整记录，使用后会出现在列表里。</p>
+    <p id="device-msg" class="hint" role="status"></p><ul id="devices"></ul>
+    <button class="btn secondary" id="refresh-devices" type="button">刷新设备列表</button>
+    <button class="btn warning" id="revoke-other-devices" type="button">退出其他全部设备</button>
+  </div>
+  <section id="profile-totp" class="panel" style="max-width:680px;margin-top:18px" hidden data-i18n-skip>
+    <h2 data-totp="title"></h2><p id="totp-status"></p>
+    <p data-totp="help" class="hint"></p>
+    <p id="totp-message" role="status" class="hint"></p>
+    <div id="totp-controls" hidden>
+      <div class="form-group"><label for="totp-password" data-totp="password"></label>
+        <input id="totp-password" type="password" autocomplete="current-password"></div>
+      <div id="totp-enrollment" hidden>
+        <p data-totp="scan" class="hint"></p>
+        <canvas id="totp-qr" style="max-width:100%;width:250px;height:auto;image-rendering:pixelated" role="img" data-totp-label="qr"></canvas>
+        <div class="form-group"><label for="totp-seed" data-totp="seed"></label>
+          <input id="totp-seed" type="text" readonly autocomplete="off" spellcheck="false"></div>
+      </div>
+      <div class="form-group" id="totp-confirm" hidden><label for="totp-code" data-totp="authenticatorCode"></label>
+        <input id="totp-code" type="text" maxlength="6" inputmode="numeric" autocomplete="one-time-code"></div>
+      <button type="button" class="btn" id="totp-begin" data-totp="begin"></button>
+      <button type="button" class="btn" id="totp-enable" data-totp="enable" hidden></button>
+      <button type="button" class="btn secondary" id="totp-cancel" data-totp="cancel" hidden></button>
+      <button type="button" class="btn secondary" id="totp-rotate" data-totp="rotate" hidden></button>
+      <button type="button" class="btn warning" id="totp-disable" data-totp="disable" hidden></button>
+    </div>
+    <div id="totp-recovery" hidden>
+      <h3 data-totp="recovery"></h3><p data-totp="saveCodes"></p>
+      <pre id="totp-codes" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+      <button type="button" class="btn" id="totp-close" data-totp="close"></button>
+    </div>
+  </section>
+</main></div><script src="/js/api.js"></script><script src="/js/branding.js"></script><script src="/js/i18n.js"></script><script src="/js/profile-devices.js"></script><script src="/js/totp-i18n.js"></script><script src="/js/profile-totp.js"></script>
 <script>
-(async () => { applyBranding(); const me=await requireLogin(); if(!me)return; renderNav('profile'); document.getElementById('profile-username').textContent=me.username; document.getElementById('profile-role').textContent=me.role==='admin'?'管理员':'普通用户'; document.getElementById('profile-transport').textContent=me.secureTransport?'HTTPS（已加密）':'HTTP（未加密）'; document.getElementById('transport-warning').style.display=me.secureTransport?'none':'block'; })();
+(async () => { applyBranding(); const me=await requireLogin(); if(!me)return; renderNav('profile'); document.getElementById('profile-username').textContent=me.username; document.getElementById('profile-role').textContent=me.role==='admin'?'管理员':me.role==='operator'?'只读运维':'普通用户'; void I18n.ready.then(initProfileDevices); if (me.primaryAdmin) void initProfileTotp(); document.getElementById('profile-transport').textContent=me.secureTransport?'HTTPS（已加密）':'HTTP（未加密）'; document.getElementById('transport-warning').style.display=me.secureTransport?'none':'block'; })();
 document.getElementById('change-btn').onclick=async()=>{ const msg=document.getElementById('change-msg'); msg.textContent=''; const currentPassword=document.getElementById('current-password').value; const newPassword=document.getElementById('new-password').value; if(newPassword!==document.getElementById('confirm-password').value){msg.textContent='两次输入的新密码不一致';return;} try{const result=await Api.post('/api/auth/change-password',{currentPassword,newPassword});setCsrfToken(result.csrfToken);document.getElementById('current-password').value='';document.getElementById('new-password').value='';document.getElementById('confirm-password').value='';msg.textContent='登录密码已修改';}catch(e){msg.textContent=e.message;}};
 </script></body></html>

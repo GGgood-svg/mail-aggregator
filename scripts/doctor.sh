@@ -2,6 +2,12 @@
 # mail-aggregator 依赖诊断脚本 - 只检查,不做任何修改
 # 用法: ./scripts/doctor.sh
 
+if [ "${1:-}" = '--json' ]; then
+  ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+  MAIL_AGG_DATA_DIR="${MAIL_AGG_DATA_DIR:-/var/lib/mail-aggregator}" \
+    exec node "$ROOT/server/cli-diagnostics.js"
+fi
+
 ISSUES=0
 CONFIG_FILE="/etc/mail-aggregator/config"
 DOVECOT_USER="mailuser"; DOVECOT_HOST="127.0.0.1"; DOVECOT_PORT="143"; WEB_PORT="8080"; WEB_LANGUAGE="zh-CN"
@@ -48,10 +54,10 @@ fi
 echo ""
 echo "=== imapsync ==="
 if command -v imapsync >/dev/null 2>&1; then
-  VERSION=$(imapsync --version 2>&1 | head -1)
+  VERSION=$(imapsync --noreleasecheck --version 2>&1 | head -1)
   pass "已安装,$VERSION"
 else
-  fail "未安装(Alpine下: apk add imapsync,需要先启用community仓库)"
+  fail "未安装。请启用当前 Alpine 版本的 community 仓库并重试安装器。"
 fi
 
 echo ""

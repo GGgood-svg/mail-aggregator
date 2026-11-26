@@ -1,5 +1,16 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { categorizeSyncFailure } = require('../server/sync-output');
+
+test('sync diagnostics classify actual failures without treating routine login output as failure', () => {
+  assert.equal(categorizeSyncFailure('Host1 login authentication successful', 'failed'), 'unknown');
+  assert.equal(categorizeSyncFailure('AUTHENTICATIONFAILED invalid credentials', 'failed'), 'auth_failed');
+  assert.equal(categorizeSyncFailure('network is unreachable', 'failed'), 'network');
+  assert.equal(categorizeSyncFailure('无法解析源 IMAP 服务器地址', 'failed'), 'network');
+  assert.equal(categorizeSyncFailure('源 IMAP 服务器解析到了本机、局域网或保留地址，已拒绝连接', 'failed'), 'unknown');
+  assert.equal(categorizeSyncFailure('certificate verify failed', 'failed'), 'tls_failed');
+  assert.equal(categorizeSyncFailure('login failed', 'timed_out'), 'timeout');
+});
 
 const { parseSummary, createOutputCollector, categorizeTestError } = require('../server/sync-output');
 
@@ -89,4 +100,21 @@ test('categorizeTestError recognizes common failure classes', () => {
   for (const [output, expected] of cases) {
     assert.equal(categorizeTestError(output, false).category, expected);
   }
+});
+
+
+test('only explicit source IMAP throttling is kept as cooldown evidence, even after the tail rotates', () => {
+  const source = 'Host1 failure: Error login on [imap.example]: NO [LIMIT] Too many simultaneous connections';
+  const target = 'Host2 failure: Error login on [target.example]: NO [LIMIT] Too many simultaneous connections';
+  assert.equal(categorizeSyncFailure(source, 'failed'), 'provider_rate_limited');
+  assert.equal(categorizeSyncFailure(target, 'failed'), 'unknown');
+  assert.equal(categorizeSyncFailure('Host1: folder [RATE-LIMIT] has 7 messages in total', 'failed'), 'unknown');
+  assert.equal(categorizeSyncFailure(source, 'timed_out'), 'timeout');
+  assert.equal(parseSummary(source + '\nMessages transferred : 1').messagesTransferred, 1);
+  const collector = createOutputCollector({ tailChars: 30 });
+  collector.push(source.slice(0, 48), 'stderr'); collector.push(source.slice(48) + '\n', 'stderr');
+  collector.push('Unrelated log output. '.repeat(20));
+  const { tail, sourceRateLimited } = collector.finish();
+  assert.doesNotMatch(tail, /Host1/);
+  assert.equal(categorizeSyncFailure(tail, 'failed', sourceRateLimited), 'provider_rate_limited');
 });

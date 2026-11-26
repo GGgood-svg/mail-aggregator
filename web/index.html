@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dashboard - Mail Aggregator</title>
 <link rel="stylesheet" href="/css/style.css">
 </head>
@@ -18,14 +19,40 @@
       <button class="btn secondary" id="refresh-btn">重新检查</button>
     </div>
 
-    <div id="admin-status-sections">
+    <h2>账号统计</h2>
+    <p id="dashboard-account-error" class="hint" role="status" hidden></p>
+    <div class="grid" id="account-stats-grid"></div>
+
+    <div class="panel">
+      <h2>邮件账号</h2>
+      <div class="dashboard-table">
+        <table>
+          <thead>
+            <tr><th>名称</th><th>状态</th><th>邮件总数</th><th>文件夹</th><th>最近一次复制</th><th>最后同步</th></tr>
+          </thead>
+          <tbody id="accounts-body"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="accounts-empty" style="display:none;">还没有添加任何邮箱账号 · <a href="/accounts.html">去添加</a></div>
+    </div>
+
+    <div id="admin-status-sections" hidden>
     <h2>系统状态</h2>
+    <p id="dashboard-system-error" class="hint" role="status" hidden></p>
     <div class="grid" id="system-grid"></div>
 
     <div class="panel">
       <h2>自动同步调度器</h2>
       <div id="scheduler-alert" class="hint" style="display:none;margin-bottom:12px;"></div>
       <div class="grid" id="scheduler-grid" style="margin-bottom:0;"></div>
+    </div>
+
+    <div class="panel">
+      <h2>运维诊断</h2>
+      <div id="diagnostics-summary" class="hint" role="status">正在检查…</div>
+      <div class="grid" id="diagnostics-grid"></div>
+      <div class="hint">服务无法启动时，在服务器上运行 <code>scripts/doctor.sh --json</code></div>
+      <p id="diagnostics-download" hidden><a class="btn secondary small" href="/api/system/diagnostics" download>下载脱敏诊断报告</a></p>
     </div>
 
     <div class="panel">
@@ -39,65 +66,120 @@
     <div class="grid" id="dovecot-grid"></div>
     </div>
 
-    <h2>账号统计</h2>
-    <div class="grid" id="account-stats-grid"></div>
-
-    <div class="panel">
-      <h2>邮件账号</h2>
-      <table>
-        <thead>
-          <tr><th>名称</th><th>状态</th><th>邮件总数</th><th>文件夹</th><th>最近一次复制</th><th>最后同步</th></tr>
-        </thead>
-        <tbody id="accounts-body"></tbody>
-      </table>
-      <div class="empty" id="accounts-empty" style="display:none;">还没有添加任何邮箱账号 · <a href="/accounts.html">去添加</a></div>
-    </div>
   </div>
 </div>
 <script src="/js/api.js"></script>
 <script src="/js/branding.js"></script>
 <script src="/js/i18n.js"></script>
+<script src="/js/sync-availability-ui.js"></script>
 <script>
 function statusBadge(status) {
   const cls = status || 'idle';
   return `<span class="badge ${cls}">${statusLabel(status)}</span>`;
 }
 
+let dashboardController;
+
 async function load() {
+  dashboardController?.abort();
+  const controller = new AbortController();
+  dashboardController = controller;
   applyBranding();
   const me = await requireLogin();
-  if (!me) return;
+  if (!me || controller.signal.aborted) return;
   renderNav('dashboard');
-  try {
-    const data = await Api.get('/api/dashboard');
-    if (me.role === 'admin') {
-      const health = await Api.get('/api/health');
-      renderSystem(data.system);
-      renderScheduler(data.system.scheduler);
-      renderDovecot(data.dovecotStatus);
-      renderHealth(health);
-    } else {
-      document.getElementById('admin-status-sections').style.display = 'none';
-    }
+  const t = source => window.I18n.t(source);
+  const admin = me.role === 'admin';
+  document.getElementById('admin-status-sections').hidden = !admin;
+  document.getElementById('diagnostics-download').hidden = !me.primaryAdmin;
+  const sections = [read('/api/dashboard?view=accounts', data => {
     renderAccountStats(data.accountStats);
     renderAccounts(data.recentAccounts);
-  } catch (e) {
-    toast(e.message, 'error');
+    document.getElementById('dashboard-account-error').hidden = true;
+  }, () => showSectionError('dashboard-account-error', '账号信息暂时无法加载'))];
+  if (admin) {
+    sections.push(read('/api/dashboard?view=system', data => {
+      if (!data.system) return;
+      renderSystem(data.system);
+      renderScheduler(data.system.scheduler);
+      document.getElementById('dashboard-system-error').hidden = true;
+    }, () => showSectionError('dashboard-system-error', '系统状态暂时无法加载')));
+    sections.push(read('/api/dashboard?view=dovecot', data => renderDovecot(data.dovecotStatus), () => renderDovecot(null)));
+    sections.push(read('/api/health', renderHealth, () => showSectionError('health-summary', '健康检查暂时不可用')));
+    sections.push(read('/api/health?view=runtime', data => renderDiagnostics(data.runtime),
+      () => showSectionError('diagnostics-summary', '运维诊断暂时不可用')));
   }
+  await Promise.all(sections);
+
+  async function read(url, render, onError) {
+    try {
+      const data = await Api.get(url, { signal: controller.signal });
+      if (data && !controller.signal.aborted) render(data);
+    } catch (error) {
+      if (error.name !== 'AbortError' && !controller.signal.aborted) onError();
+    }
+  }
+  function showSectionError(id, message) {
+    const element = document.getElementById(id);
+    element.hidden = false;
+    element.textContent = t(message);
+  }
+}
+
+function renderDiagnostics(report) {
+  if (!report) return;
+  const t = source => window.I18n.t(source);
+  const profiles = { alpine_3_24: 'Alpine 3.24 发布环境', legacy_2_3: '旧版 Dovecot 2.3 兼容环境', other: '其他部署环境', unknown: '版本尚未确认' };
+  const recoveries = { committed: '恢复已完成', recovered_committed: '重启后已确认恢复', rolled_back: '已恢复原配置' };
+  const { versions, queues, restore } = report;
+  document.getElementById('diagnostics-summary').textContent =
+    `${t(profiles[report.installationProfile])} · Node ${versions.node || '–'} · Dovecot ${versions.dovecot || '–'}`;
+  const queue = item => item ? `${t('运行中')} ${item.running} · ${t('排队中')} ${item.queued}` : '–';
+  const last = restore.last ? `${t(recoveries[restore.last.outcome])} · ${fmtTime(restore.last.at)}` : t('暂无恢复记录');
+  const cards = [
+    ['邮件整理', `${queue(queues.mailTasks)} · ${t('核对范围')} ${queues.mailTasks?.checkingScope ?? 0}`],
+    ['正文解析', queue(queues.mailParser)],
+    ['密码验证', queue(queues.password)],
+    ['同步任务', queue(queues.sync)],
+    ['最近恢复', restore.state === 'ready' ? last : t('恢复状态需要检查')],
+  ];
+  document.getElementById('diagnostics-grid').innerHTML = cards.map(([label, value]) =>
+    `<div class="card"><div class="label">${escapeHtml(t(label))}</div><div class="hint">${escapeHtml(value)}</div></div>`).join('');
 }
 
 function renderHealth(report) {
   const summary = document.getElementById('health-summary');
   summary.className = `hint ${report.ok ? 'ok' : 'err'}`;
-  summary.textContent = report.ok
+  summary.textContent = report.summary.failed === 0
     ? `健康：${report.summary.total} 项检查通过`
     : `发现 ${report.summary.failed} 项问题，其中 ${report.summary.critical} 项需要处理`;
   document.getElementById('health-grid').innerHTML = report.checks.map((item) => `
     <div class="card"><div class="label">${escapeHtml(item.label)}</div>
-      <div class="value ${item.ok ? 'ok' : item.severity === 'critical' ? 'err' : ''}">${item.ok ? '正常' : '需处理'}</div>
+      <div class="value ${item.ok ? 'ok' : item.severity === 'critical' ? 'err' : ''}">${item.capacity ? escapeHtml(window.I18n.t(({ ok: '正常', low: '空间或 inode 不足', busy: '容量检查繁忙', unavailable: '容量未知' })[item.capacity.status] || '容量未知')) : item.ok ? '正常' : '需处理'}</div>
+      ${item.capacity ? renderCapacity(item.capacity) : ''}
       ${item.detail ? `<div class="hint">${escapeHtml(item.detail)}</div>` : ''}
       ${item.ok ? '' : `<div class="hint" style="margin-top:6px">${escapeHtml(item.fix)}</div>`}
     </div>`).join('');
+}
+
+function renderCapacity(capacity) {
+  const translate = key => window.I18n.t(key);
+  const usage = { application: '应用数据', database: '数据库', credentials: '凭据', logs: '同步日志', cache: '缓存',
+    temporary: '临时文件', restore_points: '恢复点', mail: '邮件存储' };
+  const reason = { low_space: '存储空间不足', low_inodes: '文件节点耗尽', capacity_unavailable: '无法读取容量' };
+  const mountReason = { read_only: '存储挂载为只读', mount_changed: '存储卷已更换或卸载',
+    mount_required: '缺少必需的存储挂载' };
+  const format = (value, unit = '') => Number.isFinite(value) ? `${value}${unit}` : translate('未知');
+  return `<div class="hint">${escapeHtml(translate('安全余量'))} ${escapeHtml(format(capacity.minimumMb, ' MB'))}</div>`
+    + (capacity.failure === 'mount_config_invalid' ? `<div class="hint">${escapeHtml(translate('必需存储挂载配置无效'))}</div>` : '')
+    + (capacity.observations || []).map(record => {
+      const problem = mountReason[record.failure] || reason[record.code];
+      return `<div class="storage-observation">
+        <div data-i18n-skip>${escapeHtml(record.uses?.map(key => translate(usage[key] || '未知')).join(' / ') || record.storage)}</div>
+        <div class="hint">${escapeHtml(translate('可用空间'))} ${escapeHtml(format(record.availableMb, ' MB'))} · ${escapeHtml(translate('可用 inode'))} ${escapeHtml(format(record.availableInodes))}</div>
+        ${problem ? `<div class="hint">${escapeHtml(translate(problem))}</div>` : ''}
+      </div>`;
+    }).join('');
 }
 
 function renderSystem(sys) {
@@ -105,7 +187,7 @@ function renderSystem(sys) {
     { label: 'Dovecot', value: sys.dovecot.ok ? '正常' : '异常', cls: sys.dovecot.ok ? 'ok' : 'err' },
     { label: 'imapsync', value: sys.imapsync.available ? `v${escapeHtml(sys.imapsync.version || '?')}` : '未找到', cls: sys.imapsync.available ? 'ok' : 'err' },
     { label: '调度器', value: sys.scheduler.healthLabel, cls: sys.scheduler.healthy ? 'ok' : 'err' },
-    { label: '磁盘可用', value: sys.disk ? `${sys.disk.availMb} MB` : '未知', cls: '' },
+    { label: '根分区可用', value: sys.disk ? `${sys.disk.availMb} MB` : '未知', cls: '' },
     { label: '内存', value: `${sys.memory.usedMb}/${sys.memory.totalMb} MB`, cls: '' },
     { label: 'CPU 负载', value: `${sys.cpu.loadavg1} (${sys.cpu.cores}核)`, cls: '' },
   ];
@@ -119,7 +201,11 @@ function renderSystem(sys) {
 function renderScheduler(scheduler) {
   const result = scheduler.lastResult || {};
   const alert = document.getElementById('scheduler-alert');
-  if (scheduler.healthCode === 'error') {
+  if (scheduler.healthCode === 'degraded') {
+    alert.style.display = 'block';
+    alert.style.color = 'var(--warn)';
+    alert.textContent = `${syncUi('queue_degraded')} · ${syncUi('nextRetry')}: ${fmtTime(scheduler.queue.nextProbeAt)}`;
+  } else if (scheduler.healthCode === 'error') {
     alert.style.display = 'block';
     alert.style.color = 'var(--err)';
     alert.textContent = `最近调度出现异常：${scheduler.lastError}`;
@@ -137,11 +223,11 @@ function renderScheduler(scheduler) {
   }
 
   const summary = scheduler.lastResult
-    ? `检查 ${result.checked || 0} · 触发 ${result.triggered || 0} · 活跃 ${result.active || 0} · 未到期 ${result.notDue || 0} · 禁用 ${result.disabled || 0} · 异常 ${result.errors || 0}`
+    ? `检查 ${result.checked || 0} · 触发 ${result.triggered || 0} · 活跃 ${result.active || 0} · 未到期 ${result.notDue || 0} · 禁用 ${result.disabled || 0} · 异常 ${result.errors || 0} · ${syncUi('paused')} ${result.paused || 0} · ${syncUi('deferred')} ${result.deferred || 0}`
     : '暂无运行记录';
   const cards = [
     { label: '健康状态', value: scheduler.healthLabel, cls: scheduler.healthy ? 'ok' : 'err' },
-    { label: '最近检查', value: fmtTime(scheduler.lastTickAt), cls: '' },
+    { label: '最近检查', value: fmtTime(scheduler.lastScanCompletedAt || scheduler.lastTickAt), cls: '' },
     { label: '最近无异常检查', value: fmtTime(scheduler.lastSuccessAt), cls: scheduler.lastSuccessAt ? 'ok' : '' },
     { label: '本轮结果', value: summary, cls: '', compact: true },
   ];
@@ -232,6 +318,7 @@ function renderAccounts(accounts) {
 }
 
 document.getElementById('refresh-btn').addEventListener('click', load);
+window.addEventListener('pagehide', () => dashboardController?.abort());
 load();
 </script>
 </body>

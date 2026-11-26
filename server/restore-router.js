@@ -1,22 +1,20 @@
-const { stateRoute } = require('./state-lock');
+const { asyncRoute } = require('./state-lock');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
-const { verifyBackupArchive } = require('./backup-verifier');
+const { prepareRestoreArchive, checkTarget } = require('./restore-preflight');
 const { createBackupBundle } = require('./backup');
 const maintenanceLock = require('./maintenance-lock');
 const {
-  MAX_WEB_RESTORE_EXPANDED,
   receiveArchive,
-  extractVerifiedArchive,
-  inspectRestoreDatabase,
   restoreApplicationState,
 } = require('./restore');
 
 const PENDING_TTL_MS = 30 * 60 * 1000;
 const DOWNLOAD_TTL_MS = 30 * 60 * 1000;
+let inspecting = false;
 
 function safeCleanup(directory) {
   try { fs.rmSync(directory, { recursive: true, force: true }); } catch (_) {}
@@ -39,8 +37,12 @@ function createRestoreRouter({
   version,
   scheduler,
   hasRunningSyncs,
-  verifyPassword,
+  passwordGuard,
   isSecureRequest,
+  stopMailTasks = async () => {},
+  withMaintenance = work => work(),
+  onRestored = () => {},
+  onRecoveryRequired = () => {},
 }) {
   const router = express.Router();
   const pending = new Map();
@@ -53,7 +55,7 @@ function createRestoreRouter({
     safeCleanup(item.workDir);
   }
 
-  router.post('/inspect', stateRoute(async (req, res) => {
+  router.post('/inspect', asyncRoute(async (req, res) => {
     if (!isSecureRequest(req)) {
       return res.status(400).json({ error: '远程恢复必须使用 HTTPS；HTTP 仅允许服务器本机访问' });
     }
@@ -61,29 +63,35 @@ function createRestoreRouter({
       req.resume();
       return res.status(415).json({ error: '请上传 .tar.gz 备份文件' });
     }
-
-    for (const [id, item] of pending) {
-      if (item.owner === req.sessionID) expirePending(id);
+    if (inspecting || maintenanceLock.current() === 'restore') {
+      req.resume(); return res.status(409).json({ error: '已有备份正在上传、预检或恢复，请稍后重试' });
     }
-    const workDir = fs.mkdtempSync(path.join(dirs.tmp, 'web-restore-'));
-    const archivePath = path.join(workDir, 'upload.tar.gz');
+    inspecting = true;
+    const controller = new AbortController();
+    const cancelled = () => { if (!res.writableFinished) controller.abort(); };
+    res.once('close', cancelled);
+
+    let workDir, preflightTimer;
     try {
-      const uploadBytes = await receiveArchive(req, archivePath);
-      const verified = await verifyBackupArchive(archivePath);
-      if (verified.uncompressedBytes > MAX_WEB_RESTORE_EXPANDED) {
-        throw Object.assign(new Error('备份解压后超过1 GiB的Web恢复上限'), { statusCode: 413 });
+      for (const [id, item] of pending) {
+        if (item.owner === req.sessionID) expirePending(id);
       }
+      workDir = fs.mkdtempSync(path.join(dirs.tmp, 'web-restore-'));
+      const archivePath = path.join(workDir, 'upload.tar.gz');
+      const uploadBytes = await receiveArchive(req, archivePath, undefined, { signal: controller.signal });
+      preflightTimer = setTimeout(() => controller.abort(), 120000); preflightTimer.unref?.();
       const stageDir = path.join(workDir, 'stage');
-      await extractVerifiedArchive(archivePath, stageDir);
-      const databasePath = path.join(stageDir, 'data', 'db', 'mail-aggregator.db');
-      const database = inspectRestoreDatabase(Database, databasePath);
+      const { verified, database, databasePath, secretsDir } = await prepareRestoreArchive({ archivePath, stageDir, dirs, signal: controller.signal });
+      require('./auth').assertCurrentUser(req, null, 'primary');
+      if (controller.signal.aborted) throw new Error('Operation cancelled');
       const id = crypto.randomBytes(24).toString('hex');
       const item = {
         id,
         owner: req.sessionID,
         workDir,
         databasePath,
-        secretsDir: path.join(stageDir, 'data', 'secrets'),
+        secretsDir,
+        verified,
         expiresAt: Date.now() + PENDING_TTL_MS,
       };
       pending.set(id, item);
@@ -106,13 +114,16 @@ function createRestoreRouter({
         ],
       });
     } catch (error) {
-      safeCleanup(workDir);
+      if (workDir) safeCleanup(workDir);
       console.error(`[restore] 预检失败: ${error.message}`);
-      res.status(error.statusCode || 400).json({ error: error.message || '备份预检失败' });
+      if (!res.destroyed) res.status(error.statusCode || 400).json({ error: error.message || '备份预检失败' });
+    } finally {
+      clearTimeout(preflightTimer);
+      inspecting = false; res.removeListener('close', cancelled);
     }
   }));
 
-  router.post('/apply', stateRoute(async (req, res) => {
+  router.post('/apply', passwordGuard, asyncRoute(async (req, res) => withMaintenance(async () => {
     if (!isSecureRequest(req)) {
       return res.status(400).json({ error: '远程恢复必须使用 HTTPS；HTTP 仅允许服务器本机访问' });
     }
@@ -123,8 +134,6 @@ function createRestoreRouter({
     if (req.body.confirmation !== 'RESTORE') {
       return res.status(400).json({ error: '请输入 RESTORE 确认恢复' });
     }
-    const verification = verifyPassword(req, req.body.currentPassword);
-    if (!verification.ok) return res.status(verification.status).json({ error: verification.error });
     const active = db.prepare(
       "SELECT COUNT(*) AS count FROM sync_jobs WHERE status IN ('queued','running')"
     ).get().count;
@@ -139,9 +148,16 @@ function createRestoreRouter({
     let safetyPath = null;
     let snapshotId = null;
     let snapshotName = null;
+    let recoveryRequired = false;
+    const controller = new AbortController();
+    const cancelled = () => { if (!res.writableFinished) controller.abort(); };
+    res.once('close', cancelled);
     scheduler.stop();
     try {
-      safetyBundle = await createBackupBundle({ db, dirs, version });
+      require('./auth').assertCurrentUser(req, null, 'primary');
+      checkTarget(dirs, item.verified);
+      await stopMailTasks();
+      safetyBundle = await createBackupBundle({ db, dirs, version, signal: controller.signal, allowDuringRestore: true });
       snapshotName = safetyBundle.filename
         .replace('mail-aggregator-', 'pre-restore-')
         .replace('.tar.gz', `-${crypto.randomBytes(4).toString('hex')}.tar.gz`);
@@ -170,14 +186,15 @@ function createRestoreRouter({
         backupDbPath: item.databasePath,
         currentSecretsDir: dirs.secrets,
         backupSecretsDir: item.secretsDir,
-        workDir: item.workDir,
+        onJournal: operationId => { res.locals.auditOperationId = operationId; },
+        beforeCommit() {
+          require('./auth').assertCurrentUser(req, null, 'primary');
+          if (controller.signal.aborted || pending.get(item.id) !== item || item.owner !== req.sessionID || item.expiresAt <= Date.now()) {
+            throw Object.assign(new Error('恢复预检或登录会话已失效，请重新预检'), { statusCode: 409 });
+          }
+        },
       });
-      try {
-        fs.rmSync(dirs.cache, { recursive: true, force: true });
-        fs.mkdirSync(dirs.cache, { recursive: true });
-      } catch (cacheError) {
-        console.warn(`[restore] 可重建缓存清理失败: ${cacheError.message}`);
-      }
+      onRestored();
 
       pending.delete(item.id);
       safeCleanup(item.workDir);
@@ -189,23 +206,27 @@ function createRestoreRouter({
         snapshotFilename: snapshotName,
       });
     } catch (error) {
+      recoveryRequired = Boolean(error.recoveryRequired);
       if (safetyBundle) safetyBundle.cleanup();
       console.error(`[restore] 恢复失败: ${error.message}`);
       if (error.rollbackError) {
         console.error(`[restore] 密钥回滚失败: ${error.rollbackError.message}`);
       }
-      res.status(500).json({
-        error: error.rollbackError
-          ? '恢复失败且密钥自动回滚未完整完成，请立即使用恢复前快照人工检查'
-          : '恢复失败，数据库和密钥已自动回滚；恢复前快照已保留',
+      if (!res.destroyed) res.status(error.statusCode || 500).json({
+        error: recoveryRequired ? '恢复需要核对，服务将停止。请运行离线诊断并保留恢复前快照'
+          : error.statusCode ? error.message : '恢复未完成。原有配置仍在使用',
         snapshotId,
         snapshotFilename: snapshotName,
       });
     } finally {
-      scheduler.start();
-      maintenanceLock.release('restore');
+      res.removeListener('close', cancelled);
+      if (recoveryRequired) onRecoveryRequired();
+      else {
+        maintenanceLock.release('restore');
+        scheduler.start();
+      }
     }
-  }));
+  })));
 
   router.get('/snapshot/:id', (req, res) => {
     if (!isSecureRequest(req)) {

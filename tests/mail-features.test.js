@@ -19,7 +19,7 @@ async function fixture(t, customize = {}) {
     mailAccessForRequest: () => ({ roots: ['U1-A1'], all: false }),
     createClient: () => ({ usable: true,
       async connect() { calls.push('connect'); }, async logout() { calls.push('logout'); }, close() { calls.push('close'); },
-      async mailboxOpen(folder, options) { calls.push(['open', folder, options]); return { uidValidity: 77n, exists: 3 }; },
+      async mailboxOpen(folder, options) { calls.push(['open', folder, options]); return { uidValidity: 77n, exists: 3, uidNext: 8 }; },
       async fetchOne(uid, query) {
         calls.push(['fetch', uid, query]);
         if (uid !== 7) return false;
