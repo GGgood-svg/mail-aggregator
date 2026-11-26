@@ -64,6 +64,7 @@ jobs:
           sudo apt-get update -qq
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y dovecot-core dovecot-imapd
       - name: Test against isolated local Dovecot
+        timeout-minutes: 5
         run: sh tests/run-dovecot-ci.sh
 
   browser-regression:

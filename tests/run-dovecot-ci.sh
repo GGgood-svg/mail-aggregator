@@ -20,9 +20,13 @@ fixture=$(mktemp -d /tmp/mail-aggregator-dovecot.XXXXXXXX)
 case "$fixture" in /tmp/mail-aggregator-dovecot.*) ;; *) echo 'Unexpected fixture path' >&2; exit 1;; esac
 launcher=''
 cleanup() {
-  if [ -f "$fixture/run/master.pid" ]; then privileged kill "$(cat "$fixture/run/master.pid")" 2>/dev/null || true
-  elif [ -n "$launcher" ]; then kill "$launcher" 2>/dev/null || true; fi
-  if [ -n "$launcher" ]; then wait "$launcher" 2>/dev/null || true; fi
+  if [ -n "$launcher" ]; then
+    # The master PID file is private to root on some distributions.
+    master_pid=$(privileged cat "$fixture/run/master.pid" 2>/dev/null || true)
+    case "$master_pid" in ''|0*|1|*[!0-9]*) master_pid=$launcher ;; esac
+    privileged kill "$master_pid" 2>/dev/null || true
+    wait "$launcher" 2>/dev/null || true
+  fi
   privileged rm -rf -- "$fixture"
 }
 trap cleanup EXIT
@@ -105,7 +109,11 @@ EOF
   ;;
   *) echo 'This fixture requires Dovecot 2.3 or 2.4.' >&2; exit 1 ;;
 esac
-privileged dovecot -c "$fixture/dovecot.conf" -F > "$fixture/launcher.log" 2>&1 &
+# Keep the recorded launcher PID signalable during early startup failures.
+(
+  if [ "$(id -u)" -eq 0 ]; then exec dovecot -c "$fixture/dovecot.conf" -F; fi
+  exec sudo -n dovecot -c "$fixture/dovecot.conf" -F
+) > "$fixture/launcher.log" 2>&1 &
 launcher=$!
 ready=0
 for attempt in $(seq 1 60); do

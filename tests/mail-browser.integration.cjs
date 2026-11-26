@@ -388,7 +388,7 @@ test('browser handles cross-folder search, unified unread, flags and background 
   const restored = async () => {
     await startRow.waitFor();
     await page.waitForFunction(({ listTop, screenY }) => mailState.page === 2
-      && document.activeElement?.textContent.includes('Fixture A 16')
+      && document.activeElement?.matches('.message-open') && document.activeElement.textContent.includes('Fixture A 16')
       && document.getElementById('message-list').scrollTop === listTop && window.scrollY === screenY, origin);
     assert.equal(await filter.inputValue(), 'Fixture A');
   };
