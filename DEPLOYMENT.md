@@ -474,7 +474,7 @@ df -i /var/lib/mail-aggregator /home/mailuser/Maildir /var/log
 
 自定义邮件、日志或备份卷时替换成实际路径。将数据库、Maildir 或日志挂在独立卷的部署，应在开机和维护后确认挂载；不要把回落到系统盘当作容量正常。首页「运维诊断」可导出脱敏信息，发给其他人前仍应检查是否包含你的路径和主机名。
 
-普通卸载前先完成应用和邮件备份、等任务结束，然后以 root 运行安装目录的卸载脚本。询问是否删除应用数据时答 `N` 可保留它；此脚本保留 Dovecot、imapsync 和 Maildir。需要重装时同时保留可信源码包和配置。Web 的「彻底卸载」会删除邮箱和 Maildir，不用于普通重装。
+普通卸载前先完成应用和邮件备份、等任务结束，然后以 root 运行安装目录的卸载脚本。询问是否删除应用数据时答 `N` 可保留它；此脚本保留 Dovecot、imapsync 和 Maildir。需要重装时同时保留可信源码包和配置。Web 的「彻底卸载」会额外删除确认由安装器创建的 Maildir，默认保留 Dovecot。若安装器记录了 Dovecot 的全新安装，并且配置和软件包预检均通过，可再勾选「同时卸载 Dovecot 软件和配置」，使用 `PURGE-DOVECOT` 确认。沿用已有 Dovecot 的 `--app-only` 安装不提供这个选项。这两种删除邮件的方式都不适合普通重装。
 
 ```sh
 /opt/mail-aggregator/scripts/uninstall.sh

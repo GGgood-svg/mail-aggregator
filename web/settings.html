@@ -361,7 +361,7 @@ sudo node /opt/mail-aggregator/server/cli-backup-pair.js rehearse-account \
     <div class="panel danger-panel" style="max-width:520px; margin-top:24px;">
       <h2>卸载 Mail Aggregator</h2>
       <div class="hint" style="color:var(--warn); margin-bottom:12px;">
-        卸载操作不可通过网页撤销。程序卸载会删除应用、账号和凭据，保留邮件。彻底卸载只额外删除能确认由安装器创建的本地 Maildir；不会移除共享邮件服务。
+        卸载操作不可通过网页撤销。程序卸载会删除应用、账号和凭据，保留邮件。彻底卸载会删除能确认由安装器创建的本地 Maildir，默认保留 Dovecot。
       </div>
       <div class="form-group">
         <label>当前 Web 管理员密码</label>
@@ -374,7 +374,9 @@ sudo node /opt/mail-aggregator/server/cli-backup-pair.js rehearse-account \
           <button class="btn danger" id="uninstall-app-btn" type="button" style="margin-top:8px">卸载程序（保留邮件）</button>
         </div>
         <div class="form-group" style="flex:1;min-width:220px">
-          <label>彻底卸载确认：输入 <code>PURGE</code></label>
+          <label class="checkbox-row" for="purge-dovecot"><input type="checkbox" id="purge-dovecot" disabled> 同时卸载 Dovecot 软件和配置</label>
+          <p class="hint" id="purge-dovecot-hint" role="status" hidden>仅可移除由本安装器全新安装、配置未被外部更改的 Dovecot。</p>
+          <label for="purge-confirmation">彻底卸载确认：输入 <code id="purge-confirmation-word">PURGE</code></label>
           <input type="text" id="purge-confirmation" placeholder="PURGE" autocomplete="off">
           <button class="btn danger" id="purge-btn" type="button" style="margin-top:8px">彻底卸载并删除邮件</button>
         </div>
@@ -965,15 +967,17 @@ document.getElementById('restore-snapshot-btn').addEventListener('click', async 
 
 async function requestUninstall(mode) {
   const password = document.getElementById('uninstall-password').value;
-  const confirmation = document.getElementById(mode === 'purge' ? 'purge-confirmation' : 'remove-confirmation').value.trim();
+  const confirmation = document.getElementById(mode === 'remove-app' ? 'remove-confirmation' : 'purge-confirmation').value.trim();
   const msg = document.getElementById('uninstall-msg');
-  const expected = mode === 'purge' ? 'PURGE' : 'REMOVE';
+  const expected = mode === 'purge-dovecot' ? 'PURGE-DOVECOT' : mode === 'purge' ? 'PURGE' : 'REMOVE';
   if (!password || confirmation !== expected) {
     msg.className = 'err';
     msg.textContent = `请输入当前 Web 管理员密码，并在对应输入框准确输入 ${expected}`;
     return;
   }
-  const warning = mode === 'purge'
+  const warning = mode === 'purge-dovecot'
+    ? I18n.t('这会停止 Dovecot，卸载它的软件包并删除配置，也会删除应用、运行数据及安装器创建的 Maildir。确定继续吗？')
+    : mode === 'purge'
     ? '这会删除应用和运行数据，以及能确认由安装器创建的本地 Maildir。Maildir 的删除不可恢复。确定继续吗？'
     : '这会停止并删除 Mail Aggregator 及其运行数据，但保留 Dovecot 和邮件。确定继续吗？';
   if (!confirm(warning)) return;
@@ -1010,9 +1014,19 @@ async function requestUninstall(mode) {
 }
 
 document.getElementById('uninstall-app-btn').addEventListener('click', () => requestUninstall('remove-app'));
-document.getElementById('purge-btn').addEventListener('click', () => requestUninstall('purge'));
+const purgeDovecot = document.getElementById('purge-dovecot');
+purgeDovecot.addEventListener('change', () => {
+  const word = purgeDovecot.checked ? 'PURGE-DOVECOT' : 'PURGE';
+  document.getElementById('purge-confirmation-word').textContent = word;
+  const input = document.getElementById('purge-confirmation');
+  input.placeholder = word;
+  input.value = '';
+});
+document.getElementById('purge-btn').addEventListener('click', () => requestUninstall(purgeDovecot.checked && !purgeDovecot.disabled ? 'purge-dovecot' : 'purge'));
 function checkUninstallCapability() {
   return Api.get('/api/system/uninstall').then(result => {
+    purgeDovecot.disabled = !result?.dovecotEligible;
+    document.getElementById('purge-dovecot-hint').hidden = !purgeDovecot.disabled;
     if (result?.available) return;
     document.getElementById('uninstall-app-btn').disabled = true;
     document.getElementById('purge-btn').disabled = true;

@@ -210,6 +210,7 @@ case "${1:-}" in --help|-h|--show-config) ;; *) lock_mail_aggregator_maintenance
 install_maintenance_tools() {
   install -d -m 0755 /usr/local/lib/mail-aggregator-maintenance-data
   install -m 0644 "$PROJECT_ROOT/scripts/lib/maintenance.sh" /usr/local/lib/mail-aggregator-maintenance.sh
+  install -m 0644 "$PROJECT_ROOT/scripts/lib/owned-dovecot.js" /usr/local/lib/mail-aggregator-maintenance-data/owned-dovecot.js
   for module in data release transaction web-config; do
     install -m 0644 "$PROJECT_ROOT/scripts/updater/$module.js" "/usr/local/lib/mail-aggregator-maintenance-data/$module.js"
   done
@@ -431,6 +432,12 @@ imapsync --noreleasecheck --version >/dev/null || fail_step '3/9' 'imapsync 未�
 echo ""
 wizard_event stage:4
 echo "==> 4/9 Dovecot 软件包"
+OWN_DOVECOT_PLATFORM=''
+if [ "$FULL" = 1 ] && [ "$DOVECOT_OK" = 0 ] && [ "$FORCE_DOVECOT_INIT" = 0 ] &&
+   [ ! -e /etc/dovecot ] && [ ! -L /etc/dovecot ]; then
+  case "$PLATFORM_ID" in alpine) OWN_DOVECOT_PLATFORM=alpine ;; debian|ubuntu) OWN_DOVECOT_PLATFORM=apt ;; esac
+  DOVECOT_PACKAGES_BEFORE=$(node "$PROJECT_ROOT/scripts/lib/owned-dovecot.js" packages "$OWN_DOVECOT_PLATFORM") || OWN_DOVECOT_PLATFORM=''
+fi
 if [ "$DOVECOT_OK" = "1" ]; then
   echo "  已检测到 Dovecot"
 elif [ "$INSTALL_DOVECOT" = "1" ]; then
@@ -955,6 +962,8 @@ if command -v sudo >/dev/null 2>&1; then
     echo "${APP_USER} ALL=(root) NOPASSWD: ${HELPER_INSTALL_PATH} storage-status *"
     echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} queue remove-app"
     echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} queue purge"
+    echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} queue purge-dovecot"
+    echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} dovecot-eligible"
     echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} status *"
     echo "${APP_USER} ALL=(root) NOPASSWD: ${UNINSTALL_HELPER_INSTALL_PATH} commit *"
   } > "$SUDOERS_FILE"
@@ -1077,6 +1086,11 @@ if [ "$UPDATE_PLATFORM" = 1 ]; then
     if [ "$WIZARD_FRESH" = 1 ]; then WIZARD_UPDATER_ATTEMPTED=1; fi
     rc-update add mail-aggregator-updater default
     service_start mail-aggregator-updater
+fi
+
+if [ -n "$OWN_DOVECOT_PLATFORM" ] && [ "$DOVECOT_FRESH_INIT_DONE" = 1 ] && [ "$OWNED_MAILDIR" = 1 ]; then
+  node "$PROJECT_ROOT/scripts/lib/owned-dovecot.js" record "$OWN_DOVECOT_PLATFORM" "$DOVECOT_USER" "$DOVECOT_PACKAGES_BEFORE" ||
+    echo '  无法证明整套 Dovecot 由安装器独占管理；网页卸载将保留 Dovecot。'
 fi
 
 echo "  正在验证各组件状态(以下检查仅用于展示信息,不会修改任何东西):"

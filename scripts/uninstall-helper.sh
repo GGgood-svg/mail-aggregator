@@ -12,23 +12,24 @@ RECEIPTS=/var/lib/mail-aggregator-operations/uninstall
 APP_DIR=/opt/mail-aggregator
 DATA_DIR=/var/lib/mail-aggregator
 CONFIG_DIR=/etc/mail-aggregator
+DOVECOT_TOOL=/usr/local/lib/mail-aggregator-maintenance-data/owned-dovecot.js
 
 valid_id() { printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'; }
-valid_mode() { [ "$1" = remove-app ] || [ "$1" = purge ]; }
+valid_mode() { case "$1" in remove-app|purge|purge-dovecot) return 0;; *) return 1;; esac; }
 state_of() { sed -n 's/.*"state":"\([a-z_]*\)".*/\1/p' "$RECEIPTS/$1.json"; }
 record() {
     # Fixed data only; no shell output or credentials in the receipt. Flush both
     # file and directory so a 202 has a durable counterpart on the host.
     /usr/bin/node -e '
       const fs = require("node:fs");
-      const [dir, id, mode, state, code, maildir, worker] = process.argv.slice(1);
+      const [dir, id, mode, state, code, maildir, dovecot, worker] = process.argv.slice(1);
       const name = dir + "/" + id + ".json";
       const tmp = name + "." + process.pid;
       const bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
       const pid = Number(worker);
       let start = null;
       try { start = fs.readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1).split(" ")[19]; } catch (_) {}
-      const data = { id, mode, state, code, maildir, pid, bootId, start, updatedAt: new Date().toISOString() };
+      const data = { id, mode, state, code, maildir, dovecot, pid, bootId, start, updatedAt: new Date().toISOString() };
       const fd = fs.openSync(tmp, "wx", 0o600);
       try {
         try { fs.writeFileSync(fd, JSON.stringify(data) + "\n"); fs.fsyncSync(fd); }
@@ -37,12 +38,12 @@ record() {
         const parent = fs.openSync(dir, "r");
         try { fs.fsyncSync(parent); } finally { fs.closeSync(parent); }
       } finally { fs.rmSync(tmp, { force: true }); }
-    ' "$RECEIPTS" "$id" "$mode" "$1" "${2:-}" "${maildir:-retained}" "$$"
+    ' "$RECEIPTS" "$id" "$mode" "$1" "${2:-}" "${maildir:-retained}" "${dovecot:-retained}" "$$"
 }
 
 # The installer only records a Maildir that it created on a new local host.
 # An older install, a changed path, and an externally managed server have no
-# proof of ownership. Never remove shared Dovecot packages, users or config.
+# proof of ownership. Never remove shared Dovecot packages, users or config from this Maildir step.
 remove_owned_maildir() (
     marker="$CONFIG_DIR/owned-maildir"
     [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(stat -c '%u:%a' "$marker")" = 0:600 ] || return 4
@@ -58,6 +59,10 @@ remove_owned_maildir() (
 )
 
 case "${1:-}" in
+  dovecot-eligible)
+    [ "$#" -eq 1 ] || exit 2
+    exec /usr/bin/node "$DOVECOT_TOOL" eligible
+    ;;
   status)
     [ "$#" -eq 2 ] && valid_id "$2" || exit 2
     [ -f "$RECEIPTS/$2.json" ] || exit 44
@@ -111,7 +116,7 @@ case "${1:-}" in
     ;;
   run)
     [ "$#" -eq 3 ] && valid_id "$2" && valid_mode "$3" || exit 2
-    id=$2 mode=$3 maildir=retained
+    id=$2 mode=$3 maildir=retained dovecot=retained
     [ ! -e "$RECEIPTS/$id.cancel" ] || exit 1
     . /usr/local/lib/mail-aggregator-maintenance.sh
     prepare_mail_aggregator_maintenance
@@ -119,6 +124,10 @@ case "${1:-}" in
     if ! flock -n 9; then record busy maintenance_busy; exit 0; fi
     if ! assert_mail_aggregator_unresolved_absent || [ -e "$DATA_DIR/.restore-journal.json" ]; then
         record busy recovery_pending
+        exit 0
+    fi
+    if [ "$mode" = purge-dovecot ] && ! /usr/bin/node "$DOVECOT_TOOL" plan; then
+        record failed dovecot_unverified
         exit 0
     fi
     phase=host_failed
@@ -135,12 +144,23 @@ case "${1:-}" in
       i=$((i+1))
     done
     [ -f "$RECEIPTS/$id.ready" ] && [ ! -e "$RECEIPTS/$id.cancel" ] || exit 1
+    if [ "$mode" = purge-dovecot ]; then
+        phase=dovecot_unverified
+        /usr/bin/node "$DOVECOT_TOOL" plan
+    fi
     phase=stop_failed
     record running stopping
     stop_mail_aggregator_services 9<&-
+    if [ "$mode" = purge-dovecot ]; then
+        phase=dovecot_removal_failed
+        dovecot=removal_started
+        record running removing_dovecot
+        /usr/bin/node "$DOVECOT_TOOL" remove 9<&-
+        dovecot=removed
+    fi
     phase=cleanup_failed
     record running cleaning
-    if [ "$mode" = purge ]; then
+    if [ "$mode" != remove-app ]; then
         if remove_owned_maildir; then maildir=removed
         else
             case "$?" in 4) maildir=unproven;; *) exit 1;; esac

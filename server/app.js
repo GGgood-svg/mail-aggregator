@@ -637,16 +637,18 @@ app.post('/api/system/restart', requireAuth, requirePrimaryAdmin, requireCsrf, s
   }, 300);
 }));
 
-app.get('/api/system/uninstall', requireAuth, requirePrimaryAdmin, (req, res) => {
-  res.json({ available: uninstallHost.available() });
-});
+app.get('/api/system/uninstall', requireAuth, requirePrimaryAdmin, asyncRoute(async (req, res) => {
+  const dovecotEligible = await uninstallHost.dovecotEligible();
+  assertCurrentUser(req, null, 'primary');
+  res.set('Cache-Control', 'no-store').json({ available: uninstallHost.available(), dovecotEligible });
+}));
 app.get('/api/system/uninstall/:id', requireAuth, requirePrimaryAdmin, asyncRoute(async (req, res) => {
   res.set('Cache-Control', 'no-store').json(await uninstallHost.status(req.params.id));
 }));
 app.post('/api/system/uninstall', requireAuth, requirePrimaryAdmin, requireCsrf, currentPasswordGuard('primary'), asyncRoute(async (req, res) => {
   const { mode, confirmation } = req.body || {};
-  if (!['remove-app', 'purge'].includes(mode)) return res.status(400).json({ error: '卸载模式无效' });
-  const expected = mode === 'purge' ? 'PURGE' : 'REMOVE';
+  const expected = new Map([['remove-app', 'REMOVE'], ['purge', 'PURGE'], ['purge-dovecot', 'PURGE-DOVECOT']]).get(mode);
+  if (!expected) return res.status(400).json({ error: '卸载模式无效' });
   if (confirmation !== expected) return res.status(400).json({ error: `当前卸载模式必须输入 ${expected}` });
   if (maintenanceLock.current() || require('./state-lock').stateWritesBlocked(DIRS.root)) {
     return res.status(409).json({ error: '另一项维护正在进行，请稍后重试' });

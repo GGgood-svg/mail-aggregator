@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const { runBounded } = require('./bounded-process');
 const ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
-const MODES = new Set(['remove-app', 'purge']);
+const MODES = new Set(['remove-app', 'purge', 'purge-dovecot']);
 const STATES = new Set(['accepted', 'running', 'completed', 'busy', 'failed', 'interrupted']);
 const unavailable = () => fault(503, '卸载执行器不可用，请使用主机上的安装器更新运维组件');
 const fault = (statusCode, message) => Object.assign(new Error(message), { statusCode });
@@ -29,15 +29,23 @@ function createUninstallHost({
     }
     if (!ID.test(data?.id || '') || !MODES.has(data.mode) || !STATES.has(data.state) ||
       (action === 'queue' ? data.mode !== value : data.id !== value)) throw unavailable();
-    const { id, mode, state, code, maildir, updatedAt } = data;
-    return { id, mode, state, code, maildir, updatedAt };
+    const { id, mode, state, code, maildir, dovecot, updatedAt } = data;
+    return { id, mode, state, code, maildir, dovecot: dovecot || 'retained', updatedAt };
   }
   return {
     available,
+    async dovecotEligible() {
+      if (!available()) return false;
+      try { await run('sudo', ['-n', helper, 'dovecot-eligible'], { timeout: 3000, maxBuffer: 1024 }); return true; }
+      catch (_) { return false; }
+    },
     async queue(mode) {
       if (!MODES.has(mode)) throw fault(400, '卸载模式无效');
       const result = await request('queue', mode);
       if (result.state === 'busy') throw Object.assign(fault(409, '维护或恢复正在进行，卸载未开始'), { operationId: result.id });
+      if (result.state === 'failed' && result.code === 'dovecot_unverified') {
+        throw Object.assign(fault(409, '无法确认 Dovecot 可安全移除，卸载未开始。请取消勾选 Dovecot，或在主机检查配置和软件包。'), { operationId: result.id });
+      }
       if (!['accepted', 'running'].includes(result.state)) throw unavailable();
       return result;
     },

@@ -115,6 +115,8 @@ The primary administrator can enable two-step verification under **Personal secu
 
 ## Users and isolation
 
+In Settings, **Fully uninstall** removes the app and an installer-owned Maildir while keeping Dovecot by default. The optional **Also uninstall Dovecot and its configuration** checkbox requires `PURGE-DOVECOT` and is available only when the installer can verify that it originally installed and configured Dovecot on this host. The uninstall worker also verifies that the package removal will not affect unrelated software. Check the host receipt for the final result.
+
 The first account is the primary administrator. It can create standard users or operational administrators; public registration is disabled. Standard users can access only their own mail accounts, sync jobs, logs, and mailbox folders. Operational administrators can manage users and inspect system status, while global settings, OAuth client credentials, full backup/restore, service control, and uninstall remain restricted to the primary administrator.
 
 The primary administrator and server `root` are trusted deployment boundaries. A full backup exported by the primary administrator contains every source-mail credential, and `root` can read the local Maildir directly. Web isolation protects standard users from each other and from operational administrators; it cannot protect data from someone who controls the host.

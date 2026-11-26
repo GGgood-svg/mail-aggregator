@@ -2,6 +2,7 @@
 
 ## v0.2.2
 
+- Add a separate, off-by-default Dovecot package and configuration removal option to Web uninstall. It checks installer ownership and the package removal plan before stopping services.
 - Make sign-in, account forms and settings fit phone screens. Keep wide account and sync tables in keyboard-accessible scroll areas and wrap long restore messages.
 - Switch the mailbox to a stacked list and reader on tablets and narrow windows so messages and attachments do not get clipped.
 

@@ -237,7 +237,9 @@ sudo /opt/mail-aggregator/scripts/restore.sh backup.tar.gz backup.tar.gz.sha256
 sudo ./scripts/uninstall.sh
 ```
 
-该脚本卸载应用，并交互询问是否删除应用数据和程序目录；不会删除 Dovecot、imapsync 或 Maildir。Web 设置页另有明确区分的“程序卸载”和“彻底卸载”模式，彻底卸载会删除 Dovecot、本地邮箱用户及其 Maildir，操作不可撤销。
+该脚本卸载应用，并交互询问是否删除应用数据和程序目录；不会删除 Dovecot、imapsync 或 Maildir。网页「彻底卸载」额外删除安装器创建并能核对归属的 Maildir，默认保留 Dovecot。
+
+如果系统能确认 Dovecot 的软件包与配置由本安装器全新安装，网页会提供「同时卸载 Dovecot 软件和配置」。勾选后输入 `PURGE-DOVECOT` 并确认；执行器会先校验配置和软件包卸载计划，再移除相应服务、软件包及 `/etc/dovecot` 配置。复用或旧版安装、外部修改过的配置，以及会影响其他软件的卸载计划都会被保留。imapsync 和本地系统账号保留。以主机卸载回执中的 `state`、`maildir` 和 `dovecot` 为准。
 
 ## 开发与测试
 
