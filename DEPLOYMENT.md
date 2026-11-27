@@ -451,7 +451,7 @@ rc-service mail-aggregator-updater stop && \
 
 ### 9.3 仓库维护者：让正式自动更新可用
 
-参照 [应用更新发布说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.2/APP_UPDATES.md) 配置受保护的 `app-release-signing` 环境和环境密钥 `APP_UPDATE_SIGNING_KEY_B64`。从默认分支历史中的受保护版本标签运行 **Signed application release**；标签、`package.json` 和依赖锁文件中的版本需一致。首次发布保留 `policy: manual`，用清单中 `from_versions` 指定的真实版本实测切换和回退，确认只改应用与可回退的数据库状态后，再为适用升级路径签发 `automatic` 包。官方公钥随可信源码包一起交付，并公开指纹。测试演练用的标签和密钥不能作为生产发行使用。
+参照 [应用更新发布说明](https://github.com/GGgood-svg/mail-aggregator/blob/main/APP_UPDATES.md) 配置受保护的 `app-release-signing` 环境和环境密钥 `APP_UPDATE_SIGNING_KEY_B64`。从默认分支历史中的受保护版本标签运行 **Signed application release**；标签、`package.json` 和依赖锁文件中的版本需一致。首次发布保留 `policy: manual`，用清单中 `from_versions` 指定的真实版本实测切换和回退，确认只改应用与可回退的数据库状态后，再为适用升级路径签发 `automatic` 包。官方公钥随可信源码包一起交付，并公开指纹。测试演练用的标签和密钥不能作为生产发行使用。
 
 ## 10. 运行维护与故障定位
 
@@ -503,4 +503,4 @@ df -i /var/lib/mail-aggregator /home/mailuser/Maildir /var/log
 - [ ] 应用备份已校验，Maildir 已有独立的验证过的备份；至少完成一次隔离恢复演练。
 - [ ] GitHub 检查能显示结果或明确报错。v0.2.2 保持「仅检查」，不启用面板自动安装。
 
-v0.2.2 在隔离 Alpine 3.24.4 x86_64、Node.js 24、OpenRC 环境通过手工升级和正式运行包验收，复核了原有登录、账号、凭据及 Dovecot 邮件读取。详见[v0.2.2 发布页](https://github.com/GGgood-svg/mail-aggregator/releases/tag/v0.2.2)与[测试说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.2/TESTING.md)。公网代理和真实邮箱授权请在自己的环境另行验证。运维细节见正式版的[项目说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.2/README.md)、[Maildir 备份指南](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.2/MAILDIR_BACKUP.md)和[双重验证指南](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.2/TOTP_SECURITY.md)。
+v0.2.2 在隔离 Alpine 3.24.4 x86_64、Node.js 24、OpenRC 环境通过手工升级和正式运行包验收，复核了原有登录、账号、凭据及 Dovecot 邮件读取。详见[v0.2.2 发布页](https://github.com/GGgood-svg/mail-aggregator/releases/tag/v0.2.2)与[测试说明](https://github.com/GGgood-svg/mail-aggregator/blob/main/TESTING.md)。公网代理和真实邮箱授权请在自己的环境另行验证。运维细节见正式版的[项目说明](https://github.com/GGgood-svg/mail-aggregator/blob/main/README.md)、[Maildir 备份指南](https://github.com/GGgood-svg/mail-aggregator/blob/main/MAILDIR_BACKUP.md)和[双重验证指南](https://github.com/GGgood-svg/mail-aggregator/blob/main/TOTP_SECURITY.md)。
