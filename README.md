@@ -48,7 +48,7 @@ Mail Aggregator 管理同步，不取代 Dovecot。邮件本体保存在 Maildir
 
 ### 获取正式版源码
 
-从 [GitHub Releases](https://github.com/GGgood-svg/mail-aggregator/releases/latest) 选择版本并下载 **Source code (tar.gz)**。在服务器上直接下载、解压的可复制命令，以及电脑中转、已有实例升级、备份和恢复步骤，见[完整部署教程](./DEPLOYMENT.md)。用于签名更新的 Alpine 运行包不包含首次安装向导。
+当前正式版是 [v0.2.2](https://github.com/GGgood-svg/mail-aggregator/releases/tag/v0.2.2)。从发布页下载 **Source code (tar.gz)**，不要把签名更新运行包当作首次安装包。在服务器上直接下载、解压的可复制命令，以及电脑中转、已有实例升级、备份和恢复步骤，见[完整部署教程](./DEPLOYMENT.md)。
 
 ### 网页安装向导（全新 Linux 主机）
 
@@ -114,7 +114,7 @@ rc-service mail-aggregator status
 
 ### 应用更新
 
-主管理员可在「设置 → 应用更新」检查 GitHub Releases，默认每天检查正式版。Alpine 3.24 x86_64 / Node.js 24 / OpenRC 从 v0.2.1 起通过可信源码新装或手工升级会自动固定缺失的官方公钥；管理员另行启用本机安装后，可以设置维护时段或立即安装。详见[部署、更新与回退说明](./APP_UPDATES.md)。
+主管理员可在「设置 → 应用更新」检查 GitHub Releases，默认每天检查正式版。Alpine 3.24 x86_64 / Node.js 24 / OpenRC 从 v0.2.2 起通过可信源码新装或手工升级会自动固定缺失的官方公钥；v0.2.2 的发布清单仍要求手工安装，面板默认只检查。管理员另行启用本机安装后，可以设置维护时段或立即安装。详见[部署、更新与回退说明](./APP_UPDATES.md)。
 
 主管理员可在「个人安全」开启双重验证。使用前请查看[恢复码与本机接管指引](./TOTP_SECURITY.md)。
 

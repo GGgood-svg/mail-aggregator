@@ -48,7 +48,7 @@ Mail Aggregator manages synchronization; it does not replace Dovecot. Message da
 
 ### Download the release source
 
-Select a version on [GitHub Releases](https://github.com/GGgood-svg/mail-aggregator/releases/latest) and download **Source code (tar.gz)**. The [complete deployment guide (Simplified Chinese)](./DEPLOYMENT.md) has copyable commands for downloading directly on the server or transferring the archive from another computer, plus upgrade, backup, and restore instructions. The signed Alpine update bundle does not include the first-time installation wizard.
+The current stable release is [v0.2.2](https://github.com/GGgood-svg/mail-aggregator/releases/tag/v0.2.2). Download **Source code (tar.gz)** from that release page. Do not use the signed Alpine update bundle as the first-install package. The [complete deployment guide (Simplified Chinese)](./DEPLOYMENT.md) has copyable commands for downloading directly on the server or transferring the archive from another computer, plus upgrade, backup, and restore instructions.
 
 ### Web installation wizard (fresh Linux host)
 
@@ -109,7 +109,7 @@ Two-step verification does not encrypt HTTP. Use HTTPS or SSH forwarding for aut
 
 ### Application updates
 
-The primary administrator can check GitHub releases under **Settings → Application updates**. Stable daily checks are on by default. Starting with v0.2.1, the trusted source installer automatically pins the bundled official release key on eligible Alpine hosts that do not already have a key. Signed installation still requires host opt-in. See [setup, upgrade, and rollback](./APP_UPDATES.md).
+The primary administrator can check GitHub releases under **Settings → Application updates**. Stable daily checks are on by default. Starting with v0.2.2, the trusted source installer automatically pins the bundled official release key on eligible Alpine hosts that do not already have a key. The v0.2.2 release still uses manual installation by default, so the panel only checks until the administrator enables host-side installation. See [setup, upgrade, and rollback](./APP_UPDATES.md).
 
 The primary administrator can enable two-step verification under **Personal security**. See the [recovery codes and console recovery guide](./TOTP_SECURITY.md) (Chinese).
 
