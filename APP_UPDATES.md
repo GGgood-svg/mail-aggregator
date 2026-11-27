@@ -12,8 +12,8 @@
 
 安装功能首版只支持 **Alpine 3.24 x86_64、Node.js 24、OpenRC**。Debian、Ubuntu 和其他环境提供更新检查与发布说明。这里的应用包不更新 Dovecot、imapsync 或 Maildir。需要切换 Node、Dovecot、系统配置或做人工迁移的发布仍用手工流程。
 
-1. 从官方 GitHub 仓库的可信版本标签取得 v0.2.1 或更高版本的源码包。终端安装和网页安装都随包固定官方 Ed25519 公钥；安装器会打印 SPKI SHA-256 指纹 `b50fa164d2e958748f0df1efbe273c68373a7054ee361b127464a6d545db2ae4`。已有公钥会保留。首次安装也可用 `--trust-update-key /path/to/trusted-update-public.pem` 显式固定另一个已核实的公钥。
-2. v0.2.0 等已有安装在维护时段备份，确认所有任务结束，再用可信新版源码手动升级一次。保留源码包，便于需要时恢复。
+1. 从官方 GitHub 仓库的可信版本标签取得 v0.2.2 或更高版本的源码包。终端安装和网页安装都随包固定官方 Ed25519 公钥；安装器会打印 SPKI SHA-256 指纹 `b50fa164d2e958748f0df1efbe273c68373a7054ee361b127464a6d545db2ae4`。已有公钥会保留。首次安装也可用 `--trust-update-key /path/to/trusted-update-public.pem` 显式固定另一个已核实的公钥。
+2. v0.2.0、v0.2.1 等已有安装在维护时段备份，确认所有任务结束，再用可信新版源码手动升级到 v0.2.2。保留源码包，便于需要时恢复。
 
 ```sh
 sudo sh ./scripts/install.sh --app-only
@@ -52,7 +52,7 @@ sudo sh ./scripts/install.sh --recover-application
 
 ## 发布维护者
 
-在 GitHub 设置受保护的 `app-release-signing` 环境，限制默认分支、设置审批人和环境密钥 `APP_UPDATE_SIGNING_KEY_B64`（Ed25519 私钥 PEM 的 Base64）。用受保护的、不可重用的版本标签。标签必须在默认分支历史中，`package.json`、lockfile 和标签版本必须一致。正式版用 `v0.2.0`，预览版可用 `v0.2.0-beta`、`v0.2.0-beta.1`、`v0.2.0-rc` 或 `v0.2.0-rc.1`。引导版本的可信源码包包含公钥，同时在说明中发布指纹。
+在 GitHub 设置受保护的 `app-release-signing` 环境，限制默认分支、设置审批人和环境密钥 `APP_UPDATE_SIGNING_KEY_B64`（Ed25519 私钥 PEM 的 Base64）。用受保护的、不可重用的版本标签。标签必须在默认分支历史中，`package.json`、lockfile 和标签版本必须一致。正式版用 `v0.2.2`，预览版可用 `v0.2.2-beta`、`v0.2.2-beta.1`、`v0.2.2-rc` 或 `v0.2.2-rc.1`。引导版本的可信源码包包含公钥，同时在说明中发布指纹。
 
 在默认分支手动运行 **Signed application release**。工作流从标签运行测试、在 Alpine 3.24 x86_64 版本环境编译依赖和打包，后续受保护作业校验产物后签发。`policy` 默认为 `manual`。只有保持宿主和数据文件格式兼容、并用来自 `from_versions` 的准确旧版本在真实 OpenRC 上完成成功切换与故障回退后，才选 `automatic`。SQLite 内的可回退迁移允许自动升级；修改凭据文件、Maildir、外部服务或宿主配置的迁移应标为 `manual`。发布后不要换包或重指标签；修复请发布新版本。
 

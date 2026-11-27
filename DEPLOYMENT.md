@@ -2,7 +2,19 @@
 
 **从 GitHub 下载正式版，到首次同步、手工升级和备份恢复。** 主线使用已验收的 **Alpine Linux 3.24 x86_64、Node.js 24、OpenRC、Dovecot 2.4**。空机看第 2 节；已有 Dovecot 或旧版 Mail Aggregator 看第 5 节；Debian、Ubuntu 看第 6 节。
 
-本文以 2026-11-26 已公开的 [v0.2.0 正式版](https://github.com/GGgood-svg/mail-aggregator/releases/tag/v0.2.0) 为准。服务器可以直接从 GitHub 下载源码，无需先下载到电脑再上传。**v0.2.0 采用手工安装**；面板「设置 → 应用更新」保持「仅检查」，渠道选「正式版」。
+本文以 2026-11-27 已公开的 [v0.2.2 正式版](https://github.com/GGgood-svg/mail-aggregator/releases/tag/v0.2.2) 为准。服务器可以直接从 GitHub 下载源码，无需先下载到电脑再上传。**v0.2.2 采用手工安装**；面板「设置 → 应用更新」默认保持「仅检查」，渠道选「正式版」。
+
+## 0. 先选安装路径
+
+| 你的服务器状态 | 使用的入口 | 结果 |
+| --- | --- | --- |
+| 没有 Dovecot、没有 Mail Aggregator | 第 2.2 节下载后运行 `sh scripts/install-web.sh --check && sh scripts/install-web.sh` | 网页向导自动准备依赖，设置管理员、监听地址、端口和安全档位 |
+| 不想打开临时网页向导 | 第 2.3 节运行 `sh scripts/install.sh --quick` 或 `--custom` | 终端完成安装，Web 首次打开时创建第一个主管理员 |
+| 已有 Dovecot 或已装旧版 Mail Aggregator | 第 5 节运行 `sh scripts/install.sh --app-only` | 只更新应用，保留 Dovecot、凭据、账号和 Maildir |
+| 需要恢复应用数据库 | 第 8 节的校验和恢复命令 | 先预检，确认后再停 Web；恢复后仍需手动启动并核对页面 |
+| 需要删除应用 | 第 10 节的普通卸载或网页「彻底卸载」 | 默认保留 Dovecot；删除 Dovecot 必须另行勾选并输入确认词 |
+
+安装器不把网页向导用于接管已有实例。看到「已有应用或 Dovecot」时停止当前向导，改走第 5 节。
 
 ## 1. 安装前准备
 
@@ -40,27 +52,29 @@ apk update
 apk policy nodejs npm dovecot
 ```
 
-### 2.2 获取 v0.2.0 正式版源码（二选一）
+### 2.2 获取 v0.2.2 正式版源码（二选一）
 
-**方式 A：服务器直接从 GitHub 下载（推荐）。** 在服务器的 root 终端复制整段。网址固定到 `v0.2.0` 标签，不需要 GitHub 登录，也不用装 Git。命令会创建一个独立目录，下载成功且解出安装脚本后才打印源码路径：
+**方式 A：服务器直接从 GitHub 下载（推荐）。** 在服务器的 root 终端复制整段。网址固定到 `v0.2.2` 标签，不需要 GitHub 登录，也不用装 Git。命令会创建一个独立目录，下载成功且解出安装脚本后才打印源码路径：
 
 ```sh
-install_dir=$(mktemp -d /root/mail-aggregator-v020.XXXXXX) &&
+install_dir=$(mktemp -d /root/mail-aggregator-v022.XXXXXX) &&
   wget -O "$install_dir/source.tar.gz" \
-    'https://github.com/GGgood-svg/mail-aggregator/archive/refs/tags/v0.2.0.tar.gz' &&
+    'https://github.com/GGgood-svg/mail-aggregator/archive/refs/tags/v0.2.2.tar.gz' &&
   tar -xzf "$install_dir/source.tar.gz" -C "$install_dir" &&
-  cd "$install_dir/mail-aggregator-0.2.0" &&
+  cd "$install_dir/mail-aggregator-0.2.2" &&
   test -f scripts/install.sh && test -f scripts/install-web.sh && pwd
 ```
 
-这是发布页里的 **Source code (tar.gz)**。发布附件 `mail-aggregator-alpine-3.24-x64-node24.tar.gz` 是带依赖的签名更新运行包，不含新装向导。下载方法和面板里的自动更新是两回事。
+这是发布页里的 **Source code (tar.gz)**。发布附件 `mail-aggregator-alpine-3.24-x64-node24.tar.gz` 是带依赖的签名更新运行包，不含新装向导。源码包用于首次安装和手工升级，运行包只在满足平台、签名和 `from_versions` 条件时由更新器使用。
 
-**方式 B：服务器无法直连下载时，由电脑上传。** 在能访问 GitHub 的电脑上，从 [v0.2.0 发布页](https://github.com/GGgood-svg/mail-aggregator/releases/tag/v0.2.0) 下载 **Source code (tar.gz)**。以下为 Windows PowerShell 示例；把浏览器下载的文件保存在「下载」目录，文件名若不同，先改为 `mail-aggregator-0.2.0.tar.gz`。记下第一条输出的 SHA-256，再把文件上传到 SSH 用户家目录：
+**方式 B：服务器无法直连下载时，由电脑上传。** 在能访问 GitHub 的电脑上，从 [v0.2.2 发布页](https://github.com/GGgood-svg/mail-aggregator/releases/tag/v0.2.2) 下载 **Source code (tar.gz)**。以下为 Windows PowerShell 示例；把浏览器下载的文件保存在「下载」目录，文件名若不同，先改为 `mail-aggregator-0.2.2.tar.gz`。记下第一条输出的 SHA-256，再把文件上传到 SSH 用户家目录：
 
 ```powershell
 Set-Location (Join-Path $env:USERPROFILE 'Downloads')
-$SourceArchive = 'mail-aggregator-0.2.0.tar.gz'
+$SourceArchive = 'mail-aggregator-0.2.2.tar.gz'
 $DeploySsh = 'deploy@server.example.com'
+if (-not (Test-Path -LiteralPath $SourceArchive)) { throw "找不到 $SourceArchive，请先从 v0.2.2 发布页下载 Source code (tar.gz)。" }
+if ((Get-Item -LiteralPath $SourceArchive).Length -le 0) { throw "$SourceArchive 是空文件。" }
 (Get-FileHash -LiteralPath $SourceArchive -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
 scp $SourceArchive "${DeploySsh}:./"
 ```
@@ -68,13 +82,14 @@ scp $SourceArchive "${DeploySsh}:./"
 回到服务器 root 终端。把 `/home/deploy` 换成上传用户实际的家目录（用 root 上传时是 `/root`），把 `expected` 换成电脑上输出的完整 SHA-256。校验通过才解包，打印的路径是后续安装和升级使用的源码目录：
 
 ```sh
-archive=/home/deploy/mail-aggregator-0.2.0.tar.gz
+archive=/home/deploy/mail-aggregator-0.2.2.tar.gz
 expected='替换为电脑上显示的SHA256'
-install_dir=$(mktemp -d /root/mail-aggregator-v020.XXXXXX) &&
+test -f "$archive" || { echo "找不到上传的归档: $archive" >&2; exit 1; }
+install_dir=$(mktemp -d /root/mail-aggregator-v022.XXXXXX) &&
   cp "$archive" "$install_dir/source.tar.gz" &&
   printf '%s  %s\n' "$expected" "$install_dir/source.tar.gz" | sha256sum -c - &&
   tar -xzf "$install_dir/source.tar.gz" -C "$install_dir" &&
-  cd "$install_dir/mail-aggregator-0.2.0" &&
+  cd "$install_dir/mail-aggregator-0.2.2" &&
   test -f scripts/install.sh && test -f scripts/install-web.sh && pwd
 ```
 
@@ -220,7 +235,7 @@ https://mail.example.com/api/oauth/callback/microsoft
 
 1. 确认现有 IMAP 服务、用户和目录可用。使用默认用户时，可运行 `doveadm user mailuser`；自定义用户要替换名称。记录现有 Web 入口、运行配置、应用数据目录和 Dovecot 邮件位置。
 2. 选维护时段，在账号页用「暂停定时同步」暂停相应账号（旧版按其界面暂停调度），并告知其他用户暂缓创建任务。等同步、连接测试、邮件规则和备份恢复任务结束。备份应用和邮件，检查能读取，再留一份服务器或数据卷快照。旧版若没有可用的已安装备份脚本，从旧版 Web 导出应用备份，另做整机或数据卷快照。
-3. 按第 2.2 节从 GitHub 下载 v0.2.0 或上传已校验的源码包。留在第 2.2 节打印的源码目录，运行下面的升级命令；不启动全新安装向导。此前没有 Web、但已有 Dovecot 的服务器也用这一模式，随后在设置中填入现有本地邮箱密码并测试。
+3. 按第 2.2 节从 GitHub 下载 v0.2.2 或上传已校验的源码包。留在第 2.2 节打印的源码目录，运行下面的升级命令；不启动全新安装向导。此前没有 Web、但已有 Dovecot 的服务器也用这一模式，随后在设置中填入现有本地邮箱密码并测试。
 
    ```sh
    sh scripts/install.sh --app-only
@@ -386,7 +401,7 @@ node /opt/mail-aggregator/server/cli-backup-pair.js rehearse-account \
 
 ## 9. GitHub 更新：先检查，满足条件后再启用安装
 
-更新源固定为 [GGgood-svg/mail-aggregator 的 GitHub Releases](https://github.com/GGgood-svg/mail-aggregator/releases)。由主管理员进入「设置 → 应用更新」。**v0.2.0 的签名清单为 `manual`，面板不会安装这个版本。** 全新安装走第 2 节，已有实例升级走第 5 节。
+更新源固定为 [GGgood-svg/mail-aggregator 的 GitHub Releases](https://github.com/GGgood-svg/mail-aggregator/releases)。由主管理员进入「设置 → 应用更新」。**v0.2.2 的签名清单为 `manual`，面板不会安装这个版本。** 全新安装走第 2 节，已有实例升级走第 5 节。
 
 | 设置 | 行为 |
 | --- | --- |
@@ -399,9 +414,9 @@ GitHub 超时或限流时会保留上次结果，并显示本次检查失败。�
 
 ### 9.1 后续版本满足条件时，再开启本机安装能力
 
-此流程不适用于安装 v0.2.0。以后发布了明确支持从当前版本自动升级的签名包，再按此流程操作。本段限 **Alpine 3.24 x86_64、Node.js 24、OpenRC**。至少准备两个可信签名版本，在隔离服务器上演练一次真实升级、一次故障自动回退。确认发布页面候选适用于当前版本、平台与 Node ABI。验包信任从已验证的公钥开始；不要直接拿候选附件里随包提供的公钥作为信任来源。
+此流程不适用于安装 v0.2.2。以后发布了明确支持从当前版本自动升级的签名包，再按此流程操作。本段限 **Alpine 3.24 x86_64、Node.js 24、OpenRC**。至少准备两个可信签名版本，在隔离服务器上演练一次真实升级、一次故障自动回退。确认发布页面候选适用于当前版本、平台与 Node ABI。验包信任从已验证的公钥开始；不要直接拿候选附件里随包提供的公钥作为信任来源。
 
-1. 从官方 GitHub 仓库下载可信的 v0.2.1 或更高版本源码包。支持本机更新的服务器新装时会自动固定官方公钥；未固定公钥的 v0.2.0 安装需要手动升级一次。
+1. 从官方 GitHub 仓库下载可信的 v0.2.2 或更高版本源码包。支持本机更新的服务器新装时会自动固定官方公钥；未固定公钥的 v0.2.0 或 v0.2.1 安装需要手动升级一次。
 2. 在维护时段完成备份、等待任务结束，从可信源码目录运行。安装器把缺失的公钥固定在 `/etc/mail-aggregator/update-public.pem`，并打印它的指纹（见[应用更新说明](./APP_UPDATES.md)）。已有公钥会保留。
 
    ```sh
@@ -436,7 +451,7 @@ rc-service mail-aggregator-updater stop && \
 
 ### 9.3 仓库维护者：让正式自动更新可用
 
-参照 [应用更新发布说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.0/APP_UPDATES.md) 配置受保护的 `app-release-signing` 环境和环境密钥 `APP_UPDATE_SIGNING_KEY_B64`。从默认分支历史中的受保护版本标签运行 **Signed application release**；标签、`package.json` 和依赖锁文件中的版本需一致。首次发布保留 `policy: manual`，用清单中 `from_versions` 指定的真实版本实测切换和回退，确认只改应用与可回退的数据库状态后，再为适用升级路径签发 `automatic` 包。官方公钥随可信源码包一起交付，并公开指纹。测试演练用的标签和密钥不能作为生产发行使用。
+参照 [应用更新发布说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.2/APP_UPDATES.md) 配置受保护的 `app-release-signing` 环境和环境密钥 `APP_UPDATE_SIGNING_KEY_B64`。从默认分支历史中的受保护版本标签运行 **Signed application release**；标签、`package.json` 和依赖锁文件中的版本需一致。首次发布保留 `policy: manual`，用清单中 `from_versions` 指定的真实版本实测切换和回退，确认只改应用与可回退的数据库状态后，再为适用升级路径签发 `automatic` 包。官方公钥随可信源码包一起交付，并公开指纹。测试演练用的标签和密钥不能作为生产发行使用。
 
 ## 10. 运行维护与故障定位
 
@@ -462,7 +477,7 @@ tail -n 80 /var/log/mail-aggregator-updater.log
 | HTTPS 打开是 `502` 或反复跳转 | Caddy 的目标端口、应用监听、本机代理信任、HTTPS 配置、DNS 与证书；查看 Caddy 和 Web 各自的日志。 |
 | 测试来源成功，但没有本地邮件 | 目标 Dovecot 用户及密码、实际目录映射、同步任务历史、调度开关；分别核对本地 IMAP 和邮件页。 |
 | 同步或更新被推迟 | 看账号和更新页的受阻原因与重试时间；核对应用、邮件、日志、备份各卷，既看空间也看 inode，确认独立卷有挂载且能写入。 |
-| 页面显示 v0.2.0，但不能安装 | v0.2.0 只支持手工安装。按第 5 节升级，不需要打开本机自动安装开关。 |
+| 页面显示 v0.2.2，但不能安装 | v0.2.2 只支持手工安装。按第 5 节升级，不需要打开本机自动安装开关。 |
 | 旧任务或备份恢复尚未结束 | 保持服务和状态文件，检查任务详情及日志；等完成后再做切换、重启或卸载。 |
 
 容量检查可在服务器运行：
@@ -486,6 +501,6 @@ df -i /var/lib/mail-aggregator /home/mailuser/Maildir /var/log
 - [ ] 主管理员能重新登录；启用双重验证时，已单独保管恢复码。
 - [ ] 测试邮箱两端连接成功，确认同步影响，实际同步一轮并打开邮件正文；任务历史与账号结果一致。
 - [ ] 应用备份已校验，Maildir 已有独立的验证过的备份；至少完成一次隔离恢复演练。
-- [ ] GitHub 检查能显示结果或明确报错。v0.2.0 保持「仅检查」，不启用面板自动安装。
+- [ ] GitHub 检查能显示结果或明确报错。v0.2.2 保持「仅检查」，不启用面板自动安装。
 
-v0.2.0 在隔离 Alpine 3.24.4 x86_64、Node.js 24、OpenRC 环境通过手工升级和正式运行包验收，复核了原有登录、账号、凭据及 Dovecot 邮件读取。详见[v0.2.0 发布页](https://github.com/GGgood-svg/mail-aggregator/releases/tag/v0.2.0)与[测试说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.0/TESTING.md)。公网代理和真实邮箱授权请在自己的环境另行验证。运维细节见正式版的[项目说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.0/README.md)、[Maildir 备份指南](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.0/MAILDIR_BACKUP.md)和[双重验证指南](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.0/TOTP_SECURITY.md)。
+v0.2.2 在隔离 Alpine 3.24.4 x86_64、Node.js 24、OpenRC 环境通过手工升级和正式运行包验收，复核了原有登录、账号、凭据及 Dovecot 邮件读取。详见[v0.2.2 发布页](https://github.com/GGgood-svg/mail-aggregator/releases/tag/v0.2.2)与[测试说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.2/TESTING.md)。公网代理和真实邮箱授权请在自己的环境另行验证。运维细节见正式版的[项目说明](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.2/README.md)、[Maildir 备份指南](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.2/MAILDIR_BACKUP.md)和[双重验证指南](https://github.com/GGgood-svg/mail-aggregator/blob/v0.2.2/TOTP_SECURITY.md)。
